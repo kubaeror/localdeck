@@ -105,8 +105,12 @@ export function isIamCode(caught: unknown, ...codes: readonly string[]): boolean
   return codes.some((candidate) => canonicalCode(candidate) === code);
 }
 
-/** Annotates a failure that happened after an earlier step already succeeded. */
-export function annotateIamError(caught: unknown, context: string): ApiClientError {
-  const apiError = toApiError(caught);
-  return new ApiClientError({ ...apiError, message: `${context} ${apiError.message}` });
-}
+/**
+ * IAM keeps at most five versions of a managed policy. `DeletePolicyVersion`
+ * is not whitelisted in LocalDeck yet, so the console explains the state and
+ * the AWS CLI command that recovers it instead of failing with a raw limit.
+ */
+export const POLICY_VERSION_LIMIT_MESSAGE =
+  'IAM keeps at most five versions per managed policy, and this policy already has five. ' +
+  'Open the Versions tab and delete an old, non-default version, then save again. ' +
+  '(The AWS CLI equivalent is: aws iam delete-policy-version --policy-arn <arn> --version-id <id>.)';

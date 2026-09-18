@@ -103,6 +103,24 @@ export function ListPage({ descriptor }: ServicePageProps): ReactElement {
         columns={columns}
         getRowId={(bucket) => bucket.name}
         reloadToken={reloadToken}
+        preferencesId="s3-buckets"
+        pageSizeOptions={[
+          { value: 10, label: '10 buckets' },
+          { value: 25, label: '25 buckets' },
+          { value: 50, label: '50 buckets' },
+        ]}
+        visibleContentPreference={{
+          title: 'Visible columns',
+          options: [
+            {
+              label: 'Bucket columns',
+              options: [
+                { id: 'name', label: 'Name' },
+                { id: 'creationDate', label: 'Creation date' },
+              ],
+            },
+          ],
+        }}
         fetcher={({ signal }) => listBuckets({ ...(signal === undefined ? {} : { signal }) })}
         filtering={{
           text: filteringText,

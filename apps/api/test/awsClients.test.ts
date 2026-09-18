@@ -2,6 +2,14 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import {
+  buildAwsClientConfig,
+  createAwsClientInstance,
+  destroyAwsClients,
+  getOrCreateAwsClient,
+  sdkAbortSignal,
+  type AwsSdkClient,
+} from '../src/lib/awsClients.js';
 
 /**
  * Guard for the "one client factory" rule: no module may construct an AWS SDK
@@ -95,5 +103,68 @@ describe('aws client factory', () => {
     }
 
     expect(offenders).toEqual([]);
+  });
+
+  it('builds NodeHttpHandler options with throwOnRequestTimeout (API-002)', () => {
+    const config = buildAwsClientConfig({ connectionTimeoutMs: 2345, requestTimeoutMs: 1234 });
+    expect(config.requestHandler).toEqual({
+      connectionTimeout: 2345,
+      requestTimeout: 1234,
+      throwOnRequestTimeout: true,
+    });
+
+    // The default connection also has the guard enabled; the behavioral proof
+    // lives in timeouts.test.ts (a hung LocalStack answers 504, not a hang).
+    expect(buildAwsClientConfig().requestHandler.throwOnRequestTimeout).toBe(true);
+  });
+
+  it('tracks every instance and clears the memo cache on destroy', () => {
+    let destroyed = 0;
+    class FakeClient implements AwsSdkClient {
+      static instances = 0;
+
+      constructor(_config: unknown) {
+        FakeClient.instances += 1;
+      }
+
+      async send(): Promise<unknown> {
+        return {};
+      }
+
+      destroy(): void {
+        destroyed += 1;
+      }
+    }
+
+    const memoized = getOrCreateAwsClient('lifecycle-key', () =>
+      createAwsClientInstance(FakeClient),
+    );
+    expect(
+      getOrCreateAwsClient('lifecycle-key', () => {
+        throw new Error('the memoized client must be reused');
+      }),
+    ).toBe(memoized);
+
+    destroyAwsClients();
+    expect(destroyed).toBeGreaterThanOrEqual(1);
+    // After destroy the same key builds a fresh, tracked instance.
+    const rebuilt = getOrCreateAwsClient('lifecycle-key', () =>
+      createAwsClientInstance(FakeClient),
+    );
+    expect(rebuilt).not.toBe(memoized);
+    destroyAwsClients();
+    expect(destroyed).toBeGreaterThanOrEqual(2);
+  });
+
+  it('combines caller aborts with the request timeout signal', () => {
+    const controller = new AbortController();
+    const combined = sdkAbortSignal(controller.signal, 60_000);
+    expect(combined.aborted).toBe(false);
+
+    controller.abort();
+    expect(combined.aborted).toBe(true);
+
+    const timedOut = sdkAbortSignal(undefined, 10);
+    expect(timedOut.aborted).toBe(false);
   });
 });

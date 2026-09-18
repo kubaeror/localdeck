@@ -1,5 +1,5 @@
 import { eksKubeconfigPath, type AwsTag, type Paginated } from '@localdeck/shared';
-import { ApiClientError, apiUrl, getText } from '../../lib/apiClient';
+import { ApiClientError, apiUrl, getText, toApiError } from '../../lib/apiClient';
 import { callServiceOperation } from '../../lib/serviceOperations';
 import type { ResourceStatus } from '../../lib/format';
 import { listAllInstances, type Ec2Instance } from '../ec2/api';
@@ -99,21 +99,50 @@ function toIso(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
-/** AWS tag maps (`{ key: value }`) become the console's `AwsTag[]`. */
+/**
+ * AWS tag maps (`{ key: value }`) become the console's `AwsTag[]`. A key the
+ * service reports with surrounding whitespace is trimmed, because that is how
+ * IAM/EKS store it.
+ */
 export function toAwsTags(tags: Readonly<Record<string, string>> | undefined): readonly AwsTag[] {
   return Object.entries(tags ?? {})
-    .map(([Key, Value]) => ({ Key, Value }))
+    .map(([Key, Value]) => ({ Key: Key.trim(), Value }))
+    .filter((tag) => tag.Key.length > 0)
     .sort((left, right) => left.Key.localeCompare(right.Key, 'en'));
+}
+
+/**
+ * Normalizes a tag set before it is sent to the service: trims keys, drops
+ * rows without a key and keeps the last value for a repeated key. Call sites
+ * validate with `validateTags` first; this is the defensive boundary so an
+ * empty-key row can never reach `TagResource`/`CreateCluster`.
+ */
+export function normalizeTags(tags: readonly AwsTag[]): readonly AwsTag[] {
+  const byKey = new Map<string, string>();
+  for (const tag of tags) {
+    const key = tag.Key.trim();
+    if (key.length === 0) continue;
+    byKey.set(key, tag.Value);
+  }
+  return [...byKey].map(([Key, Value]) => ({ Key, Value }));
 }
 
 /** The reverse of {@link toAwsTags}, for TagResource and CreateCluster. */
 export function fromAwsTags(tags: readonly AwsTag[]): Record<string, string> {
   const record: Record<string, string> = {};
-  for (const tag of tags) {
-    if (tag.Key.trim().length === 0) continue;
+  for (const tag of normalizeTags(tags)) {
     record[tag.Key] = tag.Value;
   }
   return record;
+}
+
+/**
+ * True when the api error is EKS's "this resource is gone" code. Anything else
+ * (AccessDenied, a 5xx, throttling) must surface as an error instead of being
+ * swallowed into a false empty state.
+ */
+export function isResourceNotFound(caught: unknown): boolean {
+  return toApiError(caught).code === 'ResourceNotFoundException';
 }
 
 /**
@@ -136,7 +165,8 @@ export interface EksVpcConfig {
 
 export interface EksCluster {
   name: string;
-  arn: string;
+  /** Absent when LocalStack does not report an ARN; never fabricated. */
+  arn?: string;
   status: string;
   version: string;
   endpoint?: string;
@@ -188,9 +218,10 @@ export function toEksCluster(raw: RawCluster): EksCluster | null {
   const platformVersion = toStringValue(raw.platformVersion);
   const oidcIssuer = toStringValue(raw.identity?.oidc?.issuer);
   const serviceIpv4Cidr = toStringValue(raw.kubernetesNetworkConfig?.serviceIpv4Cidr);
+  const arn = toStringValue(raw.arn);
   return {
     name,
-    arn: toStringValue(raw.arn) ?? `arn:aws:eks:us-east-1:000000000000:cluster/${name}`,
+    ...(arn === undefined ? {} : { arn }),
     status: toStringValue(raw.status) ?? 'UNKNOWN',
     version: toStringValue(raw.version) ?? 'unknown',
     ...(endpoint === undefined ? {} : { endpoint }),
@@ -230,7 +261,8 @@ export interface EksNodegroupHealthIssue {
 
 export interface EksNodegroup {
   nodegroupName: string;
-  nodegroupArn: string;
+  /** Absent when LocalStack does not report an ARN; never fabricated. */
+  nodegroupArn?: string;
   clusterName: string;
   status: string;
   version?: string;
@@ -285,11 +317,10 @@ export function toEksNodegroup(raw: RawNodegroup): EksNodegroup | null {
   const amiType = toStringValue(raw.amiType);
   const diskSize = toNumber(raw.diskSize);
   const scaling = raw.scalingConfig ?? {};
+  const arn = toStringValue(raw.nodegroupArn);
   return {
     nodegroupName,
-    nodegroupArn:
-      toStringValue(raw.nodegroupArn) ??
-      `arn:aws:eks:us-east-1:000000000000:nodegroup/${raw.clusterName ?? 'cluster'}/${nodegroupName}`,
+    ...(arn === undefined ? {} : { nodegroupArn: arn }),
     clusterName: toStringValue(raw.clusterName) ?? '',
     status: toStringValue(raw.status) ?? 'UNKNOWN',
     ...(version === undefined ? {} : { version }),
@@ -338,7 +369,9 @@ export async function listClusterNames(signal?: AbortSignal): Promise<readonly s
 
 /**
  * The clusters list needs status, version and creation time, which only
- * DescribeCluster reports: one describe per cluster, in parallel.
+ * DescribeCluster reports: one describe per cluster, in parallel. A cluster
+ * deleted between the two calls is skipped; every other failure (AccessDenied,
+ * a 5xx, throttling) fails the page instead of rendering a false empty state.
  */
 export async function listClusterSummaries(signal?: AbortSignal): Promise<readonly EksCluster[]> {
   const names = await listClusterNames(signal);
@@ -346,10 +379,9 @@ export async function listClusterSummaries(signal?: AbortSignal): Promise<readon
     names.map(async (name): Promise<EksCluster | null> => {
       try {
         return await getCluster(name, signal);
-      } catch {
-        // A cluster deleted between ListClusters and DescribeCluster is skipped
-        // rather than failing the whole page.
-        return null;
+      } catch (caught) {
+        if (isResourceNotFound(caught)) return null;
+        throw caught;
       }
     }),
   );
@@ -501,8 +533,11 @@ export async function listNodegroups(
     names.map(async (name): Promise<EksNodegroup | null> => {
       try {
         return await getNodegroup(clusterName, name, signal);
-      } catch {
-        return null;
+      } catch (caught) {
+        // A node group deleted between the two calls is skipped; every other
+        // failure fails the tab instead of rendering "No node groups".
+        if (isResourceNotFound(caught)) return null;
+        throw caught;
       }
     }),
   );
@@ -648,20 +683,6 @@ export async function listNodegroupInstances(
 
 // ---------------------------------------------------------------- tags
 
-/** `ListTagsForResource`, keyed by the cluster or node group ARN. */
-export async function listTagsForResource(
-  resourceArn: string,
-  signal?: AbortSignal,
-): Promise<readonly AwsTag[]> {
-  const result = await callServiceOperation<{ tags?: Record<string, string> }>(
-    SERVICE_ID,
-    'ListTagsForResource',
-    { resourceArn },
-    signal,
-  );
-  return toAwsTags(result.tags);
-}
-
 /** `TagResource`. */
 export async function tagResource(resourceArn: string, tags: readonly AwsTag[]): Promise<void> {
   await callServiceOperation(SERVICE_ID, 'TagResource', {
@@ -709,9 +730,19 @@ export async function downloadKubeconfig(clusterName: string): Promise<void> {
   const { text, fileName } = await getText(kubeconfigPath(clusterName));
   const blob = new Blob([text], { type: 'application/yaml' });
   const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = fileName ?? kubeconfigFileName(clusterName);
-  anchor.click();
-  URL.revokeObjectURL(url);
+  try {
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = fileName ?? kubeconfigFileName(clusterName);
+    anchor.rel = 'noopener';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+  } finally {
+    // Firefox needs the URL to stay valid until the click has been handled;
+    // revoking it in the same tick can cancel the download.
+    window.setTimeout(() => {
+      URL.revokeObjectURL(url);
+    }, 0);
+  }
 }

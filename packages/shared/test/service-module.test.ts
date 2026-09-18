@@ -4,9 +4,7 @@ import {
   checkServiceModule,
   createServiceSpec,
   findService,
-  findTagValue,
   serviceOperationPath,
-  sortTags,
   type ServiceModule,
 } from '../src/index.js';
 
@@ -92,6 +90,34 @@ describe('checkServiceModule', () => {
       checkServiceModule('x', { descriptor: { id: 'a' }, spec: { descriptor: { id: 'a' } } }),
     ).toEqual([{ where: 'x', message: 'module.routes is missing' }]);
   });
+
+  it('enforces that mounted pages are declared as capabilities', () => {
+    const descriptor = findService('s3');
+    if (descriptor === undefined) throw new Error('s3 must be in the registry');
+
+    const mismatched = checkServiceModule('services/generic/index.ts', {
+      descriptor,
+      spec: createServiceSpec('s3', {
+        capabilities: { list: true, detail: true, create: false },
+      }),
+      routes: [
+        { path: '', title: 'Resources', page: 'list' },
+        { path: 'create', title: 'Create', page: 'create' },
+      ],
+    });
+    expect(mismatched.map((problem) => problem.message)).toContain(
+      'route "create" mounts the "create" page but module.spec.capabilities.create is false',
+    );
+
+    const malformed = checkServiceModule('services/broken/index.ts', {
+      descriptor,
+      spec: { descriptor, operations: [], capabilities: { list: true } },
+      routes: [],
+    });
+    const messages = malformed.map((problem) => problem.message).join('\n');
+    expect(messages).toContain('module.spec.capabilities.detail must be a boolean');
+    expect(messages).toContain('module.spec.capabilities.create must be a boolean');
+  });
 });
 
 describe('registry coverage of module contracts', () => {
@@ -101,24 +127,5 @@ describe('registry coverage of module contracts', () => {
         /^\/api\/services\/[a-z0-9-]+\/[A-Za-z0-9]+$/,
       );
     }
-  });
-});
-
-describe('AWS tags', () => {
-  const tags = [
-    { Key: 'Team', Value: 'platform' },
-    { Key: 'Env', Value: 'local' },
-  ];
-
-  it('looks tags up by key', () => {
-    expect(findTagValue(tags, 'Env')).toBe('local');
-    expect(findTagValue(tags, 'Missing')).toBeUndefined();
-    expect(findTagValue(undefined, 'Env')).toBeUndefined();
-  });
-
-  it('sorts tags without mutating the input', () => {
-    const sorted = sortTags(tags);
-    expect(sorted.map((tag) => tag.Key)).toEqual(['Env', 'Team']);
-    expect(tags[0]?.Key).toBe('Team');
   });
 });

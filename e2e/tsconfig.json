@@ -10,5 +10,5 @@
     "declarationMap": false,
     "allowSyntheticDefaultImports": true
   },
-  "include": ["playwright.config.ts", "tests", "scripts"]
+  "include": ["*.ts", "tests", "scripts"]
 }

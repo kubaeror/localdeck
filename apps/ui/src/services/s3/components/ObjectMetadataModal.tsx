@@ -34,22 +34,27 @@ export function ObjectMetadataModal({
   const [metadata, setMetadata] = useState<S3ObjectMetadata | null>(null);
   const [loading, setLoading] = useState(true);
   const [errorText, setErrorText] = useState<string | null>(null);
-  const requestId = useRef(0);
+  const abortRef = useRef<AbortController | null>(null);
 
   const load = useCallback(async (): Promise<void> => {
-    const id = requestId.current + 1;
-    requestId.current = id;
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     setLoading(true);
     setErrorText(null);
     try {
-      const result = await headObject({ bucket, key: entry.key });
-      if (requestId.current !== id) return;
+      const result = await headObject({
+        bucket,
+        key: entry.key,
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
       setMetadata(result);
     } catch (caught) {
-      if (requestId.current !== id) return;
+      if (controller.signal.aborted) return;
       setErrorText(toFriendlyS3Error(caught).message);
     } finally {
-      if (requestId.current === id) setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   }, [bucket, entry.key]);
 
@@ -58,7 +63,7 @@ export function ObjectMetadataModal({
     void load();
     return () => {
       // Invalidate the request if the modal closes while it is in flight.
-      requestId.current += 1;
+      abortRef.current?.abort();
     };
   }, [load]);
 
@@ -135,6 +140,7 @@ export function ObjectMetadataModal({
                 { label: 'ETag', value: <Box variant="code">{metadata.etag ?? '—'}</Box> },
                 { label: 'Content type', value: metadata.contentType ?? '—' },
                 { label: 'Content encoding', value: metadata.contentEncoding ?? '—' },
+                { label: 'Content disposition', value: metadata.contentDisposition ?? '—' },
                 { label: 'Cache control', value: metadata.cacheControl ?? '—' },
                 { label: 'Storage class', value: metadata.storageClass ?? 'STANDARD' },
                 { label: 'Version ID', value: metadata.versionId ?? '—' },

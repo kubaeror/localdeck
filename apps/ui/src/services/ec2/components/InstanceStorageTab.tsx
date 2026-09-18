@@ -1,4 +1,3 @@
-import type { ApiError } from '@localdeck/shared';
 import Alert from '@cloudscape-design/components/alert';
 import Badge from '@cloudscape-design/components/badge';
 import Box from '@cloudscape-design/components/box';
@@ -10,32 +9,21 @@ import Link from '@cloudscape-design/components/link';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import Table from '@cloudscape-design/components/table';
 import type { TableProps } from '@cloudscape-design/components/table';
-import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
+import { useCallback, useMemo, useState, type ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { StatusBadge } from '../../../components/StatusBadge';
 import { InfoTooltip } from '../../../components/InfoTooltip';
 import { useFlashbar } from '../../../hooks/useFlashbar';
-import { toApiError } from '../../../lib/apiClient';
-import type { StatusName } from '../../../lib/format';
 import { serviceConsolePath } from '../../paths';
 import { listInstanceVolumes, type Ec2Instance, type Ec2Volume } from '../api';
+import { useEc2Resource } from '../hooks';
+import { volumeStatusName } from '../status';
 import { AttachVolumeModal } from './AttachVolumeModal';
-
-/** Maps an EBS volume state onto the console's status vocabulary. */
-function volumeStatusName(state: string): StatusName {
-  switch (state) {
-    case 'in-use':
-    case 'creating':
-    case 'deleting':
-    case 'deleted':
-      return state;
-    default:
-      return 'available';
-  }
-}
 
 export interface InstanceStorageTabProps {
   instance: Ec2Instance;
+  /** Service descriptor id, so links do not hardcode `ec2` (EC2-D04). */
+  serviceId: string;
 }
 
 /**
@@ -45,146 +33,135 @@ export interface InstanceStorageTabProps {
  * LocalStack build answers `DetachVolume` with an internal error — the console
  * never turns an unsupported action into a raw 5xx.
  */
-export function InstanceStorageTab({ instance }: InstanceStorageTabProps): ReactElement {
+export function InstanceStorageTab({ instance, serviceId }: InstanceStorageTabProps): ReactElement {
   const navigate = useNavigate();
   const flashbar = useFlashbar();
-  const [volumes, setVolumes] = useState<readonly Ec2Volume[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<ApiError | null>(null);
   const [attachVisible, setAttachVisible] = useState(false);
-  const requestId = useRef(0);
 
-  const load = useCallback(async (): Promise<void> => {
-    const id = requestId.current + 1;
-    requestId.current = id;
-    setLoading(true);
-    try {
-      const result = await listInstanceVolumes(instance.instanceId);
-      if (requestId.current !== id) return;
-      setVolumes(result);
-      setError(null);
-    } catch (caught) {
-      if (requestId.current !== id) return;
-      setError(toApiError(caught));
-    } finally {
-      if (requestId.current === id) setLoading(false);
-    }
-  }, [instance.instanceId]);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- volume list fetch for the tab
-    void load();
-    return () => {
-      requestId.current += 1;
-    };
-  }, [load]);
+  const { instanceId, blockDevices, rootDeviceName } = instance;
+  const loader = useCallback(() => listInstanceVolumes(instanceId), [instanceId]);
+  const { data: volumes, loading, refreshing, error, reload } = useEc2Resource(loader);
 
   // The root volume is the one whose block device matches the instance's root
   // device name — from the instance description or from the attachment.
-  const rootVolumeId = instance.blockDevices.find(
-    (device) => device.deviceName === instance.rootDeviceName,
+  const rootVolumeId = blockDevices.find(
+    (device) => device.deviceName === rootDeviceName,
   )?.volumeId;
-  const isRootVolume = (volume: Ec2Volume): boolean =>
-    volume.volumeId === rootVolumeId ||
-    volume.attachments.some(
-      (attachment) =>
-        attachment.instanceId === instance.instanceId &&
-        attachment.device === instance.rootDeviceName,
-    );
+  const isRootVolume = useCallback(
+    (volume: Ec2Volume): boolean =>
+      volume.volumeId === rootVolumeId ||
+      volume.attachments.some(
+        (attachment) =>
+          attachment.instanceId === instanceId && attachment.device === rootDeviceName,
+      ),
+    [instanceId, rootDeviceName, rootVolumeId],
+  );
 
-  const columns: readonly TableProps.ColumnDefinition<Ec2Volume>[] = [
-    {
-      id: 'name',
-      header: 'Name',
-      isRowHeader: true,
-      cell: (volume) => (
-        <SpaceBetween direction="horizontal" size="xs">
-          <Link
-            href={`${serviceConsolePath('ec2')}/volumes/${encodeURIComponent(volume.volumeId)}`}
-            onFollow={(event) => {
-              event.preventDefault();
-              navigate(
-                `${serviceConsolePath('ec2')}/volumes/${encodeURIComponent(volume.volumeId)}`,
-              );
-            }}
-          >
-            {volume.name ?? volume.volumeId}
-          </Link>
-          {isRootVolume(volume) ? <Badge color="blue">Root device</Badge> : null}
-        </SpaceBetween>
-      ),
+  const volumePath = useCallback(
+    (volumeId: string): string =>
+      `${serviceConsolePath(serviceId)}/volumes/${encodeURIComponent(volumeId)}`,
+    [serviceId],
+  );
+
+  const openVolume = useCallback(
+    (volumeId: string) => {
+      navigate(volumePath(volumeId));
     },
-    {
-      id: 'volumeId',
-      header: 'Volume ID',
-      cell: (volume) => <Box variant="code">{volume.volumeId}</Box>,
-    },
-    {
-      id: 'device',
-      header: 'Device name',
-      cell: (volume) => {
-        const attachment = volume.attachments.find(
-          (entry) => entry.instanceId === instance.instanceId,
-        );
-        return attachment?.device ?? volume.attachments[0]?.device ?? '—';
+    [navigate, volumePath],
+  );
+
+  const columns = useMemo<readonly TableProps.ColumnDefinition<Ec2Volume>[]>(
+    () => [
+      {
+        id: 'name',
+        header: 'Name',
+        isRowHeader: true,
+        cell: (volume) => (
+          <SpaceBetween direction="horizontal" size="xs">
+            <Link
+              href={volumePath(volume.volumeId)}
+              onFollow={(event) => {
+                event.preventDefault();
+                openVolume(volume.volumeId);
+              }}
+            >
+              {volume.name ?? volume.volumeId}
+            </Link>
+            {isRootVolume(volume) ? <Badge color="blue">Root device</Badge> : null}
+          </SpaceBetween>
+        ),
       },
-    },
-    {
-      id: 'size',
-      header: 'Size',
-      cell: (volume) => `${volume.sizeGiB ?? '?'} GiB`,
-    },
-    {
-      id: 'type',
-      header: 'Volume type',
-      cell: (volume) => volume.volumeType ?? '—',
-    },
-    {
-      id: 'deleteOnTermination',
-      header: 'Delete on termination',
-      cell: (volume) => {
-        const attachment = volume.attachments.find(
-          (entry) => entry.instanceId === instance.instanceId,
-        );
-        if (attachment?.deleteOnTermination === undefined) return '—';
-        return attachment.deleteOnTermination ? 'Yes' : 'No';
+      {
+        id: 'volumeId',
+        header: 'Volume ID',
+        cell: (volume) => <Box variant="code">{volume.volumeId}</Box>,
       },
-    },
-    {
-      id: 'status',
-      header: 'Status',
-      cell: (volume) => <StatusBadge status={volumeStatusName(volume.state)} />,
-    },
-    {
-      id: 'actions',
-      header: 'Actions',
-      minWidth: '150px',
-      cell: (volume) => (
-        <ButtonDropdown
-          variant="icon"
-          ariaLabel={`Actions for ${volume.volumeId}`}
-          items={[
-            {
-              id: 'view',
-              text: 'View volume',
-            },
-            {
-              id: 'detach',
-              text: 'Detach volume',
-              disabled: true,
-            },
-          ]}
-          onItemClick={({ detail }) => {
-            if (detail.id === 'view') {
-              navigate(
-                `${serviceConsolePath('ec2')}/volumes/${encodeURIComponent(volume.volumeId)}`,
-              );
-            }
-          }}
-        />
-      ),
-    },
-  ];
+      {
+        id: 'device',
+        header: 'Device name',
+        cell: (volume) => {
+          const attachment = volume.attachments.find((entry) => entry.instanceId === instanceId);
+          return attachment?.device ?? volume.attachments[0]?.device ?? '—';
+        },
+      },
+      {
+        id: 'size',
+        header: 'Size',
+        cell: (volume) => `${volume.sizeGiB ?? '?'} GiB`,
+      },
+      {
+        id: 'type',
+        header: 'Volume type',
+        cell: (volume) => volume.volumeType ?? '—',
+      },
+      {
+        id: 'deleteOnTermination',
+        header: 'Delete on termination',
+        cell: (volume) => {
+          const attachment = volume.attachments.find((entry) => entry.instanceId === instanceId);
+          if (attachment?.deleteOnTermination === undefined) return '—';
+          return attachment.deleteOnTermination ? 'Yes' : 'No';
+        },
+      },
+      {
+        id: 'status',
+        header: 'Status',
+        cell: (volume) => <StatusBadge status={volumeStatusName(volume.state)} />,
+      },
+      {
+        id: 'actions',
+        header: 'Actions',
+        minWidth: '150px',
+        cell: (volume) => (
+          <InfoTooltip content="LocalStack answers DetachVolume with an internal error, so LocalDeck disables the action. Terminating the instance releases the volume.">
+            <ButtonDropdown
+              variant="icon"
+              ariaLabel={`Actions for ${volume.volumeId}`}
+              items={[
+                {
+                  id: 'view',
+                  text: 'View volume',
+                },
+                {
+                  id: 'detach',
+                  text: 'Detach volume',
+                  disabled: true,
+                },
+              ]}
+              onItemClick={({ detail }) => {
+                if (detail.id === 'view') {
+                  openVolume(volume.volumeId);
+                }
+              }}
+            />
+          </InfoTooltip>
+        ),
+      },
+    ],
+    [instanceId, isRootVolume, openVolume, volumePath],
+  );
+
+  const rows = volumes ?? [];
 
   return (
     <Container
@@ -195,9 +172,9 @@ export function InstanceStorageTab({ instance }: InstanceStorageTabProps): React
           actions={
             <SpaceBetween direction="horizontal" size="xs">
               <Button
-                loading={loading}
+                loading={loading || refreshing}
                 onClick={() => {
-                  void load();
+                  void reload();
                 }}
               >
                 Refresh
@@ -234,7 +211,7 @@ export function InstanceStorageTab({ instance }: InstanceStorageTabProps): React
             action={
               <Button
                 onClick={() => {
-                  void load();
+                  void reload();
                 }}
               >
                 Retry
@@ -249,7 +226,7 @@ export function InstanceStorageTab({ instance }: InstanceStorageTabProps): React
           variant="embedded"
           loading={loading}
           loadingText="Loading volumes"
-          items={[...volumes]}
+          items={[...rows]}
           columnDefinitions={columns}
           trackBy={(volume) => volume.volumeId}
           ariaLabels={{ tableLabel: 'Instance volumes' }}
@@ -272,7 +249,7 @@ export function InstanceStorageTab({ instance }: InstanceStorageTabProps): React
 
       {attachVisible ? (
         <AttachVolumeModal
-          instanceId={instance.instanceId}
+          instanceId={instanceId}
           onDismiss={() => {
             setAttachVisible(false);
           }}
@@ -281,9 +258,9 @@ export function InstanceStorageTab({ instance }: InstanceStorageTabProps): React
             flashbar.notify({
               type: 'success',
               header: 'Volume attached',
-              content: `The volume is now attached to ${instance.instanceId}.`,
+              content: `The volume is now attached to ${instanceId}.`,
             });
-            void load();
+            void reload();
           }}
         />
       ) : null}

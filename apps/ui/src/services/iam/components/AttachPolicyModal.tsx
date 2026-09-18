@@ -64,26 +64,37 @@ export function AttachPolicyModal({
   const attach = async (): Promise<void> => {
     setSubmitting(true);
     setSubmitError(null);
-    const failures: string[] = [];
+    const succeeded: string[] = [];
+    const failures: { arn: string; message: string }[] = [];
     for (const policyArn of selected) {
       try {
         await attachPolicy(entity, name, policyArn);
+        succeeded.push(policyArn);
       } catch (caught) {
-        failures.push(`${policyArn}: ${toFriendlyIamError(caught).message}`);
+        failures.push({ arn: policyArn, message: toFriendlyIamError(caught).message });
       }
     }
     setSubmitting(false);
 
+    // The candidates and the selection reflect the partial result: attached
+    // policies disappear from the picker, failed ones stay selected for retry.
+    setAttachedArns((previous) => [...(previous ?? []), ...succeeded]);
+    setSelected(failures.map((failure) => failure.arn));
+
     if (failures.length > 0) {
-      setSubmitError(`Some policies could not be attached. ${failures.join(' ')}`);
+      setSubmitError(
+        `Some policies could not be attached. ${failures
+          .map((failure) => `${failure.arn}: ${failure.message}`)
+          .join(' ')}`,
+      );
       onAttached();
       return;
     }
 
     flashbar.notify({
       type: 'success',
-      header: selected.length === 1 ? 'Policy attached' : 'Policies attached',
-      content: `The ${ENTITY_LABEL[entity]} ${name} now has ${selected.length} more attached ${selected.length === 1 ? 'policy' : 'policies'}.`,
+      header: succeeded.length === 1 ? 'Policy attached' : 'Policies attached',
+      content: `The ${ENTITY_LABEL[entity]} ${name} now has ${succeeded.length} more attached ${succeeded.length === 1 ? 'policy' : 'policies'}.`,
     });
     onAttached();
     onDismiss();

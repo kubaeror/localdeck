@@ -1,6 +1,5 @@
 import type { ApiError } from '@localdeck/shared';
 import { toApiError } from '../../lib/apiClient';
-import { SERVICE_ID } from './spec';
 
 /**
  * Turns the api's `ApiError` values into console wording for EKS, and points
@@ -122,10 +121,4 @@ export function toFriendlyEksError(
   fieldHint: EksErrorField = null,
 ): FriendlyEksError {
   return friendlyEksError(toApiError(caught), fieldHint);
-}
-
-/** True when the api error's service is EKS (defensive for logging/tests). */
-export function isEksError(caught: unknown): boolean {
-  const error = toApiError(caught);
-  return error.service === SERVICE_ID;
 }

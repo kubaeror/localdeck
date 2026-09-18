@@ -3,9 +3,9 @@
  * wizards validate against these before calling the api, so a typo becomes an
  * inline field error instead of a rejected request.
  *
- * Reference: IAM names are 1–64 characters for users, groups and roles; policy
- * names are 1–128 characters. All of them accept the same character set:
- * alphanumeric characters plus `+=,.@_-`.
+ * Reference: IAM names are 1–64 characters for users and roles, 1–128 for
+ * groups and policies. All of them accept the same character set: alphanumeric
+ * characters plus `+=,.@_-`.
  */
 
 const NAME_PATTERN = /^[\w+=,.@-]+$/;

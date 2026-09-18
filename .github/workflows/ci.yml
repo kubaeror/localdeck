@@ -21,6 +21,7 @@ concurrency:
 env:
   NODE_VERSION: '22'
   PNPM_VERSION: '10.34.5'
+  TURBO_TELEMETRY_DISABLED: '1'
 
 jobs:
   checks:
@@ -41,6 +42,14 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
+
+      - name: Restore the turbo cache
+        uses: actions/cache@v4
+        with:
+          path: .turbo
+          key: turbo-${{ runner.os }}-checks-${{ hashFiles('turbo.json', 'pnpm-lock.yaml') }}
+          restore-keys: |
+            turbo-${{ runner.os }}-checks-
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -66,6 +75,37 @@ jobs:
       - name: Build
         run: pnpm build
 
+  docker:
+    name: Docker image build (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: api
+            dockerfile: apps/api/Dockerfile
+          - image: ui
+            dockerfile: apps/ui/Dockerfile
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build gate only: a broken Dockerfile or nginx template must fail the PR,
+      # not the release tag. Release builds pass the real tag as APP_VERSION.
+      - name: Build the ${{ matrix.image }} image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: false
+          build-args: APP_VERSION=ci-${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.image }}-ci
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}-ci
+
   smoke:
     name: Smoke (Playwright + CI LocalStack)
     runs-on: ubuntu-latest
@@ -80,14 +120,24 @@ jobs:
     # start, even in CI), so a fresh clone's pipeline is green without secrets.
     # Maintainers can point `vars.LOCALSTACK_IMAGE` at a current image and set
     # the `LOCALSTACK_AUTH_TOKEN` secret (a CI auth token from a LocalStack
-    # account) to smoke-test licensed services such as EKS. The Docker socket
-    # mount matches the prerequisites documented for EKS.
+    # account) to smoke-test licensed services. The expression below keeps
+    # pull requests from forks on the free default image, because repository
+    # variables are visible to fork builds while secrets are not.
+    #
+    # `eks` is intentionally absent from SERVICES: the free default image has no
+    # EKS entitlement, so the EKS spec asserts the console's honest
+    # "not enabled" page instead. Add `eks` to SERVICES (and set the image +
+    # token above) to exercise the licensed path locally or in a maintainer run.
+    # The Docker socket mount matches the prerequisites documented for EKS.
     services:
       localstack:
-        image: ${{ vars.LOCALSTACK_IMAGE || 'localstack/localstack:4.14.0' }}
+        image: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) && 'localstack/localstack:4.14.0' || vars.LOCALSTACK_IMAGE || 'localstack/localstack:4.14.0' }}
         ports:
           - 4566:4566
         env:
+          # Fork pull requests never receive repository secrets, so this is
+          # already empty there; the image expression above is the other half
+          # of the gate.
           LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_AUTH_TOKEN }}
           SERVICES: s3,ec2,iam,sts,sns,sqs,dynamodb,lambda,logs,events,kms,ssm,secretsmanager,cloudformation,ecr,ecs
           DEBUG: '0'
@@ -121,6 +171,22 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
 
+      - name: Restore the turbo cache
+        uses: actions/cache@v4
+        with:
+          path: .turbo
+          key: turbo-${{ runner.os }}-smoke-${{ hashFiles('turbo.json', 'pnpm-lock.yaml') }}
+          restore-keys: |
+            turbo-${{ runner.os }}-smoke-
+
+      - name: Cache the Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('e2e/package.json', 'pnpm-lock.yaml') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
@@ -138,9 +204,12 @@ jobs:
 
       # The stack spec asserts GET /api/health == 200 (LocalStack reachable) and
       # that the ui index serves and renders; the following specs create a real
-      # S3 bucket and start an EKS cluster when the emulator reports EKS.
+      # S3 bucket and start an EKS cluster when the emulator reports EKS. The
+      # build above already produced shared, api and ui, so the e2e package is
+      # invoked directly instead of through `pnpm test:e2e` (which rebuilds
+      # shared).
       - name: Run Playwright smoke tests (api + ui webServer)
-        run: pnpm test:e2e
+        run: pnpm --filter @localdeck/e2e smoke
 
       - name: Upload the Playwright report
         if: failure()
@@ -151,3 +220,124 @@ jobs:
             e2e/playwright-report/
             e2e/test-results/
           retention-days: 7
+
+  container-smoke:
+    name: Container smoke (compose nginx, upload >1 MiB)
+    runs-on: ubuntu-latest
+    needs: checks
+    timeout-minutes: 40
+
+    # Runs the *shipped* images: docker compose builds apps/api and apps/ui, the
+    # ui container serves the bundle through nginx and proxies /api like the
+    # Quick start does. The spec uploads an object larger than nginx's 1 MiB
+    # default body cap, which is exactly the regression vite preview cannot see.
+    services:
+      localstack:
+        image: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) && 'localstack/localstack:4.14.0' || vars.LOCALSTACK_IMAGE || 'localstack/localstack:4.14.0' }}
+        ports:
+          - 4566:4566
+        env:
+          LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_AUTH_TOKEN }}
+          SERVICES: s3,ec2,iam,sts
+          DEBUG: '0'
+          PERSISTENCE: '0'
+        options: >-
+          --health-cmd "curl -sf http://localhost:4566/_localstack/health || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
+          --health-start-period 30s
+
+    env:
+      # The compose api container reaches the runner's published port through
+      # the host gateway (extra_hosts in docker-compose.yml).
+      LOCALSTACK_ENDPOINT: http://host.docker.internal:4566
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      APP_VERSION: ci-${{ github.sha }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Cache the Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('e2e/package.json', 'pnpm-lock.yaml') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build and start the compose stack
+        run: docker compose up --detach --build
+
+      - name: Wait for nginx and the api to answer through the ui container
+        run: |
+          for attempt in $(seq 1 90); do
+            if curl --fail --silent http://127.0.0.1:8080/healthz >/dev/null \
+              && curl --fail --silent http://127.0.0.1:8080/api/health/live >/dev/null \
+              && curl --fail --silent http://127.0.0.1:8080/api/health >/dev/null; then
+              echo "compose stack is healthy after ${attempt} attempt(s)"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::the compose stack did not become healthy in time"
+          docker compose logs --no-color
+          exit 1
+
+      - name: Install the Playwright browser
+        run: pnpm --filter @localdeck/e2e exec playwright install --with-deps chromium
+
+      - name: Run the container smoke spec (nginx upload >1 MiB)
+        run: pnpm --filter @localdeck/e2e test:container
+
+      # Screenshots are generated from the real container stack and uploaded as
+      # artifacts; committing a refresh stays a developer decision (docs/screens
+      # is not modified by CI).
+      - name: Capture the README screenshots from the running stack
+        if: success()
+        env:
+          LOCALDECK_SCREENSHOT_BASE_URL: http://127.0.0.1:8080
+        run: pnpm --filter @localdeck/e2e screens
+
+      - name: Upload the generated screenshots
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-screens
+          path: docs/screens/
+          retention-days: 14
+
+      - name: Upload the container Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-playwright-report
+          path: |
+            e2e/playwright-report-container/
+            e2e/test-results-container/
+          retention-days: 7
+
+      - name: Show the compose logs
+        if: failure()
+        run: docker compose logs --no-color
+
+      - name: Stop the compose stack
+        if: always()
+        run: docker compose down --volumes --remove-orphans

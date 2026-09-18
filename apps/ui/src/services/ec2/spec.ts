@@ -52,6 +52,3 @@ export const spec = createServiceSpec('ec2', {
 });
 
 export const SERVICE_ID = spec.descriptor.id;
-
-/** Operation the instances list calls. */
-export const LIST_OPERATION = 'DescribeInstances';

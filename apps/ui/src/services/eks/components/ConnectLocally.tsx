@@ -7,31 +7,22 @@ import Link from '@cloudscape-design/components/link';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import { useState, type ReactElement } from 'react';
 import { useFlashbar } from '../../../hooks/useFlashbar';
-import { downloadKubeconfig, type EksCluster } from '../api';
+import { useLocalStackStatus } from '../../../hooks/useLocalStackStatus';
+import { downloadKubeconfig, kubeconfigFileName, type EksCluster } from '../api';
 import { toFriendlyEksError } from '../errors';
+import { kubeconfigCommands } from './connectCommands';
 
 export interface ConnectLocallyProps {
   cluster: EksCluster;
 }
 
-/** Where the endpoint, credentials and region come from for kubectl. */
-function kubeconfigCommands(clusterName: string): string {
-  return [
-    '# 1. Download the kubeconfig (button above), then point kubectl at it',
-    `export KUBECONFIG=~/Downloads/kubeconfig-${clusterName}.yaml`,
-    '',
-    '# 2. Let the kubeconfig credential plugin reach LocalStack',
-    'export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1',
-    'export AWS_ENDPOINT_URL=http://localhost:4566   # your LOCALSTACK_ENDPOINT',
-    '',
-    '# 3. Talk to the cluster',
-    'kubectl get nodes',
-    '',
-    '# 4. Terminal UI or dashboard on top of the same kubeconfig',
-    'k9s',
-    'headlamp',
-  ].join('\n');
-}
+/**
+ * Fallbacks used only while the live LocalStack status is still loading (or
+ * when the api has not answered `/api/config` yet). The command block always
+ * prefers the endpoint and region the ui is actually configured against.
+ */
+const FALLBACK_ENDPOINT = 'http://localhost:4566';
+const FALLBACK_REGION = 'us-east-1';
 
 /**
  * The "Connect locally" info box on the cluster overview: download the
@@ -41,10 +32,13 @@ function kubeconfigCommands(clusterName: string): string {
  */
 export function ConnectLocally({ cluster }: ConnectLocallyProps): ReactElement {
   const flashbar = useFlashbar();
+  const status = useLocalStackStatus();
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const ready = cluster.status === 'ACTIVE';
+  const endpoint = status.config?.localstack.endpoint ?? FALLBACK_ENDPOINT;
+  const region = status.config?.localstack.region ?? FALLBACK_REGION;
 
   const download = async (): Promise<void> => {
     setDownloading(true);
@@ -54,7 +48,7 @@ export function ConnectLocally({ cluster }: ConnectLocallyProps): ReactElement {
       flashbar.notify({
         type: 'success',
         header: 'Kubeconfig downloaded',
-        content: `kubeconfig-${cluster.name}.yaml describes the API endpoint and certificate authority of ${cluster.name}.`,
+        content: `${kubeconfigFileName(cluster.name)} describes the API endpoint and certificate authority of ${cluster.name}.`,
       });
     } catch (caught) {
       setError(toFriendlyEksError(caught).message);
@@ -108,7 +102,9 @@ export function ConnectLocally({ cluster }: ConnectLocallyProps): ReactElement {
         </SpaceBetween>
 
         <Box variant="code">
-          <pre style={{ margin: 0, overflowX: 'auto' }}>{kubeconfigCommands(cluster.name)}</pre>
+          <pre style={{ margin: 0, overflowX: 'auto' }}>
+            {kubeconfigCommands(cluster.name, endpoint, region)}
+          </pre>
         </Box>
 
         <Box variant="small" color="text-body-secondary">

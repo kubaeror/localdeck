@@ -102,6 +102,11 @@ export interface ServiceModuleProblem {
 /**
  * Structural check for modules discovered by the ui's `import.meta.glob`.
  * Returns the problems found; an empty list means the module is usable.
+ *
+ * The check also enforces `ServiceCapabilities`: a module whose routes mount
+ * the standard `list`/`detail`/`create` pages must declare the matching
+ * capability, so a generated browser can never advertise `create: false` while
+ * mounting a create page.
  */
 export function checkServiceModule(where: string, value: unknown): ServiceModuleProblem[] {
   const problems: ServiceModuleProblem[] = [];
@@ -130,6 +135,10 @@ export function checkServiceModule(where: string, value: unknown): ServiceModule
     fail('module.routes is missing');
     return problems;
   }
+
+  const capabilities = readCapabilities(module.spec, fail);
+  const standardPages = new Set<ServicePageKind>(['list', 'detail', 'create']);
+
   for (const route of module.routes) {
     if (typeof route?.path !== 'string') {
       fail('a route is missing its path');
@@ -137,8 +146,41 @@ export function checkServiceModule(where: string, value: unknown): ServiceModule
     }
     if (typeof route.page !== 'string') fail(`route "${route.path}" is missing its page kind`);
     if (typeof route.title !== 'string') fail(`route "${route.path}" is missing its title`);
+
+    const page = route.page as ServicePageKind;
+    if (capabilities !== undefined && standardPages.has(page) && capabilities[page] !== true) {
+      fail(
+        `route "${route.path}" mounts the "${page}" page but module.spec.capabilities.${page} is false`,
+      );
+    }
   }
   return problems;
+}
+
+/** Validates the capability flags; `undefined` when they are unusable. */
+function readCapabilities(
+  spec: ServiceSpec | undefined,
+  fail: (message: string) => void,
+): ServiceCapabilities | undefined {
+  if (spec === undefined) return undefined;
+  const capabilities: unknown = spec.capabilities;
+  if (typeof capabilities !== 'object' || capabilities === null) {
+    fail('module.spec.capabilities is missing');
+    return undefined;
+  }
+  const record = capabilities as Partial<Record<keyof ServiceCapabilities, unknown>>;
+  const flags: ServiceCapabilities = { list: false, detail: false, create: false };
+  let valid = true;
+  for (const key of ['list', 'detail', 'create'] as const) {
+    const value = record[key];
+    if (typeof value !== 'boolean') {
+      fail(`module.spec.capabilities.${key} must be a boolean`);
+      valid = false;
+      continue;
+    }
+    flags[key] = value;
+  }
+  return valid ? flags : undefined;
 }
 
 /** Request body of `POST /api/services/:service/:operation`. */

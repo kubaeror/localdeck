@@ -6,19 +6,20 @@ import {
 import {
   createAwsClientInstance,
   getOrCreateAwsClient,
+  sdkAbortSignal,
   usesPathStyleAddressing,
   type AwsClientConfigOverrides,
   type AwsSdkClient,
   type AwsSdkClientConstructor,
 } from '../lib/awsClients.js';
-import { ApiProblem } from '../lib/errors.js';
+import { ApiProblem, asApiProblem } from '../lib/errors.js';
 import { requireServiceById } from './services.js';
 
 /**
  * Dynamic AWS operation dispatcher.
  *
  * One route proxies any whitelisted operation of any registered service:
- * `POST /api/services/:service/:operation`. The sdk package, the client class
+ * `POST /api/services/:serviceId/:operation`. The sdk package, the client class
  * and the command class are all resolved from the registry entry, and the
  * operation must appear in the registry's whitelist — which is the same list
  * each service module's `spec.ts` is validated against — or the request is
@@ -162,17 +163,106 @@ function resolveCommandConstructor(
  * response. SDK failures bubble up to the Fastify error handler, which maps
  * them onto the shared ApiError contract.
  *
- * `overrides` carries the endpoint/region the running app was configured with,
- * so the dispatcher always talks to the same LocalStack as `/api/health`.
+ * `overrides` carries the endpoint/region/timeouts the running app was
+ * configured with, so the dispatcher always talks to the same LocalStack as
+ * `/api/health`. `dependencies` exists for tests: they can inject a fake SDK
+ * module map and a request abort signal without touching the real registry.
  */
+export interface DispatcherDependencies {
+  /** Replaces the dynamic `import(sdkPackage)` used in production. */
+  loadSdkModule?: (descriptor: ServiceDescriptor) => Promise<Record<string, unknown>>;
+  /** Caller-provided abort signal (client disconnect, handler timeout). */
+  signal?: AbortSignal;
+}
+
+const MAX_SANITIZE_DEPTH = 24;
+
+function isNodeStream(value: object): value is { destroy?: () => void; pipe: unknown } {
+  const record = value as Record<string, unknown>;
+  return typeof record.pipe === 'function' && typeof record.on === 'function';
+}
+
+/**
+ * Makes an SDK result safe for the JSON dispatcher:
+ *
+ * - `Uint8Array`/`ArrayBuffer` blobs (Kinesis records, Lambda payloads) become
+ *   base64 strings instead of `{"0":…}` objects.
+ * - Node streams (S3 `GetObject.Body`) are destroyed and rejected with a clean
+ *   501, because buffering an arbitrarily large object into JSON is never
+ *   right and the dedicated object proxy is the supported path.
+ * - Plain objects/arrays are cloned; values with a custom prototype (Date, …)
+ *   are passed through so their `toJSON` still works.
+ */
+export function sanitizeDispatcherResult(
+  value: unknown,
+  seen: WeakSet<object> = new WeakSet(),
+  depth = 0,
+): unknown {
+  if (value === null || typeof value !== 'object') return value;
+  if (value instanceof Uint8Array) return Buffer.from(value).toString('base64');
+  if (value instanceof ArrayBuffer) return Buffer.from(new Uint8Array(value)).toString('base64');
+
+  if (isNodeStream(value)) {
+    // Do not leave the response body socket dangling.
+    try {
+      (value as { destroy?: () => void }).destroy?.();
+    } catch {
+      // The clean 501 is what matters; a destroy failure is not actionable.
+    }
+    throw new ApiProblem({
+      code: ApiErrorCodes.binaryResponseUnsupported,
+      statusCode: 501,
+      message:
+        'The operation returned a streaming payload, which the JSON dispatcher cannot carry. ' +
+        'Use the dedicated S3 object routes for object downloads.',
+      details: { kind: 'stream' },
+    });
+  }
+
+  if (depth > MAX_SANITIZE_DEPTH) return value;
+  if (seen.has(value)) return '[circular]';
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    return value.map((entry) => sanitizeDispatcherResult(entry, seen, depth + 1));
+  }
+
+  const prototype = Object.getPrototypeOf(value) as unknown;
+  if (prototype !== Object.prototype && prototype !== null) {
+    // Date and other toJSON-aware values serialize correctly on their own.
+    return value;
+  }
+
+  const clone: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    clone[key] = sanitizeDispatcherResult(entry, seen, depth + 1);
+  }
+  return clone;
+}
+
 export async function dispatchServiceOperation(
   serviceId: string,
   operation: string,
   input: Record<string, unknown>,
   overrides: AwsClientConfigOverrides = {},
+  dependencies: DispatcherDependencies = {},
 ): Promise<ServiceOperationResponse> {
   const target = resolveServiceOperation(serviceId, operation);
-  const module = await loadSdkModule(target.descriptor);
+
+  if (target.descriptor.parityLevel === 'planned') {
+    throw new ApiProblem({
+      code: ApiErrorCodes.servicePlanned,
+      statusCode: 501,
+      message:
+        `${target.descriptor.displayName} is registered as a navigation placeholder in ` +
+        'LocalDeck and exposes no proxied operations yet.',
+      service: target.descriptor.id,
+      details: { service: target.descriptor.id, parityLevel: 'planned' },
+    });
+  }
+
+  const loadModule = dependencies.loadSdkModule ?? loadSdkModule;
+  const module = await loadModule(target.descriptor);
   const ClientConstructor = resolveClientConstructor(module, target.descriptor);
 
   const client: AwsSdkClient = getOrCreateAwsClient(
@@ -185,11 +275,27 @@ export async function dispatchServiceOperation(
   );
 
   const Command = resolveCommandConstructor(module, target);
-  const result = await client.send(new Command(input));
+
+  let result: unknown;
+  try {
+    result = await client.send(new Command(input), {
+      // A hung LocalStack must not hold the handler open, and a browser that
+      // goes away must cancel the upstream call.
+      abortSignal: sdkAbortSignal(dependencies.signal, overrides.requestTimeoutMs),
+    });
+  } catch (error) {
+    // `asApiProblem` maps SDK/network/serializer failures and fills in
+    // `ApiError.service` from the registry descriptor (Smithy never writes
+    // `$service` on real errors).
+    throw asApiProblem(error, {
+      ...(overrides.endpoint === undefined ? {} : { endpoint: overrides.endpoint }),
+      service: target.descriptor.id,
+    });
+  }
 
   return {
     service: target.descriptor.id,
     operation: target.operation,
-    result,
+    result: sanitizeDispatcherResult(result),
   };
 }

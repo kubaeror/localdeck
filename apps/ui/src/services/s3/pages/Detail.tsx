@@ -1,72 +1,67 @@
-import type { ApiError } from '@localdeck/shared';
+import type { ApiError, AwsTag, S3PublicAccessBlock } from '@localdeck/shared';
 import ButtonDropdown from '@cloudscape-design/components/button-dropdown';
-import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
+import { useState, type ReactElement } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { DeleteConfirmModal } from '../../../components/DeleteConfirmModal';
 import { ResourceDetailPage } from '../../../components/ResourceDetailPage';
 import { useFlashbar } from '../../../hooks/useFlashbar';
-import { toApiError } from '../../../lib/apiClient';
 import { serviceConsolePath } from '../../paths';
 import type { ServicePageProps } from '../../types';
-import { deleteBucket, listBuckets, type S3Bucket } from '../api';
+import { deleteBucket } from '../api';
 import { toFriendlyS3Error } from '../errors';
+import { useBuckets } from '../useBuckets';
 import { ObjectsTab } from '../components/ObjectsTab';
 import { PermissionsTab } from '../components/PermissionsTab';
 import { PropertiesTab } from '../components/PropertiesTab';
 
+/** A draft value plus the bucket it was edited on. */
+interface ScopedDraft<T> {
+  bucket: string;
+  value: T;
+}
+
+function activeDraft<T>(draft: ScopedDraft<T> | null, bucket: string): T | undefined {
+  return draft?.bucket === bucket ? draft.value : undefined;
+}
+
 /**
  * One bucket: the console's Objects / Properties / Permissions tabs. The page
- * resolves the bucket from ListBuckets so the overview can show its creation
- * date and a deleted bucket produces a clean error instead of broken tabs.
+ * resolves the bucket from one `ListBuckets` call (shared with the Objects tab
+ * through `useBuckets`) and keeps unsaved tab drafts across tab switches.
  */
 export function DetailPage({ descriptor }: ServicePageProps): ReactElement {
   const { bucketName = '' } = useParams();
   const navigate = useNavigate();
   const flashbar = useFlashbar();
-
-  const [bucket, setBucket] = useState<S3Bucket | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<ApiError | null>(null);
+  const {
+    buckets,
+    loading: bucketsLoading,
+    error: bucketsError,
+    reload: reloadBuckets,
+  } = useBuckets();
 
   const [deleteVisible, setDeleteVisible] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  const requestId = useRef(0);
 
-  const load = useCallback(async (): Promise<void> => {
-    const id = requestId.current + 1;
-    requestId.current = id;
-    setLoading(true);
-    try {
-      const result = await listBuckets();
-      if (requestId.current !== id) return;
-      const found = result.items.find((entry) => entry.name === bucketName) ?? null;
-      setBucket(found);
-      setError(
-        found === null
-          ? {
-              code: 'NoSuchBucket',
-              statusCode: 404,
-              message: `The bucket "${bucketName}" does not exist in this LocalStack account.`,
-            }
-          : null,
-      );
-    } catch (caught) {
-      if (requestId.current !== id) return;
-      setError(toApiError(caught));
-    } finally {
-      if (requestId.current === id) setLoading(false);
-    }
-  }, [bucketName]);
+  // Unsaved drafts, tagged with the bucket so navigating to another bucket
+  // never shows stale edits. The tabs unmount on switch; this state does not.
+  const [versioningDraft, setVersioningDraft] = useState<ScopedDraft<boolean> | null>(null);
+  const [tagsDraft, setTagsDraft] = useState<ScopedDraft<readonly AwsTag[]> | null>(null);
+  const [settingsDraft, setSettingsDraft] = useState<ScopedDraft<S3PublicAccessBlock> | null>(null);
+  const [policyDraft, setPolicyDraft] = useState<ScopedDraft<string> | null>(null);
 
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- bucket lookup for the route
-    void load();
-    return () => {
-      // Invalidate an in-flight ListBuckets when the page unmounts.
-      requestId.current += 1;
-    };
-  }, [load]);
+  const bucket = buckets.find((entry) => entry.name === bucketName) ?? null;
+
+  const notFoundError: ApiError | null =
+    !bucketsLoading && bucketsError === null && bucket === null
+      ? {
+          code: 'NoSuchBucket',
+          statusCode: 404,
+          message: `The bucket "${bucketName}" does not exist in this LocalStack account.`,
+        }
+      : null;
+  const error = bucketsError ?? notFoundError;
 
   const confirmDelete = async (): Promise<void> => {
     setDeleting(true);
@@ -93,10 +88,10 @@ export function DetailPage({ descriptor }: ServicePageProps): ReactElement {
           { text: 'Buckets', href: serviceConsolePath(descriptor.id) },
           { text: bucketName },
         ]}
-        loading={loading}
+        loading={bucketsLoading}
         error={error}
         onRetry={() => {
-          void load();
+          void reloadBuckets();
         }}
         headerActions={
           <ButtonDropdown
@@ -126,7 +121,18 @@ export function DetailPage({ descriptor }: ServicePageProps): ReactElement {
           {
             id: 'objects',
             label: 'Objects',
-            content: <ObjectsTab key={bucketName} bucket={bucketName} />,
+            content: (
+              <ObjectsTab
+                key={bucketName}
+                bucket={bucketName}
+                buckets={buckets}
+                bucketsLoading={bucketsLoading}
+                bucketsError={bucketsError}
+                onRefreshBuckets={() => {
+                  void reloadBuckets();
+                }}
+              />
+            ),
           },
           {
             id: 'properties',
@@ -138,13 +144,40 @@ export function DetailPage({ descriptor }: ServicePageProps): ReactElement {
                 {...(bucket?.creationDate === undefined
                   ? {}
                   : { creationDate: bucket.creationDate })}
+                versioningDraft={activeDraft(versioningDraft, bucketName)}
+                onVersioningDraftChange={(enabled) => {
+                  setVersioningDraft(
+                    enabled === undefined ? null : { bucket: bucketName, value: enabled },
+                  );
+                }}
+                tagsDraft={activeDraft(tagsDraft, bucketName)}
+                onTagsDraftChange={(tags) => {
+                  setTagsDraft(tags === undefined ? null : { bucket: bucketName, value: tags });
+                }}
               />
             ),
           },
           {
             id: 'permissions',
             label: 'Permissions',
-            content: <PermissionsTab key={bucketName} bucket={bucketName} />,
+            content: (
+              <PermissionsTab
+                key={bucketName}
+                bucket={bucketName}
+                settingsDraft={activeDraft(settingsDraft, bucketName)}
+                onSettingsDraftChange={(settings) => {
+                  setSettingsDraft(
+                    settings === undefined ? null : { bucket: bucketName, value: settings },
+                  );
+                }}
+                policyDraft={activeDraft(policyDraft, bucketName)}
+                onPolicyDraftChange={(policy) => {
+                  setPolicyDraft(
+                    policy === undefined ? null : { bucket: bucketName, value: policy },
+                  );
+                }}
+              />
+            ),
           },
         ]}
       />

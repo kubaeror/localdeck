@@ -73,6 +73,8 @@ describe('JsonEditor (editable)', () => {
     render(<JsonEditor value={'{}'} label="Attributes" onChange={onChange} loadAce={failingAce} />);
 
     const textarea = await screen.findByRole('textbox', { name: 'Attributes' });
+    // The failure is surfaced instead of silently downgrading the editor.
+    expect(await screen.findByText(/enhanced JSON editor could not be loaded/)).toBeDefined();
     fireEvent.change(textarea, { target: { value: '{"a":1}' } });
     expect(onChange).toHaveBeenCalledWith('{"a":1}');
   });

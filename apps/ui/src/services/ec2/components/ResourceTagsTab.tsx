@@ -46,6 +46,7 @@ export function ResourceTagsTab({
   const changed = draft !== null && JSON.stringify(edited) !== JSON.stringify(tags);
 
   const save = async (): Promise<void> => {
+    if (saving) return;
     setSaving(true);
     setSaveError(null);
     try {

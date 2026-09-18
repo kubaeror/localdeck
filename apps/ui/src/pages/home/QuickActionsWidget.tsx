@@ -4,6 +4,7 @@ import Header from '@cloudscape-design/components/header';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import type { ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { GLOBAL_SEARCH_SHORTCUT_LABEL } from '../../contexts/global-search-context';
 import { useFlashbar } from '../../hooks/useFlashbar';
 import { useGlobalSearch } from '../../hooks/useGlobalSearch';
 import { useRecentlyVisited } from '../../hooks/useRecentlyVisited';
@@ -39,7 +40,7 @@ export function QuickActionsWidget({ onRemove }: ConsoleWidgetProps): ReactEleme
             search.open();
           }}
         >
-          Search services (Ctrl+/)
+          Search services ({GLOBAL_SEARCH_SHORTCUT_LABEL})
         </Button>
         <Button
           iconName="status-info"

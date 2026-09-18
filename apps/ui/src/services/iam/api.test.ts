@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ApiClientError } from '../../lib/apiClient';
 import {
   attachPolicy,
   createAccessKey,
@@ -9,9 +10,11 @@ import {
   listAccessKeys,
   listAttachedPolicies,
   listEntitiesForPolicy,
+  listGroupsForUser,
   listPolicies,
   listRoles,
   listUsers,
+  normalizeTags,
   putUserTags,
 } from './api';
 
@@ -109,8 +112,8 @@ describe('listUsers', () => {
       createDate: '2026-01-02T03:04:05.000Z',
       tags: [{ Key: 'team', Value: 'core' }],
     });
-    // The default ARN covers LocalStack responses that omit it.
-    expect(page.items[1]?.arn).toBe('arn:aws:iam::000000000000:user/bob');
+    // A missing ARN stays undefined instead of being fabricated.
+    expect(page.items[1]?.arn).toBeUndefined();
     expect(page.nextToken).toBe('page-2');
   });
 
@@ -323,12 +326,139 @@ describe('attached policies', () => {
     await attachPolicy('role', 'lambda-role', 'arn:aws:iam::aws:policy/ReadOnlyAccess');
     await attachPolicy('group', 'devs', 'arn:aws:iam::aws:policy/ReadOnlyAccess');
 
-    expect(operationInput(calls, 'ListAttachedRolePolicies')).toEqual({ RoleName: 'lambda-role' });
+    expect(operationInput(calls, 'ListAttachedRolePolicies')).toMatchObject({
+      RoleName: 'lambda-role',
+      MaxItems: 1000,
+    });
     expect(operationInput(calls, 'AttachRolePolicy')).toEqual({
       RoleName: 'lambda-role',
       PolicyArn: 'arn:aws:iam::aws:policy/ReadOnlyAccess',
     });
     expect(calls.some((call) => call.operation === 'AttachGroupPolicy')).toBe(true);
     expect(attached[0]).toMatchObject({ policyName: 'ReadOnlyAccess', scope: 'AWS' });
+  });
+});
+
+describe('complete (non-truncated) reads', () => {
+  it('walks every Marker page of ListGroupsForUser', async () => {
+    const calls = stubDispatcher((operation, input) => {
+      if (operation !== 'ListGroupsForUser') return {};
+      return input.Marker === undefined
+        ? { Groups: [{ GroupName: 'g1' }], IsTruncated: true, Marker: 'page-2' }
+        : { Groups: [{ GroupName: 'g2' }], IsTruncated: false };
+    });
+
+    const groups = await listGroupsForUser('alice');
+
+    expect(groups.map((group) => group.groupName)).toEqual(['g1', 'g2']);
+    const pageCalls = calls.filter((call) => call.operation === 'ListGroupsForUser');
+    expect(pageCalls).toHaveLength(2);
+    expect(pageCalls[1]?.input).toMatchObject({
+      UserName: 'alice',
+      Marker: 'page-2',
+      MaxItems: 1000,
+    });
+  });
+
+  it('walks every Marker page of ListEntitiesForPolicy', async () => {
+    const calls = stubDispatcher((operation, input) => {
+      if (operation !== 'ListEntitiesForPolicy') return {};
+      return input.Marker === undefined
+        ? {
+            PolicyUsers: [{ UserName: 'alice' }],
+            IsTruncated: true,
+            Marker: 'page-2',
+          }
+        : { PolicyRoles: [{ RoleName: 'lambda-role' }], IsTruncated: false };
+    });
+
+    const entities = await listEntitiesForPolicy('arn:policy');
+
+    expect(entities.users.map((entry) => entry.name)).toEqual(['alice']);
+    expect(entities.roles.map((entry) => entry.name)).toEqual(['lambda-role']);
+    expect(calls.filter((call) => call.operation === 'ListEntitiesForPolicy')).toHaveLength(2);
+  });
+
+  it('walks every Marker page of ListAttached*Policies', async () => {
+    const calls = stubDispatcher((operation, input) => {
+      if (operation !== 'ListAttachedUserPolicies') return {};
+      return input.Marker === undefined
+        ? {
+            AttachedPolicies: [{ PolicyName: 'one', PolicyArn: 'arn:one' }],
+            IsTruncated: true,
+            Marker: 'page-2',
+          }
+        : {
+            AttachedPolicies: [{ PolicyName: 'two', PolicyArn: 'arn:two' }],
+            IsTruncated: false,
+          };
+    });
+
+    const attached = await listAttachedPolicies('user', 'alice');
+
+    expect(attached.map((policy) => policy.policyName)).toEqual(['one', 'two']);
+    expect(calls.filter((call) => call.operation === 'ListAttachedUserPolicies')).toHaveLength(2);
+  });
+});
+
+describe('normalizeTags', () => {
+  it('trims keys, drops rows without a key and keeps the last duplicate', () => {
+    expect(
+      normalizeTags([
+        { Key: ' env ', Value: 'test' },
+        { Key: '', Value: 'orphan' },
+        { Key: 'team', Value: 'one' },
+        { Key: 'team', Value: 'two' },
+      ]),
+    ).toEqual([
+      { Key: 'env', Value: 'test' },
+      { Key: 'team', Value: 'two' },
+    ]);
+  });
+});
+
+describe('unexpected api payloads', () => {
+  it('maps an unreadable 2xx payload to UNEXPECTED_RESPONSE, not a network error', async () => {
+    stubDispatcher(() => ({}));
+
+    await expect(getUser('missing')).rejects.toSatisfy(
+      (caught: unknown) =>
+        caught instanceof ApiClientError && caught.apiError.code === 'UNEXPECTED_RESPONSE',
+    );
+  });
+});
+
+describe('partial tag writes', () => {
+  it('applies removals and reports which keys were already applied', async () => {
+    const calls = stubDispatcher((operation) => {
+      if (operation === 'ListUserTags') {
+        return {
+          Tags: [
+            { Key: 'keep', Value: '1' },
+            { Key: 'drop', Value: 'x' },
+          ],
+        };
+      }
+      if (operation === 'TagUser') {
+        return { __error: { code: 'AccessDenied', message: 'denied', statusCode: 403 } };
+      }
+      return {};
+    });
+
+    await expect(
+      putUserTags({
+        userName: 'alice',
+        tags: [
+          { Key: 'keep', Value: '2' },
+          { Key: 'added', Value: '' },
+        ],
+      }),
+    ).rejects.toSatisfy(
+      (caught: unknown) =>
+        caught instanceof ApiClientError && caught.apiError.code === 'TAG_WRITE_PARTIAL',
+    );
+
+    // The removal phase still ran, and the message names what was applied.
+    expect(operationInput(calls, 'UntagUser')).toEqual({ UserName: 'alice', TagKeys: ['drop'] });
   });
 });

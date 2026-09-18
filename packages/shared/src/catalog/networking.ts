@@ -18,6 +18,8 @@ export const NETWORKING_SERVICES = [
         resultPath: 'DistributionList.Items',
         idField: 'Id',
         nameField: 'DomainName',
+        // CloudFront nests the next marker inside the distribution list.
+        pagination: { requestField: 'Marker', responseField: 'DistributionList.NextMarker' },
       },
       describe: { operation: 'GetDistribution', idParam: 'Id' },
     },
@@ -44,6 +46,7 @@ export const NETWORKING_SERVICES = [
         resultPath: 'HostedZones',
         idField: 'Id',
         nameField: 'Name',
+        pagination: { requestField: 'Marker', responseField: 'NextMarker' },
       },
       describe: { operation: 'GetHostedZone', idParam: 'Id' },
       delete: { operation: 'DeleteHostedZone', idParam: 'Id' },
@@ -97,6 +100,7 @@ export const NETWORKING_SERVICES = [
         resultPath: 'LoadBalancers',
         idField: 'LoadBalancerArn',
         nameField: 'LoadBalancerName',
+        pagination: { requestField: 'Marker', responseField: 'NextMarker' },
       },
       describe: {
         operation: 'DescribeLoadBalancers',
@@ -125,7 +129,14 @@ export const NETWORKING_SERVICES = [
     summary: 'REST APIs, resources, methods, stages and deployments.',
     healthKeys: ['apigatewayv2', 'apigatewaymanagementapi'],
     browser: {
-      list: { operation: 'GetRestApis', resultPath: 'items', idField: 'id', nameField: 'name' },
+      list: {
+        operation: 'GetRestApis',
+        resultPath: 'items',
+        idField: 'id',
+        nameField: 'name',
+        // API Gateway paginates REST APIs with `position`, not a token field.
+        pagination: { requestField: 'position', responseField: 'position' },
+      },
       describe: { operation: 'GetRestApi', idParam: 'restApiId' },
       delete: { operation: 'DeleteRestApi', idParam: 'restApiId' },
     },

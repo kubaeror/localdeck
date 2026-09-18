@@ -20,6 +20,12 @@ export function registerHealthRoutes(app: FastifyInstance, config: AppConfig): v
   /**
    * Readiness: the real LocalStack service statuses. 503 + ApiErrorResponse
    * when LocalStack cannot be reached.
+   *
+   * Semantics decision (API-023): a reachable LocalStack with zero available
+   * services or services in `error` answers 200 with `status: 'degraded'` —
+   * this is the ui's status-widget endpoint and starting/empty emulators are a
+   * normal state, not an api failure. Only an unreachable or malformed health
+   * endpoint produces 503/502.
    */
   app.get(API_PATHS.health, async (): Promise<HealthResponse> => {
     const probe = await probeLocalStackHealth(config);

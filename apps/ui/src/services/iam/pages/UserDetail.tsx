@@ -1,6 +1,7 @@
 import type { ApiError } from '@localdeck/shared';
 import Box from '@cloudscape-design/components/box';
 import ButtonDropdown from '@cloudscape-design/components/button-dropdown';
+import SpaceBetween from '@cloudscape-design/components/space-between';
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { DeleteConfirmModal } from '../../../components/DeleteConfirmModal';
@@ -12,9 +13,14 @@ import type { ServicePageProps } from '../../types';
 import { deleteUser, getUser, type IamUser } from '../api';
 import { AccessKeysPanel } from '../components/AccessKeysPanel';
 import { AttachedPoliciesPanel } from '../components/AttachedPoliciesPanel';
+import { PermissionsBoundaryNotice } from '../components/PermissionsBoundaryNotice';
 import { TagsTab } from '../components/TagsTab';
 import { UserGroupsTab } from '../components/UserGroupsTab';
 import { isIamCode, toFriendlyIamError } from '../errors';
+
+/** Inline policies are not whitelisted/verified against LocalStack yet. */
+const INLINE_POLICIES_REASON =
+  'Inline policies (PutUserPolicy / ListUserPolicies / GetUserPolicy / DeleteUserPolicy) are not whitelisted in LocalDeck yet, so inline policies cannot be read or written here.';
 
 /**
  * One IAM user: Permissions, Groups, Security credentials and Tags, composed
@@ -89,13 +95,19 @@ export function UserDetailPage({ descriptor }: ServicePageProps): ReactElement {
     <>
       <ResourceDetailPage
         title={userName}
-        description={user === null ? undefined : <Box variant="code">{user.arn}</Box>}
+        description={
+          user === null ? undefined : user.arn === undefined ? (
+            <Box color="text-body-secondary">ARN not reported</Box>
+          ) : (
+            <Box variant="code">{user.arn}</Box>
+          )
+        }
         breadcrumbs={[
           { text: descriptor.displayName, href: serviceConsolePath(descriptor.id) },
           { text: 'Users', href: `${serviceConsolePath(descriptor.id)}/users` },
           { text: userName },
         ]}
-        loading={loading}
+        loading={loading && user === null}
         error={error}
         onRetry={() => {
           void load();
@@ -104,11 +116,18 @@ export function UserDetailPage({ descriptor }: ServicePageProps): ReactElement {
           <ButtonDropdown
             ariaLabel="User actions"
             items={[
-              { id: 'copy-arn', text: 'Copy ARN' },
+              {
+                id: 'copy-arn',
+                text: 'Copy ARN',
+                disabled: user?.arn === undefined,
+                ...(user?.arn === undefined
+                  ? { disabledReason: 'LocalStack did not report an ARN for this user.' }
+                  : {}),
+              },
               { id: 'delete', text: 'Delete user' },
             ]}
             onItemClick={({ detail }) => {
-              if (detail.id === 'copy-arn' && user !== null) {
+              if (detail.id === 'copy-arn' && user?.arn !== undefined) {
                 void navigator.clipboard?.writeText(user.arn);
               }
               if (detail.id === 'delete') {
@@ -124,12 +143,24 @@ export function UserDetailPage({ descriptor }: ServicePageProps): ReactElement {
           {
             id: 'permissions',
             label: 'Permissions',
-            content: <AttachedPoliciesPanel entity="user" name={userName} />,
+            content: (
+              <SpaceBetween size="l">
+                <AttachedPoliciesPanel entity="user" name={userName} />
+                <PermissionsBoundaryNotice entity="user" name={userName} />
+              </SpaceBetween>
+            ),
           },
           {
             id: 'groups',
             label: 'Groups',
             content: <UserGroupsTab userName={userName} />,
+          },
+          {
+            id: 'inline-policies',
+            label: 'Inline policies',
+            disabled: true,
+            disabledReason: INLINE_POLICIES_REASON,
+            content: null,
           },
           {
             id: 'security-credentials',

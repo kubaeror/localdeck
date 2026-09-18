@@ -2,11 +2,10 @@ import { isServiceEmulated, type ServiceDescriptor } from '@localdeck/shared';
 import Box from '@cloudscape-design/components/box';
 import Input from '@cloudscape-design/components/input';
 import Link from '@cloudscape-design/components/link';
-import List from '@cloudscape-design/components/list';
 import Modal from '@cloudscape-design/components/modal';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import { colorBackgroundItemSelected } from '@cloudscape-design/design-tokens';
-import { useMemo, useState, type ReactElement } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { GLOBAL_SEARCH_SHORTCUT_LABEL } from '../contexts/global-search-context';
 import { useLocalStackStatus } from '../hooks/useLocalStackStatus';
@@ -28,6 +27,10 @@ export interface GlobalSearchPaletteProps {
  * navigation search button), it fuzzy matches the whole registry — names, ids,
  * categories, summaries and whitelisted operations — and routes to the
  * service console.
+ *
+ * Implements the ARIA combobox/listbox pattern: the search input is the
+ * combobox and owns `aria-activedescendant`; every result is an option, so
+ * screen readers announce the highlight that sighted users see.
  */
 export function GlobalSearchPalette({ onDismiss }: GlobalSearchPaletteProps): ReactElement {
   const navigate = useNavigate();
@@ -37,6 +40,9 @@ export function GlobalSearchPalette({ onDismiss }: GlobalSearchPaletteProps): Re
 
   const [query, setQuery] = useState('');
   const [activeId, setActiveId] = useState<string | null>(null);
+
+  const listboxId = useId();
+  const activeOptionRef = useRef<HTMLLIElement | null>(null);
 
   const recentlyVisited = useMemo<readonly ServiceMatch[]>(() => {
     const byId = new Map(services.map((service) => [service.id, service]));
@@ -60,7 +66,10 @@ export function GlobalSearchPalette({ onDismiss }: GlobalSearchPaletteProps): Re
     0,
     matches.findIndex((match) => match.service.id === activeId),
   );
+  const activeMatch = matches[activeIndex];
   const servicesReported = status.health?.localstack.services ?? {};
+
+  const optionId = (serviceId: string): string => `${listboxId}-option-${serviceId}`;
 
   const openService = (service: ServiceDescriptor): void => {
     onDismiss();
@@ -73,6 +82,16 @@ export function GlobalSearchPalette({ onDismiss }: GlobalSearchPaletteProps): Re
     if (next === undefined) return;
     setActiveId(next.service.id);
   };
+
+  // Keyboard navigation must bring the highlighted option into view, exactly
+  // like a native select. jsdom has no layout, so the call is guarded.
+  useEffect(() => {
+    const element = activeOptionRef.current;
+    if (element === null) return;
+    if (typeof element.scrollIntoView === 'function') {
+      element.scrollIntoView({ block: 'nearest' });
+    }
+  }, [activeIndex, matches]);
 
   return (
     <Modal
@@ -89,6 +108,15 @@ export function GlobalSearchPalette({ onDismiss }: GlobalSearchPaletteProps): Re
           value={query}
           ariaLabel="Search services"
           placeholder="Search by service name, id, category or operation"
+          nativeInputAttributes={{
+            role: 'combobox',
+            'aria-expanded': true,
+            'aria-controls': listboxId,
+            'aria-autocomplete': 'list',
+            ...(activeMatch === undefined
+              ? {}
+              : { 'aria-activedescendant': optionId(activeMatch.service.id) }),
+          }}
           onChange={(event) => {
             setQuery(event.detail.value);
             setActiveId(null);
@@ -104,10 +132,9 @@ export function GlobalSearchPalette({ onDismiss }: GlobalSearchPaletteProps): Re
                 moveActive(-1);
                 break;
               case 'Enter': {
-                const match = matches[activeIndex];
-                if (match === undefined) break;
+                if (activeMatch === undefined) break;
                 event.preventDefault();
-                openService(match.service);
+                openService(activeMatch.service);
                 break;
               }
               default:
@@ -124,55 +151,62 @@ export function GlobalSearchPalette({ onDismiss }: GlobalSearchPaletteProps): Re
           </Box>
         ) : (
           <SpaceBetween size="xxs">
-            <Box variant="awsui-key-label">{isSearching ? 'Matches' : 'Recently visited'}</Box>
-            <List<ServiceMatch>
-              ariaLabel="Search results"
-              items={matches}
-              renderItem={(match) => {
+            <Box variant="small" fontWeight="bold" color="text-body-secondary">
+              {isSearching ? 'Matches' : 'Recently visited'}
+            </Box>
+            <ul
+              id={listboxId}
+              role="listbox"
+              aria-label="Search results"
+              style={{ listStyle: 'none', margin: 0, padding: 0 }}
+            >
+              {matches.map((match, index) => {
+                const isActive = index === activeIndex;
                 const emulation = isServiceEmulated(match.service, servicesReported)
                   ? 'emulated locally'
                   : 'not emulated locally';
-                return {
-                  id: match.service.id,
-                  icon: (
+                return (
+                  <li
+                    key={match.service.id}
+                    id={optionId(match.service.id)}
+                    role="option"
+                    aria-selected={isActive}
+                    ref={isActive ? activeOptionRef : undefined}
+                    className="console-search__result"
+                    style={{
+                      background: isActive ? colorBackgroundItemSelected : undefined,
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      padding: '4px 8px',
+                      borderRadius: '4px',
+                    }}
+                    onPointerEnter={() => {
+                      setActiveId(match.service.id);
+                    }}
+                  >
                     <ServiceIcon
                       iconKey={match.service.iconKey}
                       category={match.service.category}
                       size="small"
                     />
-                  ),
-                  content: (
-                    <div
-                      className="console-search__result"
-                      style={
-                        match.service.id === (matches[activeIndex]?.service.id ?? '')
-                          ? { background: colorBackgroundItemSelected }
-                          : undefined
-                      }
-                      onPointerEnter={() => {
-                        setActiveId(match.service.id);
+                    <Link
+                      href={serviceConsolePath(match.service.id)}
+                      ariaLabel={`Open the ${match.service.displayName} console`}
+                      onFollow={(event) => {
+                        event.preventDefault();
+                        openService(match.service);
                       }}
                     >
-                      <Link
-                        href={serviceConsolePath(match.service.id)}
-                        ariaLabel={`Open the ${match.service.displayName} console`}
-                        onFollow={(event) => {
-                          event.preventDefault();
-                          openService(match.service);
-                        }}
-                      >
-                        {match.service.displayName}
-                      </Link>
-                    </div>
-                  ),
-                  secondaryContent: (
+                      {match.service.displayName}
+                    </Link>
                     <Box color="text-body-secondary">
                       {match.service.category} · {emulation}
                     </Box>
-                  ),
-                };
-              }}
-            />
+                  </li>
+                );
+              })}
+            </ul>
           </SpaceBetween>
         )}
 

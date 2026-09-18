@@ -4,6 +4,7 @@ import { cleanup, render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FlashbarProvider } from '../../../contexts/FlashbarProvider';
+import { LocalStackStatusProvider } from '../../../contexts/LocalStackStatusProvider';
 import { stubApiFetch } from '../../../test/fixtures';
 import { ClusterDetailPage } from './ClusterDetail';
 
@@ -46,16 +47,18 @@ const ACTIVE_CLUSTER = {
 
 function renderDetail(): void {
   render(
-    <FlashbarProvider>
-      <MemoryRouter initialEntries={['/console/eks/clusters/localdeck-cluster']}>
-        <Routes>
-          <Route
-            path="/console/eks/clusters/:clusterName"
-            element={<ClusterDetailPage descriptor={EKS_DESCRIPTOR} />}
-          />
-        </Routes>
-      </MemoryRouter>
-    </FlashbarProvider>,
+    <LocalStackStatusProvider>
+      <FlashbarProvider>
+        <MemoryRouter initialEntries={['/console/eks/clusters/localdeck-cluster']}>
+          <Routes>
+            <Route
+              path="/console/eks/clusters/:clusterName"
+              element={<ClusterDetailPage descriptor={EKS_DESCRIPTOR} />}
+            />
+          </Routes>
+        </MemoryRouter>
+      </FlashbarProvider>
+    </LocalStackStatusProvider>,
   );
 }
 

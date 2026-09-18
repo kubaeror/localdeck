@@ -6,43 +6,62 @@ import Link from '@cloudscape-design/components/link';
 import { useCallback, useMemo, useState, type ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { DeleteConfirmModal } from '../../../components/DeleteConfirmModal';
+import { InfoTooltip } from '../../../components/InfoTooltip';
 import { ResourceListPage } from '../../../components/ResourceListPage';
 import { StatusBadge } from '../../../components/StatusBadge';
 import { useFlashbar } from '../../../hooks/useFlashbar';
-import { formatDateTime, type StatusName } from '../../../lib/format';
+import { usePolling } from '../../../hooks/usePolling';
+import { formatDateTime } from '../../../lib/format';
 import { serviceConsolePath } from '../../paths';
 import type { ServicePageProps } from '../../types';
-import { deleteVolume, isVolumeAttached, listVolumes, type Ec2Volume } from '../api';
+import {
+  deleteVolume,
+  isTransitionalVolumeState,
+  isVolumeAttached,
+  listVolumes,
+  type Ec2Volume,
+} from '../api';
 import { toFriendlyEc2Error } from '../errors';
+import { volumeStatusName } from '../status';
 import { AttachVolumeModal } from '../components/AttachVolumeModal';
+import { EC2_PAGE_SIZE_OPTIONS } from '../listOptions';
 
-/** Maps an EBS volume state onto the console's status vocabulary. */
-function volumeStatusName(state: string): StatusName {
-  switch (state) {
-    case 'in-use':
-    case 'creating':
-    case 'deleting':
-    case 'deleted':
-      return state;
-    default:
-      return 'available';
-  }
-}
+/** How often the list reloads while a volume is creating or deleting. */
+const POLL_INTERVAL_MS = 10_000;
+
+const ATTACHED_REASON =
+  'This volume is attached to an instance. Attach and delete stay disabled until the instance is terminated and the volume is released.';
 
 /**
  * The console's volumes list: name, id, state, size, type, zone and attachment,
  * with creation, attachment and deletion. A volume that is attached to an
- * instance cannot be deleted, so its delete action stays disabled.
+ * instance cannot be deleted, so its delete action stays disabled. The list
+ * refreshes every 10 seconds while a volume is creating or deleting.
  */
 export function VolumesListPage({ descriptor }: ServicePageProps): ReactElement {
   const navigate = useNavigate();
   const flashbar = useFlashbar();
   const [filteringText, setFilteringText] = useState('');
   const [reloadToken, setReloadToken] = useState(0);
+  const [transitional, setTransitional] = useState(false);
   const [attachTarget, setAttachTarget] = useState<string | null>(null);
   const [deleteTargets, setDeleteTargets] = useState<readonly Ec2Volume[] | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const fetchPage = useCallback(async (options: { nextToken?: string; signal?: AbortSignal }) => {
+    const page = await listVolumes({
+      ...(options.nextToken === undefined ? {} : { nextToken: options.nextToken }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    });
+    const hasTransitional = page.items.some((volume) => isTransitionalVolumeState(volume.state));
+    setTransitional((previous) => (previous === hasTransitional ? previous : hasTransitional));
+    return page;
+  }, []);
+
+  usePolling(transitional, POLL_INTERVAL_MS, () => {
+    setReloadToken((token) => token + 1);
+  });
 
   const volumePath = useCallback(
     (volumeId: string): string =>
@@ -159,10 +178,13 @@ export function VolumesListPage({ descriptor }: ServicePageProps): ReactElement 
   );
 
   const confirmDelete = async (): Promise<void> => {
+    if (deleting) return;
     const targets = deleteTargets ?? [];
     if (targets.length === 0) return;
     setDeleting(true);
     setDeleteError(null);
+    const failures: Ec2Volume[] = [];
+    const failureMessages: string[] = [];
     for (const volume of targets) {
       try {
         await deleteVolume(volume.volumeId);
@@ -172,17 +194,27 @@ export function VolumesListPage({ descriptor }: ServicePageProps): ReactElement 
           content: volume.name ?? volume.volumeId,
         });
       } catch (caught) {
-        flashbar.notify({
-          type: 'error',
-          header: `Could not delete ${volume.volumeId}`,
-          content: toFriendlyEc2Error(caught).message,
-        });
+        failures.push(volume);
+        failureMessages.push(
+          `${volume.name ?? volume.volumeId}: ${toFriendlyEc2Error(caught).message}`,
+        );
       }
     }
     setDeleting(false);
-    setDeleteTargets(null);
     setReloadToken((token) => token + 1);
+    if (failures.length > 0) {
+      // Keep the modal open on the failed volumes so the user can read the
+      // reason and retry without selecting them again.
+      setDeleteTargets(failures);
+      setDeleteError(
+        `${failures.length} of ${targets.length} volume${targets.length === 1 ? '' : 's'} could not be deleted. ${failureMessages.join(' ')}`,
+      );
+      return;
+    }
+    setDeleteTargets(null);
   };
+
+  const isFiltering = filteringText.trim().length > 0;
 
   return (
     <>
@@ -196,12 +228,9 @@ export function VolumesListPage({ descriptor }: ServicePageProps): ReactElement 
         columns={columns}
         getRowId={(volume) => volume.volumeId}
         reloadToken={reloadToken}
-        fetcher={({ nextToken, signal }) =>
-          listVolumes({
-            ...(nextToken === undefined ? {} : { nextToken }),
-            ...(signal === undefined ? {} : { signal }),
-          })
-        }
+        preferencesId="ec2-volumes-list"
+        pageSizeOptions={EC2_PAGE_SIZE_OPTIONS}
+        fetcher={fetchPage}
         filtering={{
           text: filteringText,
           onChange: setFilteringText,
@@ -235,7 +264,7 @@ export function VolumesListPage({ descriptor }: ServicePageProps): ReactElement 
         }
         rowActions={(volume) => {
           const attached = isVolumeAttached(volume);
-          return (
+          const menu = (
             <ButtonDropdown
               variant="icon"
               ariaLabel={`Actions for ${volume.volumeId}`}
@@ -254,6 +283,7 @@ export function VolumesListPage({ descriptor }: ServicePageProps): ReactElement 
               }}
             />
           );
+          return attached ? <InfoTooltip content={ATTACHED_REASON}>{menu}</InfoTooltip> : menu;
         }}
         bulkActions={(selected) => (
           <ButtonDropdown
@@ -275,8 +305,12 @@ export function VolumesListPage({ descriptor }: ServicePageProps): ReactElement 
             Actions
           </ButtonDropdown>
         )}
-        emptyTitle="No volumes"
-        emptyDescription="Create a volume to attach extra block storage to an instance."
+        emptyTitle={isFiltering ? 'No matches' : 'No volumes'}
+        emptyDescription={
+          isFiltering
+            ? 'No volume matches the current filter. Clear the filter or try another search term.'
+            : 'Create a volume to attach extra block storage to an instance.'
+        }
       />
 
       {attachTarget === null ? null : (

@@ -2,6 +2,7 @@ import type { ApiError } from '@localdeck/shared';
 import Alert from '@cloudscape-design/components/alert';
 import Box from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
+import ButtonDropdown from '@cloudscape-design/components/button-dropdown';
 import Container from '@cloudscape-design/components/container';
 import Header from '@cloudscape-design/components/header';
 import KeyValuePairs from '@cloudscape-design/components/key-value-pairs';
@@ -36,6 +37,10 @@ import { NodegroupsTab } from '../components/NodegroupsTab';
  */
 const POLL_INTERVAL_MS = 5_000;
 
+/** Ops the real console offers but LocalDeck does not call yet. */
+const UPDATE_VERSION_REASON =
+  'UpdateClusterVersion is not whitelisted in LocalDeck yet (it is not verified against LocalStack), so the cluster cannot be upgraded here.';
+
 /** What LocalStack's k3d provider needs, in console wording. */
 const K3D_TROUBLESHOOTING: readonly string[] = [
   'Docker must be reachable from the LocalStack container (the Docker socket is mounted).',
@@ -52,7 +57,9 @@ const K3D_TROUBLESHOOTING: readonly string[] = [
 export function ClusterDetailPage({ descriptor }: ServicePageProps): ReactElement {
   const { clusterName = '' } = useParams();
   const navigate = useNavigate();
-  const flashbar = useFlashbar();
+  // The whole context value changes on every flashbar message; depending on
+  // `notify` alone keeps the loader (and the poll) stable.
+  const { notify } = useFlashbar();
 
   const [cluster, setCluster] = useState<EksCluster | null>(null);
   const [loading, setLoading] = useState(true);
@@ -61,13 +68,13 @@ export function ClusterDetailPage({ descriptor }: ServicePageProps): ReactElemen
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const previousStatus = useRef<string | null>(null);
-  const requestId = useRef(0);
+  const inFlight = useRef<AbortController | null>(null);
 
   const announce = useCallback(
     (next: EksCluster, previous: string | null): void => {
       if (previous === null || previous === next.status) return;
       if (next.status === 'ACTIVE' && previous === 'CREATING') {
-        flashbar.notify({
+        notify({
           type: 'success',
           header: `Cluster ${next.name} is active`,
           content:
@@ -76,7 +83,7 @@ export function ClusterDetailPage({ descriptor }: ServicePageProps): ReactElemen
               : `Kubernetes API endpoint: ${next.endpoint}`,
         });
       } else if (next.status === 'FAILED') {
-        flashbar.notify({
+        notify({
           type: 'error',
           header: `Cluster ${next.name} failed to start`,
           content:
@@ -84,27 +91,28 @@ export function ClusterDetailPage({ descriptor }: ServicePageProps): ReactElemen
         });
       }
     },
-    [flashbar],
+    [notify],
   );
 
   const load = useCallback(
     async (options: { silent?: boolean } = {}): Promise<void> => {
-      const id = requestId.current + 1;
-      requestId.current = id;
+      inFlight.current?.abort();
+      const controller = new AbortController();
+      inFlight.current = controller;
       if (options.silent !== true) setLoading(true);
       try {
-        const result = await getCluster(clusterName);
-        if (requestId.current !== id) return;
+        const result = await getCluster(clusterName, controller.signal);
+        if (controller.signal.aborted) return;
         announce(result, previousStatus.current);
         previousStatus.current = result.status;
         setCluster(result);
         setError(null);
       } catch (caught) {
-        if (requestId.current !== id) return;
+        if (controller.signal.aborted) return;
         setCluster(null);
         setError(toApiError(caught));
       } finally {
-        if (requestId.current === id) setLoading(false);
+        if (!controller.signal.aborted) setLoading(false);
       }
     },
     [announce, clusterName],
@@ -114,7 +122,7 @@ export function ClusterDetailPage({ descriptor }: ServicePageProps): ReactElemen
     // eslint-disable-next-line react-hooks/set-state-in-effect -- cluster lookup for the route
     void load();
     return () => {
-      requestId.current += 1;
+      inFlight.current?.abort();
     };
   }, [load]);
 
@@ -130,7 +138,7 @@ export function ClusterDetailPage({ descriptor }: ServicePageProps): ReactElemen
     setDeleteError(null);
     try {
       await deleteCluster(cluster.name);
-      flashbar.notify({
+      notify({
         type: 'info',
         header: `Deleting cluster ${cluster.name}`,
         content: 'LocalStack is tearing down the k3d cluster.',
@@ -153,7 +161,15 @@ export function ClusterDetailPage({ descriptor }: ServicePageProps): ReactElemen
             columns={3}
             items={[
               { label: 'Name', value: cluster.name },
-              { label: 'ARN', value: <Box variant="code">{cluster.arn}</Box> },
+              {
+                label: 'ARN',
+                value:
+                  cluster.arn === undefined ? (
+                    'Not reported'
+                  ) : (
+                    <Box variant="code">{cluster.arn}</Box>
+                  ),
+              },
               {
                 label: 'Status',
                 value: <StatusBadge status={clusterStatusName(cluster.status)} />,
@@ -247,9 +263,15 @@ export function ClusterDetailPage({ descriptor }: ServicePageProps): ReactElemen
             descriptor.summary
           ) : (
             <SpaceBetween direction="horizontal" size="xs">
-              <Box variant="code" display="inline">
-                {cluster.arn}
-              </Box>
+              {cluster.arn === undefined ? (
+                <Box display="inline" color="text-body-secondary">
+                  ARN not reported
+                </Box>
+              ) : (
+                <Box variant="code" display="inline">
+                  {cluster.arn}
+                </Box>
+              )}
               <Box display="inline" color="text-body-secondary">
                 · Kubernetes {cluster.version}
               </Box>
@@ -272,6 +294,20 @@ export function ClusterDetailPage({ descriptor }: ServicePageProps): ReactElemen
         headerActions={
           cluster === null ? undefined : (
             <SpaceBetween direction="horizontal" size="xs">
+              <ButtonDropdown
+                ariaLabel="Cluster update actions"
+                items={[
+                  {
+                    id: 'update-version',
+                    text: 'Update Kubernetes version',
+                    disabled: true,
+                    disabledReason: UPDATE_VERSION_REASON,
+                  },
+                ]}
+                onItemClick={() => undefined}
+              >
+                Update
+              </ButtonDropdown>
               <Button
                 iconName="refresh"
                 ariaLabel="Refresh cluster"
@@ -353,14 +389,23 @@ export function ClusterDetailPage({ descriptor }: ServicePageProps): ReactElemen
                 {
                   id: 'compute',
                   label: 'Compute',
-                  content: <NodegroupsTab cluster={cluster} />,
+                  // Keyed by cluster name so a different cluster starts with a
+                  // fresh tab state instead of inheriting node-group refs.
+                  content: <NodegroupsTab key={cluster.name} cluster={cluster} />,
                 },
                 {
                   id: 'tags',
                   label: 'Tags',
+                  disabled: cluster.arn === undefined,
+                  ...(cluster.arn === undefined
+                    ? {
+                        disabledReason:
+                          'DescribeCluster did not report an ARN for this cluster, so tags cannot be read from or written to it.',
+                      }
+                    : {}),
                   content: (
                     <ClusterTagsTab
-                      key={cluster.arn}
+                      key={cluster.name}
                       cluster={cluster}
                       onSaved={() => {
                         void load({ silent: true });

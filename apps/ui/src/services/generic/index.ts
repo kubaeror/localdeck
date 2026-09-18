@@ -3,6 +3,7 @@ import {
   createServiceSpec,
   type ServiceDescriptor,
   type ServicePageRoute,
+  type ServiceSpec,
 } from '@localdeck/shared';
 import type { UiServiceModule } from '../types';
 import { GenericResourceCreate } from './pages/ResourceCreate';
@@ -15,11 +16,15 @@ import { GenericResourceList } from './pages/ResourceList';
  * Dedicated modules always win: `getServiceModule` only falls back here.
  */
 
-const GENERIC_ROUTES: readonly ServicePageRoute[] = [
-  { path: '', title: 'Resources', page: 'list' },
-  { path: 'create', title: 'Create', page: 'create' },
-  { path: 'resources/:resourceId', title: 'Resource details', page: 'detail' },
-];
+/** Routes every generated module mounts; the create surface is conditional. */
+function genericRoutes(spec: ServiceSpec): readonly ServicePageRoute[] {
+  const routes: ServicePageRoute[] = [{ path: '', title: 'Resources', page: 'list' }];
+  if (spec.capabilities.create) {
+    routes.push({ path: 'create', title: 'Create', page: 'create' });
+  }
+  routes.push({ path: 'resources/:resourceId', title: 'Resource details', page: 'detail' });
+  return routes;
+}
 
 /** Builds the browser module for one descriptor, or `undefined` without a spec. */
 export function createGenericBrowserModule(
@@ -27,13 +32,18 @@ export function createGenericBrowserModule(
 ): UiServiceModule | undefined {
   if (descriptor.browser === undefined) return undefined;
 
+  const spec = createServiceSpec(descriptor, {
+    operations: browserOperationsFor(descriptor),
+    // The generated "create" page is a CLI hand-off, not a form, but it is a
+    // real create surface: declaring `false` while mounting it contradicted
+    // the routes. Keep the declaration and the routes in one place.
+    capabilities: { list: true, detail: true, create: true },
+  });
+
   return {
     descriptor,
-    spec: createServiceSpec(descriptor, {
-      operations: browserOperationsFor(descriptor),
-      capabilities: { list: true, detail: true, create: false },
-    }),
-    routes: GENERIC_ROUTES,
+    spec,
+    routes: genericRoutes(spec),
     pages: {
       list: GenericResourceList,
       create: GenericResourceCreate,

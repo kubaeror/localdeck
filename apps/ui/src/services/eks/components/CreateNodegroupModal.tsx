@@ -1,4 +1,4 @@
-import type { ApiError } from '@localdeck/shared';
+import type { ApiError, AwsTag } from '@localdeck/shared';
 import Alert from '@cloudscape-design/components/alert';
 import Box from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
@@ -9,14 +9,17 @@ import Multiselect from '@cloudscape-design/components/multiselect';
 import type { MultiselectProps } from '@cloudscape-design/components/multiselect';
 import Select from '@cloudscape-design/components/select';
 import SpaceBetween from '@cloudscape-design/components/space-between';
-import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
+import { TagsEditor, validateTags } from '../../../components/TagsEditor';
 import { listAllInstanceTypes } from '../../ec2/api';
-import { createNodegroup, type EksCluster, type EksNodegroup } from '../api';
+import { createNodegroup, normalizeTags, type EksCluster, type EksNodegroup } from '../api';
 import { toFriendlyEksError } from '../errors';
 import {
   NODEGROUP_NAME_RULES,
+  parsePositiveInteger,
   parseScalingValue,
   validateNodegroupName,
+  validateRoleArn,
   validateScaling,
 } from '../naming';
 import { RoleField } from './RoleField';
@@ -29,12 +32,36 @@ export interface CreateNodegroupModalProps {
   onCreated: (nodegroup: EksNodegroup) => void;
 }
 
+/** The AMI types the console offers; LocalStack stores whichever is sent. */
+const AMI_TYPES: readonly { value: string; label: string }[] = [
+  { value: '__default__', label: 'LocalStack default' },
+  { value: 'AL2023_x86_64_STANDARD', label: 'Amazon Linux 2023 (x86_64)' },
+  { value: 'AL2023_ARM_64_STANDARD', label: 'Amazon Linux 2023 (ARM_64)' },
+  { value: 'AL2_x86_64', label: 'Amazon Linux 2 (x86_64)' },
+  { value: 'AL2_x86_64_GPU', label: 'Amazon Linux 2 GPU (x86_64)' },
+  { value: 'AL2_ARM_64', label: 'Amazon Linux 2 (ARM_64)' },
+  { value: 'BOTTLEROCKET_x86_64', label: 'Bottlerocket (x86_64)' },
+  { value: 'BOTTLEROCKET_ARM_64', label: 'Bottlerocket (ARM_64)' },
+];
+
 /**
- * The "Create node group" modal: name, IAM role, instance types, scaling and
- * the cluster's subnets. LocalStack answers CREATING and then provisions a
- * Docker node plus an emulated EC2 instance per desired node; the Compute tab
- * polls DescribeNodegroup until the status settles, so the modal closes as
- * soon as the request is accepted.
+ * Converts editor rows into the label map CreateNodegroup expects. Rows without
+ * a key are dropped defensively; the editor already blocks saving them.
+ */
+function toLabelRecord(tags: readonly AwsTag[]): Record<string, string> {
+  const record: Record<string, string> = {};
+  for (const tag of normalizeTags(tags)) {
+    record[tag.Key] = tag.Value;
+  }
+  return record;
+}
+
+/**
+ * The "Create node group" modal: name, IAM role, instance types, scaling, AMI
+ * type, labels, tags and the cluster's subnets. LocalStack answers CREATING and
+ * then provisions a Docker node plus an emulated EC2 instance per desired node;
+ * the Compute tab polls DescribeNodegroup until the status settles, so the
+ * modal closes as soon as the request is accepted.
  */
 export function CreateNodegroupModal({
   visible,
@@ -49,42 +76,55 @@ export function CreateNodegroupModal({
   const [typesLoading, setTypesLoading] = useState(true);
   const [subnetIds, setSubnetIds] = useState<readonly string[]>(cluster.vpcConfig.subnetIds);
   const [capacityType, setCapacityType] = useState<'ON_DEMAND' | 'SPOT'>('ON_DEMAND');
+  const [amiType, setAmiType] = useState('__default__');
   const [diskSize, setDiskSize] = useState('');
   const [minSize, setMinSize] = useState('1');
   const [maxSize, setMaxSize] = useState('2');
   const [desiredSize, setDesiredSize] = useState('1');
+  const [labels, setLabels] = useState<readonly AwsTag[]>([]);
+  const [tags, setTags] = useState<readonly AwsTag[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
+  /** The cluster whose subnets were seeded into the form. */
+  const seededFor = useRef<string | null>(null);
 
-  const loadTypes = useCallback(async (): Promise<void> => {
-    setTypesLoading(true);
-    try {
-      const types = await listAllInstanceTypes();
-      const options = types
-        .map((type) => ({ label: type.instanceType, value: type.instanceType }))
-        .sort((left, right) => left.label.localeCompare(right.label, 'en'));
-      setTypeOptions(options);
-      const available = new Set(options.map((option) => option.value));
-      setInstanceTypes((current) => {
-        const kept = current.filter((value) => available.has(value));
-        if (kept.length > 0) return kept;
-        return available.has('t3.medium') ? ['t3.medium'] : options.slice(0, 1).map((o) => o.value);
+  useEffect(() => {
+    let cancelled = false;
+    listAllInstanceTypes()
+      .then((types) => {
+        if (cancelled) return;
+        const options = types
+          .map((type) => ({ label: type.instanceType, value: type.instanceType }))
+          .sort((left, right) => left.label.localeCompare(right.label, 'en'));
+        setTypeOptions(options);
+        const available = new Set(options.map((option) => option.value));
+        setInstanceTypes((current) => {
+          const kept = current.filter((value) => available.has(value));
+          if (kept.length > 0) return kept;
+          return available.has('t3.medium')
+            ? ['t3.medium']
+            : options.slice(0, 1).map((o) => o.value);
+        });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        // Keep the static t3.medium default; LocalStack still validates the type.
+        setTypeOptions([{ label: 't3.medium', value: 't3.medium' }]);
+      })
+      .finally(() => {
+        if (!cancelled) setTypesLoading(false);
       });
-    } catch {
-      // Keep the static t3.medium default; LocalStack still validates the type.
-      setTypeOptions([{ label: 't3.medium', value: 't3.medium' }]);
-    } finally {
-      setTypesLoading(false);
-    }
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- catalogue fetch for the modal
-    void loadTypes();
-  }, [loadTypes]);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- cluster subnets seed the selection
+    // Seed the subnet selection once per cluster: a background refresh of the
+    // cluster must not overwrite what the user picked. A different cluster
+    // (the modal can be reused) reseeds.
+    if (seededFor.current === cluster.name) return;
+    seededFor.current = cluster.name;
     setSubnetIds(cluster.vpcConfig.subnetIds);
   }, [cluster.name, cluster.vpcConfig.subnetIds]);
 
@@ -98,21 +138,31 @@ export function CreateNodegroupModal({
   );
 
   const nameProblem = name.length > 0 ? validateNodegroupName(name) : null;
+  const roleProblem = roleArn.length > 0 ? validateRoleArn(roleArn) : null;
   const scalingProblem = validateScaling(scaling);
-  const diskSizeGiB = diskSize.trim().length === 0 ? undefined : Number.parseInt(diskSize, 10);
+  const diskSizeGiB = parsePositiveInteger(diskSize);
   const diskProblem =
-    diskSizeGiB !== undefined && (!Number.isInteger(diskSizeGiB) || diskSizeGiB < 1)
+    diskSizeGiB !== undefined && Number.isNaN(diskSizeGiB)
       ? 'Disk size must be a whole number of GiB (1 or more).'
       : null;
+  const labelProblems = validateTags(labels);
+  const tagProblems = validateTags(tags);
+  const labelsProblem =
+    labelProblems.length > 0 ? labelProblems.map((problem) => problem.message).join(' ') : null;
+  const tagsProblem =
+    tagProblems.length > 0 ? tagProblems.map((problem) => problem.message).join(' ') : null;
 
   const canSubmit =
     name.trim().length > 0 &&
     roleArn.trim().length > 0 &&
+    roleProblem === null &&
     instanceTypes.length > 0 &&
     subnetIds.length > 0 &&
     nameProblem === null &&
     scalingProblem === null &&
-    diskProblem === null;
+    diskProblem === null &&
+    labelsProblem === null &&
+    tagsProblem === null;
 
   const subnetOptions = useMemo<MultiselectProps.Option[]>(
     () => cluster.vpcConfig.subnetIds.map((subnetId) => ({ label: subnetId, value: subnetId })),
@@ -131,7 +181,10 @@ export function CreateNodegroupModal({
         instanceTypes,
         scaling,
         capacityType,
+        ...(amiType === '__default__' ? {} : { amiType }),
         ...(diskSizeGiB === undefined ? {} : { diskSizeGiB }),
+        ...(labels.length === 0 ? {} : { labels: toLabelRecord(labels) }),
+        ...(tags.length === 0 ? {} : { tags: normalizeTags(tags) }),
       });
       onCreated(created);
     } catch (caught) {
@@ -199,6 +252,7 @@ export function CreateNodegroupModal({
           description="The role the kubelet and nodes assume. LocalStack does not validate its policies, but the ARN is stored and reported by DescribeNodegroup."
           value={roleArn}
           disabled={submitting}
+          {...(roleProblem === null ? {} : { errorText: roleProblem })}
           onChange={setRoleArn}
         />
 
@@ -281,6 +335,17 @@ export function CreateNodegroupModal({
               }}
             />
           </FormField>
+          <FormField label="AMI type" description="Optional. LocalStack uses its default image.">
+            <Select
+              selectedOption={AMI_TYPES.find((option) => option.value === amiType) ?? null}
+              options={[...AMI_TYPES]}
+              disabled={submitting}
+              ariaLabel="AMI type"
+              onChange={({ detail }) => {
+                setAmiType(detail.selectedOption.value ?? '__default__');
+              }}
+            />
+          </FormField>
           <FormField
             label="Disk size (GiB)"
             description="Optional; LocalStack defaults to 20 GiB."
@@ -316,6 +381,28 @@ export function CreateNodegroupModal({
             }}
           />
         </FormField>
+
+        <TagsEditor
+          tags={[...labels]}
+          onChange={setLabels}
+          label="Kubernetes labels"
+          description="Key-value labels applied to every node in the group. Labels without a key cannot be saved."
+          addButtonLabel="Add label"
+          emptyTitle="No labels"
+        />
+
+        <TagsEditor
+          tags={[...tags]}
+          onChange={setTags}
+          label="Tags"
+          description="Cost-allocation tags applied to the node group resource in EKS."
+        />
+
+        {typesLoading ? null : (
+          <Box variant="small" color="text-body-secondary">
+            {typeOptions.length} instance types reported by LocalStack.
+          </Box>
+        )}
 
         <Alert type="info" header="What LocalStack does next">
           A managed node group starts a k3d agent node in Docker and registers an emulated EC2

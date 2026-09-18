@@ -5,11 +5,19 @@ import CodeEditor from '@cloudscape-design/components/code-editor';
 import type { CodeEditorProps } from '@cloudscape-design/components/code-editor';
 import CopyToClipboard from '@cloudscape-design/components/copy-to-clipboard';
 import FormField from '@cloudscape-design/components/form-field';
+import SpaceBetween from '@cloudscape-design/components/space-between';
 import Spinner from '@cloudscape-design/components/spinner';
 import Textarea from '@cloudscape-design/components/textarea';
-import { useCallback, useEffect, useState, type ReactElement, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactElement,
+  type ReactNode,
+} from 'react';
 import type { AceJsonBundle } from '../lib/aceJsonBundle';
-import { formatJson, validateJson } from '../lib/json';
+import { parseJson, stringifyJson } from '../lib/json';
 import { highlightJson } from './json-highlight';
 
 export interface JsonEditorProps {
@@ -75,16 +83,24 @@ function JsonCodeEditor({
   }, [loadAce]);
 
   if (failure !== null) {
-    // Editing stays possible even when the editor bundle cannot be loaded.
+    // Editing stays possible even when the editor bundle cannot be loaded, but
+    // the user is told why the editor looks basic instead of being left to
+    // wonder whether the document itself is the problem.
     return (
-      <Textarea
-        value={value}
-        rows={rows}
-        ariaLabel={ariaLabel}
-        onChange={(event) => {
-          onChange(event.detail.value);
-        }}
-      />
+      <SpaceBetween size="xs">
+        <Textarea
+          value={value}
+          rows={rows}
+          ariaLabel={ariaLabel}
+          onChange={(event) => {
+            onChange(event.detail.value);
+          }}
+        />
+        <Box variant="small" color="text-status-warning">
+          The enhanced JSON editor could not be loaded, so this field falls back to a plain text
+          area. {failure}
+        </Box>
+      </SpaceBetween>
     );
   }
 
@@ -139,15 +155,19 @@ export function JsonEditor({
     wrapLines: true,
   });
 
+  const parsed = useMemo(() => parseJson(value), [value]);
   const isEmpty = value.trim().length === 0;
-  const jsonError = isEmpty ? null : validateJson(value);
-  const canFormat = jsonError === null && !isEmpty;
+  // The document is parsed once per render: the error message and the
+  // pretty-printed text are both derived from that single parse, and the
+  // pretty-print itself only runs when the document actually changes.
+  const jsonError = isEmpty || parsed.ok ? null : parsed.error;
+  const pretty = useMemo(() => (parsed.ok ? stringifyJson(parsed.value) : null), [parsed]);
+  const canFormat = pretty !== null && !isEmpty;
 
   const format = useCallback(() => {
-    if (onChange === undefined) return;
-    const pretty = formatJson(value);
-    if (pretty !== null) onChange(pretty);
-  }, [onChange, value]);
+    if (onChange === undefined || pretty === null) return;
+    onChange(pretty);
+  }, [onChange, pretty]);
 
   const validityText = jsonError === null ? 'Valid JSON' : `Invalid JSON: ${jsonError}`;
 
@@ -162,7 +182,7 @@ export function JsonEditor({
         <CodeView
           // Valid JSON is shown pretty-printed; invalid text stays as typed so
           // the syntax error is visible where the user made it.
-          content={formatJson(value) ?? value}
+          content={pretty ?? value}
           lineNumbers
           wrapLines
           highlight={highlightJson}

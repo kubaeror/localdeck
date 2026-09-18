@@ -1,24 +1,27 @@
-import {
-  AbortMultipartUploadCommand,
-  CompleteMultipartUploadCommand,
-  CreateMultipartUploadCommand,
-  GetObjectCommand,
-  PutObjectCommand,
-  UploadPartCommand,
-  type CompletedPart,
-  type S3Client,
-} from '@aws-sdk/client-s3';
+import { GetObjectCommand, type S3Client } from '@aws-sdk/client-s3';
+import { Upload } from '@aws-sdk/lib-storage';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import {
   ApiErrorCodes,
+  S3_BUCKET_NAME_MAX_LENGTH,
+  S3_BUCKET_NAME_MIN_LENGTH,
+  S3_BUCKET_NAME_PATTERN,
+  S3_KEY_MAX_LENGTH,
   S3_PROXY_PATHS,
+  isS3KeyWithinLimit,
+  utf8ByteLength,
   type S3UploadResponse,
   type S3UploadResult,
 } from '@localdeck/shared';
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import { Readable } from 'node:stream';
-import { getS3ClientFor, type AwsClientConfigOverrides } from '../lib/awsClients.js';
+import { Readable, Transform } from 'node:stream';
+import {
+  getS3ClientFor,
+  sdkAbortSignal,
+  type AwsClientConfigOverrides,
+} from '../lib/awsClients.js';
 import { ApiProblem } from '../lib/errors.js';
+import { clientDisconnectSignal, readCappedText } from '../lib/http.js';
 
 /**
  * Dedicated S3 object proxy routes.
@@ -28,7 +31,9 @@ import { ApiProblem } from '../lib/errors.js';
  *
  * - `POST /api/services/s3/objects/upload?bucket&key` accepts one
  *   `multipart/form-data` file part and writes it with PutObject, switching to
- *   the S3 multipart upload API for files above `MULTIPART_THRESHOLD_BYTES`.
+ *   the S3 multipart upload API for files above `MULTIPART_THRESHOLD_BYTES`
+ *   through `@aws-sdk/lib-storage` (bounded-concurrency parts, automatic abort
+ *   on failure).
  * - `GET /api/services/s3/objects/download?bucket&key[&versionId]` presigns a
  *   GetObject URL against the configured LocalStack endpoint and streams the
  *   response through the api ("presigned-URL proxy"): the browser receives the
@@ -36,7 +41,8 @@ import { ApiProblem } from '../lib/errors.js';
  *   credentials or signatures reach the page.
  *
  * Both use the single client factory in `lib/awsClients.ts`, so they inherit
- * path-style addressing, endpoint, region and credentials from one place.
+ * path-style addressing, endpoint, region, credentials and outbound timeouts
+ * from one place.
  */
 
 /** Files above this size use the S3 multipart upload API. */
@@ -57,15 +63,18 @@ interface DownloadQuery {
   versionId?: string;
 }
 
-const BUCKET_NAME_PATTERN = '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$';
-
 const uploadQuerystringSchema = {
   type: 'object',
   required: ['bucket', 'key'],
   additionalProperties: false,
   properties: {
-    bucket: { type: 'string', minLength: 3, maxLength: 63, pattern: BUCKET_NAME_PATTERN },
-    key: { type: 'string', minLength: 1, maxLength: 1024 },
+    bucket: {
+      type: 'string',
+      minLength: S3_BUCKET_NAME_MIN_LENGTH,
+      maxLength: S3_BUCKET_NAME_MAX_LENGTH,
+      pattern: S3_BUCKET_NAME_PATTERN,
+    },
+    key: { type: 'string', minLength: 1, maxLength: S3_KEY_MAX_LENGTH },
   },
 } as const;
 
@@ -74,161 +83,127 @@ const downloadQuerystringSchema = {
   required: ['bucket', 'key'],
   additionalProperties: false,
   properties: {
-    bucket: { type: 'string', minLength: 3, maxLength: 63, pattern: BUCKET_NAME_PATTERN },
-    key: { type: 'string', minLength: 1, maxLength: 1024 },
-    versionId: { type: 'string', minLength: 1, maxLength: 1024 },
+    bucket: {
+      type: 'string',
+      minLength: S3_BUCKET_NAME_MIN_LENGTH,
+      maxLength: S3_BUCKET_NAME_MAX_LENGTH,
+      pattern: S3_BUCKET_NAME_PATTERN,
+    },
+    key: { type: 'string', minLength: 1, maxLength: S3_KEY_MAX_LENGTH },
+    versionId: { type: 'string', minLength: 1, maxLength: S3_KEY_MAX_LENGTH },
   },
 } as const;
 
-/** Pulls `count` bytes off the front of a chunk list, mutating the list. */
-function takeBytes(chunks: Buffer[], count: number): Buffer {
-  const out = Buffer.allocUnsafe(count);
-  let offset = 0;
-  while (offset < count) {
-    const head = chunks[0];
-    if (head === undefined) throw new Error('part buffer underflow');
-    const used = Math.min(head.length, count - offset);
-    head.copy(out, offset, 0, used);
-    offset += used;
-    if (used === head.length) chunks.shift();
-    else chunks[0] = head.subarray(used);
+/**
+ * S3's key limit is 1024 UTF-8 bytes; JSON-schema `maxLength` counts UTF-16
+ * code units, so multi-byte keys need this explicit check (shared with the ui).
+ */
+function requireValidKey(key: string): void {
+  if (!isS3KeyWithinLimit(key)) {
+    throw new ApiProblem({
+      code: ApiErrorCodes.validationFailed,
+      statusCode: 400,
+      message:
+        `Object keys are limited to 1024 UTF-8 bytes; "${key.slice(0, 64)}" uses ` +
+        `${utf8ByteLength(key)} bytes.`,
+      service: 's3',
+      details: { maxBytes: 1024, actualBytes: utf8ByteLength(key) },
+    });
   }
-  return out;
 }
 
 /**
- * Streams one uploaded file into S3. Small files become a single PutObject;
- * once the stream crosses `MULTIPART_THRESHOLD_BYTES` the object is created
- * with CreateMultipartUpload and uploaded as 8 MiB parts, then completed. A
- * failure aborts the multipart upload so no orphaned parts remain.
+ * Throws a clean 400 for a rejected upload part. The part's stream is resumed
+ * first: a paused multipart part keeps the request socket open and desyncs
+ * keep-alive connections when the handler throws without draining it (API-007).
+ */
+export function rejectUploadPart(
+  part: { file: Readable; fieldname: string },
+  query: UploadQuery,
+): never {
+  part.file.resume();
+  throw new ApiProblem({
+    code: ApiErrorCodes.validationFailed,
+    statusCode: 400,
+    message: `Expected the file part to be named "file", received "${part.fieldname}".`,
+    service: 's3',
+    details: { bucket: query.bucket, key: query.key, fieldname: part.fieldname },
+  });
+}
+
+/**
+ * Streams one uploaded file into S3 through `@aws-sdk/lib-storage`: small
+ * files become a single PutObject, larger ones a concurrent multipart upload.
+ * A failure aborts the multipart upload (lib-storage default) so no orphaned
+ * parts remain, and a client disconnect aborts the upload through
+ * `request.signal`.
  */
 async function uploadStream(
   client: S3Client,
-  input: { bucket: string; key: string; contentType?: string; stream: Readable },
+  input: {
+    bucket: string;
+    key: string;
+    contentType?: string;
+    stream: Readable;
+    signal: AbortSignal;
+  },
 ): Promise<S3UploadResult> {
-  const { bucket, key, contentType, stream } = input;
-  const chunks: Buffer[] = [];
-  const completed: CompletedPart[] = [];
-  let buffered = 0;
+  const { bucket, key, contentType, stream, signal } = input;
+
   let size = 0;
-  let uploadId: string | undefined;
-  let partNumber = 1;
+  const counter = new Transform({
+    transform(chunk, _encoding, callback) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+      size += buffer.length;
+      callback(null, buffer);
+    },
+  });
 
-  const createMultipartUpload = async (): Promise<string> => {
-    const created = await client.send(
-      new CreateMultipartUploadCommand({
-        Bucket: bucket,
-        Key: key,
-        ...(contentType === undefined ? {} : { ContentType: contentType }),
-      }),
-    );
-    if (created.UploadId === undefined) {
-      throw new ApiProblem({
-        code: ApiErrorCodes.badGateway,
-        statusCode: 502,
-        message: 'LocalStack accepted CreateMultipartUpload but returned no UploadId.',
-        service: 's3',
-        details: { bucket, key },
-      });
-    }
-    return created.UploadId;
-  };
+  const upload = new Upload({
+    client,
+    params: {
+      Bucket: bucket,
+      Key: key,
+      Body: stream.pipe(counter),
+      ...(contentType === undefined ? {} : { ContentType: contentType }),
+    },
+    partSize: PART_SIZE_BYTES,
+    queueSize: 4,
+    leavePartsOnError: false,
+  });
 
-  const flushFullParts = async (id: string): Promise<void> => {
-    while (buffered >= PART_SIZE_BYTES) {
-      const body = takeBytes(chunks, PART_SIZE_BYTES);
-      buffered -= PART_SIZE_BYTES;
-      const response = await client.send(
-        new UploadPartCommand({
-          Bucket: bucket,
-          Key: key,
-          UploadId: id,
-          PartNumber: partNumber,
-          Body: body,
-        }),
-      );
-      completed.push({ ETag: response.ETag, PartNumber: partNumber });
-      partNumber += 1;
-    }
+  const abortOnDisconnect = (): void => {
+    void upload.abort();
   };
+  signal.addEventListener('abort', abortOnDisconnect, { once: true });
+  // `addEventListener` does not fire for a signal that is already aborted.
+  if (signal.aborted) void upload.abort();
 
   try {
-    for await (const raw of stream) {
-      const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw as Uint8Array);
-      if (chunk.length === 0) continue;
-      chunks.push(chunk);
-      buffered += chunk.length;
-      size += chunk.length;
-
-      if (uploadId === undefined && size > MULTIPART_THRESHOLD_BYTES) {
-        uploadId = await createMultipartUpload();
-      }
-      if (uploadId !== undefined) await flushFullParts(uploadId);
-    }
-
-    if (uploadId === undefined) {
-      // Below the threshold: one PutObject with everything that was read.
-      const response = await client.send(
-        new PutObjectCommand({
-          Bucket: bucket,
-          Key: key,
-          Body: Buffer.concat(chunks),
-          ...(contentType === undefined ? {} : { ContentType: contentType }),
-        }),
-      );
-      return {
-        bucket,
-        key,
-        size,
-        multipart: false,
-        ...(response.ETag === undefined ? {} : { etag: response.ETag }),
-        ...(response.VersionId === undefined ? {} : { versionId: response.VersionId }),
-      };
-    }
-
-    // The last part may be smaller than PART_SIZE_BYTES, but never empty.
-    if (buffered > 0) {
-      const body = takeBytes(chunks, buffered);
-      buffered = 0;
-      const response = await client.send(
-        new UploadPartCommand({
-          Bucket: bucket,
-          Key: key,
-          UploadId: uploadId,
-          PartNumber: partNumber,
-          Body: body,
-        }),
-      );
-      completed.push({ ETag: response.ETag, PartNumber: partNumber });
-    }
-
-    const done = await client.send(
-      new CompleteMultipartUploadCommand({
-        Bucket: bucket,
-        Key: key,
-        UploadId: uploadId,
-        MultipartUpload: { Parts: completed },
-      }),
-    );
+    const done = await upload.done();
     return {
       bucket,
       key,
       size,
-      multipart: true,
+      // lib-storage falls back to PutObject when the body never exceeds one part.
+      multipart: size > MULTIPART_THRESHOLD_BYTES,
       ...(done.ETag === undefined ? {} : { etag: done.ETag }),
       ...(done.VersionId === undefined ? {} : { versionId: done.VersionId }),
     };
   } catch (error) {
-    if (uploadId !== undefined) {
-      try {
-        await client.send(
-          new AbortMultipartUploadCommand({ Bucket: bucket, Key: key, UploadId: uploadId }),
-        );
-      } catch {
-        // The original failure is the one worth reporting.
-      }
+    if (signal.aborted) {
+      throw new ApiProblem({
+        code: ApiErrorCodes.requestAborted,
+        statusCode: 408,
+        message: 'The upload was aborted before it completed.',
+        service: 's3',
+        details: { bucket, key, bytesUploaded: size },
+        cause: error,
+      });
     }
     throw error;
+  } finally {
+    signal.removeEventListener('abort', abortOnDisconnect);
   }
 }
 
@@ -255,7 +230,10 @@ function contentDispositionFor(key: string): string {
   return `attachment; filename*=UTF-8''${encodeURIComponent(name)}`;
 }
 
-/** Streams one presigned LocalStack response to the LocalDeck client. */
+/**
+ * Streams one presigned LocalStack response to the LocalDeck client. Error
+ * bodies are read with a 64 KiB cap (API-008); success bodies stream through.
+ */
 async function proxyPresignedDownload(
   client: S3Client,
   query: DownloadQuery,
@@ -267,10 +245,15 @@ async function proxyPresignedDownload(
     ...(query.versionId === undefined ? {} : { VersionId: query.versionId }),
   });
   const presignedUrl = await getSignedUrl(client, command, { expiresIn: PRESIGN_TTL_SECONDS });
-  const upstream = await fetch(presignedUrl, { headers: { accept: '*/*' } });
+  const upstream = await fetch(presignedUrl, {
+    headers: { accept: '*/*' },
+    // A browser that goes away cancels the upstream fetch instead of holding
+    // the socket open; the request timeout is applied by the SDK helper.
+    signal: sdkAbortSignal(clientDisconnectSignal(reply)),
+  });
 
   if (!upstream.ok) {
-    const body = await upstream.text();
+    const body = await readCappedText(upstream);
     const parsed = parseS3ErrorXml(body);
     const statusCode = upstream.status >= 400 && upstream.status < 500 ? upstream.status : 502;
     throw new ApiProblem({
@@ -315,8 +298,8 @@ async function proxyPresignedDownload(
 
 /**
  * Registers the S3 object proxy routes. `clientOverrides` carries the
- * endpoint/region the running app was configured with, so the proxy talks to
- * the same LocalStack as `/api/health`.
+ * endpoint/region/timeouts the running app was configured with, so the proxy
+ * talks to the same LocalStack as `/api/health`.
  */
 export function registerS3Routes(
   app: FastifyInstance,
@@ -327,6 +310,8 @@ export function registerS3Routes(
     { schema: { querystring: uploadQuerystringSchema } },
     async (request, reply): Promise<S3UploadResponse> => {
       const { bucket, key } = request.query;
+      requireValidKey(key);
+
       const part = await request.file();
       if (part === undefined) {
         throw new ApiProblem({
@@ -340,13 +325,7 @@ export function registerS3Routes(
         });
       }
       if (part.fieldname !== 'file') {
-        throw new ApiProblem({
-          code: ApiErrorCodes.validationFailed,
-          statusCode: 400,
-          message: `Expected the file part to be named "file", received "${part.fieldname}".`,
-          service: 's3',
-          details: { bucket, key, fieldname: part.fieldname },
-        });
+        rejectUploadPart(part, { bucket, key });
       }
 
       const upload = await uploadStream(getS3ClientFor(clientOverrides), {
@@ -354,6 +333,7 @@ export function registerS3Routes(
         key,
         ...(part.mimetype.length === 0 ? {} : { contentType: part.mimetype }),
         stream: part.file,
+        signal: clientDisconnectSignal(reply),
       });
 
       request.log.info(
@@ -370,6 +350,7 @@ export function registerS3Routes(
     { schema: { querystring: downloadQuerystringSchema } },
     async (request, reply): Promise<void> => {
       const { bucket, key, versionId } = request.query;
+      requireValidKey(key);
       request.log.info(
         { bucket, key, mode: 'presigned-proxy' },
         's3 object downloaded through the LocalDeck proxy',

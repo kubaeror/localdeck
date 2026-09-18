@@ -12,7 +12,12 @@ import 'ace-builds/src-noconflict/theme-textmate';
 import 'ace-builds/src-noconflict/theme-tomorrow_night';
 
 export interface AceJsonBundle {
-  ace: unknown;
+  /**
+   * The Ace namespace Cloudscape's CodeEditor drives (`ace.edit(…)`). Typed
+   * against the package's own declarations so a bundle that stops matching
+   * the editor contract fails typecheck instead of falling back silently.
+   */
+  ace: typeof ace;
   themes: { light: readonly string[]; dark: readonly string[] };
 }
 

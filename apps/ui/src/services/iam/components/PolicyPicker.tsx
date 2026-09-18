@@ -57,6 +57,7 @@ export function PolicyPicker({
   const [error, setError] = useState<ApiError | null>(null);
   const [filteringText, setFilteringText] = useState('');
   const [currentPageIndex, setCurrentPageIndex] = useState(1);
+  const [selectionNotice, setSelectionNotice] = useState<string | null>(null);
   const inFlight = useRef<AbortController | null>(null);
 
   const load = useCallback(
@@ -102,13 +103,18 @@ export function PolicyPicker({
   const excluded = new Set(excludeArns);
   const candidates = items.filter((policy) => !excluded.has(policy.arn));
   const filtered = candidates.filter((policy) => matches(policy, filteringText));
-  const pagesCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  const visibleItems = filtered.slice(
-    (currentPageIndex - 1) * PAGE_SIZE,
-    currentPageIndex * PAGE_SIZE,
+  const unattachable = new Set(
+    candidates.filter((policy) => !policy.isAttachable).map((policy) => policy.arn),
   );
+  const pagesCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  // Clamp the page index when the candidates shrink (scope switch, filter,
+  // reload, exclusions); otherwise the table renders an out-of-range page.
+  const currentPage = Math.min(currentPageIndex, pagesCount);
+  const visibleItems = filtered.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
 
-  const visibleSelected = visibleItems.filter((policy) => selectedArns.includes(policy.arn));
+  const visibleSelected = visibleItems.filter(
+    (policy) => policy.isAttachable && selectedArns.includes(policy.arn),
+  );
   const hiddenSelectedCount = selectedArns.filter(
     (arn) => !visibleItems.some((policy) => policy.arn === arn),
   ).length;
@@ -183,6 +189,8 @@ export function PolicyPicker({
         />
       </SpaceBetween>
 
+      {selectionNotice === null ? null : <Alert type="warning">{selectionNotice}</Alert>}
+
       {selectedArns.length > 0 ? (
         <Box variant="small" color="text-body-secondary">
           {selectedArns.length} polic{selectedArns.length === 1 ? 'y' : 'ies'} selected
@@ -208,7 +216,14 @@ export function PolicyPicker({
         onSelectionChange={({ detail }) => {
           const visibleArns = visibleItems.map((policy) => policy.arn);
           const keptHidden = selectedArns.filter((arn) => !visibleArns.includes(arn));
-          onChange([...keptHidden, ...detail.selectedItems.map((policy) => policy.arn)]);
+          const attempted = detail.selectedItems.map((policy) => policy.arn);
+          const blocked = attempted.filter((arn) => unattachable.has(arn));
+          setSelectionNotice(
+            blocked.length === 0
+              ? null
+              : `${blocked.length} selected polic${blocked.length === 1 ? 'y is' : 'ies are'} marked IsAttachable=false by LocalStack and cannot be attached to an identity.`,
+          );
+          onChange([...keptHidden, ...attempted.filter((arn) => !unattachable.has(arn))]);
         }}
         empty={
           <Box textAlign="center" color="text-body-secondary">
@@ -220,7 +235,7 @@ export function PolicyPicker({
         pagination={
           <SpaceBetween direction="horizontal" size="xs" alignItems="center">
             <Pagination
-              currentPageIndex={currentPageIndex}
+              currentPageIndex={currentPage}
               pagesCount={pagesCount}
               onChange={({ detail }) => {
                 setCurrentPageIndex(detail.currentPageIndex);

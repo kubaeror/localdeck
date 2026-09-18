@@ -8,10 +8,10 @@ import Header from '@cloudscape-design/components/header';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import Spinner from '@cloudscape-design/components/spinner';
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
-import { TagsEditor } from '../../../components/TagsEditor';
+import { TagsEditor, validateTags } from '../../../components/TagsEditor';
 import { useFlashbar } from '../../../hooks/useFlashbar';
 import { toApiError } from '../../../lib/apiClient';
-import { listRoleTags, listUserTags, putRoleTags, putUserTags } from '../api';
+import { listRoleTags, listUserTags, normalizeTags, putRoleTags, putUserTags } from '../api';
 import { toFriendlyIamError } from '../errors';
 
 export interface TagsTabProps {
@@ -61,14 +61,17 @@ export function TagsTab({ entity, name }: TagsTabProps): ReactElement {
   }, [load]);
 
   const changed = JSON.stringify(tags) !== JSON.stringify(savedTags);
+  const problems = validateTags(tags);
 
   const save = async (): Promise<void> => {
+    if (problems.length > 0) return;
     setSaving(true);
     setSaveError(null);
     try {
-      if (entity === 'user') await putUserTags({ userName: name, tags });
-      else await putRoleTags({ roleName: name, tags });
-      setSavedTags(tags);
+      const normalized = normalizeTags(tags);
+      if (entity === 'user') await putUserTags({ userName: name, tags: normalized });
+      else await putRoleTags({ roleName: name, tags: normalized });
+      setSavedTags(normalized);
       flashbar.notify({ type: 'success', header: 'Tags saved', content: name });
     } catch (caught) {
       setSaveError(toFriendlyIamError(caught).message);
@@ -112,7 +115,7 @@ export function TagsTab({ entity, name }: TagsTabProps): ReactElement {
           <Button
             variant="primary"
             loading={saving}
-            disabled={!changed}
+            disabled={!changed || problems.length > 0}
             onClick={() => {
               void save();
             }}

@@ -10,10 +10,15 @@ import { useCallback, useMemo, useState, type ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { InfoTooltip } from '../../../components/InfoTooltip';
 import { ResourceListPage } from '../../../components/ResourceListPage';
+import { StatusBadge } from '../../../components/StatusBadge';
+import { useFlashbar } from '../../../hooks/useFlashbar';
 import { formatDateTime } from '../../../lib/format';
 import { serviceConsolePath } from '../../paths';
 import type { ServicePageProps } from '../../types';
 import { listImages, type Ec2Image } from '../api';
+import { copyTextToClipboard } from '../clipboard';
+import { imageStatusName } from '../status';
+import { EC2_PAGE_SIZE_OPTIONS } from '../listOptions';
 
 const OWNER_SCOPES: readonly SelectProps.Option[] = [
   { label: 'Amazon images', value: 'amazon' },
@@ -24,10 +29,13 @@ const OWNER_SCOPES: readonly SelectProps.Option[] = [
 /**
  * The console's AMI catalogue: the images the running LocalStack can launch,
  * filtered by owner scope, with a launch action that opens the wizard with the
- * image preselected.
+ * image preselected. The owner filter sits next to the text filter (it filters
+ * the list, it is not an alert), and the state renders through the shared
+ * indicator with console wording.
  */
 export function AmisListPage({ descriptor }: ServicePageProps): ReactElement {
   const navigate = useNavigate();
+  const flashbar = useFlashbar();
   const [filteringText, setFilteringText] = useState('');
   const [ownerScope, setOwnerScope] = useState<'amazon' | 'self' | 'all'>('amazon');
   const [reloadToken, setReloadToken] = useState(0);
@@ -42,6 +50,22 @@ export function AmisListPage({ descriptor }: ServicePageProps): ReactElement {
     (imageId: string): string =>
       `${serviceConsolePath(descriptor.id)}/instances/launch?imageId=${encodeURIComponent(imageId)}`,
     [descriptor.id],
+  );
+
+  const copyImageId = useCallback(
+    async (imageId: string): Promise<void> => {
+      try {
+        await copyTextToClipboard(imageId);
+        flashbar.notify({ type: 'success', header: 'Copied', content: imageId });
+      } catch (caught) {
+        flashbar.notify({
+          type: 'error',
+          header: 'Could not copy the AMI ID',
+          content: caught instanceof Error ? caught.message : 'The clipboard is not available.',
+        });
+      }
+    },
+    [flashbar],
   );
 
   const columns = useMemo<readonly TableProps.ColumnDefinition<Ec2Image>[]>(
@@ -108,7 +132,7 @@ export function AmisListPage({ descriptor }: ServicePageProps): ReactElement {
         id: 'state',
         header: 'State',
         sortingField: 'state',
-        cell: (image) => image.state ?? '—',
+        cell: (image) => <StatusBadge status={imageStatusName(image.state)} />,
       },
       {
         id: 'rootDeviceType',
@@ -118,6 +142,8 @@ export function AmisListPage({ descriptor }: ServicePageProps): ReactElement {
     ],
     [imagePath, navigate],
   );
+
+  const isFiltering = filteringText.trim().length > 0;
 
   return (
     <ResourceListPage<Ec2Image>
@@ -130,6 +156,8 @@ export function AmisListPage({ descriptor }: ServicePageProps): ReactElement {
       columns={columns}
       getRowId={(image) => image.imageId}
       reloadToken={reloadToken}
+      preferencesId="ec2-amis-list"
+      pageSizeOptions={EC2_PAGE_SIZE_OPTIONS}
       fetcher={({ nextToken, signal }) =>
         listImages({
           ...(ownerScope === 'all' ? {} : { owners: [ownerScope] }),
@@ -152,7 +180,7 @@ export function AmisListPage({ descriptor }: ServicePageProps): ReactElement {
           ].some((value) => value.toLowerCase().includes(needle));
         },
       }}
-      notifications={
+      filterExtras={
         <FormField
           label="Image source"
           description="The owner scope LocalStack filters on for this list."
@@ -180,7 +208,7 @@ export function AmisListPage({ descriptor }: ServicePageProps): ReactElement {
           onItemClick={({ detail }) => {
             if (detail.id === 'launch') navigate(launchPath(image.imageId));
             if (detail.id === 'view') navigate(imagePath(image.imageId));
-            if (detail.id === 'copy') void navigator.clipboard?.writeText(image.imageId);
+            if (detail.id === 'copy') void copyImageId(image.imageId);
           }}
         />
       )}
@@ -189,8 +217,12 @@ export function AmisListPage({ descriptor }: ServicePageProps): ReactElement {
           <Button disabled>Create image</Button>
         </InfoTooltip>
       }
-      emptyTitle="No AMIs"
-      emptyDescription="LocalStack reports no images for this owner scope. Switch to All images to see the catalogue."
+      emptyTitle={isFiltering ? 'No matches' : 'No AMIs'}
+      emptyDescription={
+        isFiltering
+          ? 'No AMI matches the current filter. Clear the filter or try another search term.'
+          : 'LocalStack reports no images for this owner scope. Switch to All images to see the catalogue.'
+      }
     />
   );
 }

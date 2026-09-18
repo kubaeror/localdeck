@@ -5,9 +5,14 @@
     "moduleResolution": "bundler",
     "lib": ["ES2023"],
     "types": ["node"],
-    "noEmit": true,
-    "declaration": false,
-    "declarationMap": false
+    // Referenced by tsconfig.json so the ESLint project service can resolve
+    // vite.config.ts. Composite is required for a project reference; the
+    // typecheck script still runs `tsc --noEmit`, so nothing is emitted.
+    "composite": true,
+    "emitDeclarationOnly": true,
+    "outDir": "node_modules/.cache/localdeck-tsconfig-node",
+    "declarationMap": false,
+    "sourceMap": false
   },
   "include": ["vite.config.ts"]
 }

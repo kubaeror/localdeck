@@ -32,6 +32,7 @@ describe('AppShell', () => {
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
   });
 
   it('renders the console chrome: brand, region, search, terminal, help and the local user', async () => {
@@ -42,7 +43,9 @@ describe('AppShell', () => {
     // measurement, so the region label legitimately appears twice.
     expect((await screen.findAllByText('us-east-1 (local)')).length).toBeGreaterThan(0);
     expect(screen.getAllByRole('button', { name: /Search services/ }).length).toBeGreaterThan(0);
-    expect(screen.getByRole('button', { name: 'Terminal (not implemented yet)' })).toBeDefined();
+    // The terminal is a placeholder behind VITE_TERMINAL_ENABLED, so it is
+    // hidden from the default build.
+    expect(screen.queryByRole('button', { name: 'Terminal (not implemented yet)' })).toBeNull();
     expect(screen.getByRole('button', { name: 'Help' })).toBeDefined();
     expect(screen.getByRole('button', { name: 'Signed in as local' })).toBeDefined();
 
@@ -270,7 +273,8 @@ describe('AppShell', () => {
     });
   });
 
-  it('keeps the terminal as an explicit placeholder', async () => {
+  it('keeps the terminal as an explicit placeholder behind its feature flag', async () => {
+    vi.stubEnv('VITE_TERMINAL_ENABLED', 'true');
     renderApp();
     await screen.findAllByText('us-east-1 (local)');
 
@@ -288,7 +292,7 @@ describe('AppShell', () => {
     await screen.findAllByText('us-east-1 (local)');
 
     fireEvent.keyDown(window, { key: '/', ctrlKey: true });
-    const input = await screen.findByRole('searchbox', { name: 'Search services' });
+    const input = await screen.findByRole('combobox', { name: 'Search services' });
 
     fireEvent.change(input, { target: { value: 'dynamodb' } });
     fireEvent.keyDown(input, { key: 'Enter' });

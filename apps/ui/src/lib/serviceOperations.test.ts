@@ -1,11 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
-  callServiceOperation,
-  extractResourceRows,
-  nextTokenFrom,
-  toPaginated,
-} from './serviceOperations';
+import { callServiceOperation, toPaginated } from './serviceOperations';
 
 describe('callServiceOperation', () => {
   afterEach(() => {
@@ -64,51 +59,7 @@ describe('callServiceOperation', () => {
   });
 });
 
-describe('extractResourceRows', () => {
-  it('maps an array of objects', () => {
-    const rows = extractResourceRows({
-      Buckets: [{ Name: 'alpha' }, { Name: 'beta' }],
-      Owner: { ID: 'o' },
-    });
-
-    expect(rows).toEqual([
-      { id: 'alpha', label: 'alpha', raw: { Name: 'alpha' } },
-      { id: 'beta', label: 'beta', raw: { Name: 'beta' } },
-    ]);
-  });
-
-  it('maps an array of strings', () => {
-    expect(extractResourceRows({ TableNames: ['users', 'orders'] })).toEqual([
-      { id: 'users', label: 'users', raw: { Name: 'users' } },
-      { id: 'orders', label: 'orders', raw: { Name: 'orders' } },
-    ]);
-  });
-
-  it('prefers AWS identifiers over array positions', () => {
-    const rows = extractResourceRows({
-      Items: [{ TableName: 'orders', tableSizeBytes: 12 }, { FunctionName: 'handler' }],
-    });
-
-    expect(rows.map((row) => row.id)).toEqual(['orders', 'handler']);
-  });
-
-  it('skips metadata-only responses and empty collections', () => {
-    expect(extractResourceRows({ ResponseMetadata: { httpStatusCode: 200 } })).toEqual([]);
-    expect(extractResourceRows({ Buckets: [], NextToken: 'abc' })).toEqual([]);
-    expect(extractResourceRows(null)).toEqual([]);
-    expect(extractResourceRows('nope')).toEqual([]);
-  });
-});
-
 describe('pagination helpers', () => {
-  it('reads the token field whichever name the service uses', () => {
-    expect(nextTokenFrom({ NextToken: 'a' })).toBe('a');
-    expect(nextTokenFrom({ ContinuationToken: 'b' })).toBe('b');
-    expect(nextTokenFrom({ Marker: 'c' })).toBe('c');
-    expect(nextTokenFrom({})).toBeUndefined();
-    expect(nextTokenFrom(undefined)).toBeUndefined();
-  });
-
   it('packages rows into the paginated envelope', () => {
     expect(toPaginated([1, 2])).toEqual({ items: [1, 2] });
     expect(toPaginated([1], 'next')).toEqual({ items: [1], nextToken: 'next' });

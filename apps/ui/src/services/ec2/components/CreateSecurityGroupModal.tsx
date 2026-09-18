@@ -81,6 +81,7 @@ export function CreateSecurityGroupModal({
   const selectedVpc = vpcOptions.find((option) => option.value === selectedVpcId) ?? null;
 
   const submit = async (): Promise<void> => {
+    if (submitting) return;
     const nameProblem = validateSecurityGroupName(name);
     const descriptionProblem = validateSecurityGroupDescription(description);
     setNameError(nameProblem);

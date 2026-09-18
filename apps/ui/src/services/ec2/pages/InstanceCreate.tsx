@@ -28,12 +28,15 @@ import { serviceConsolePath } from '../../paths';
 import type { ServicePageProps } from '../../types';
 import {
   createKeyPair,
-  listImages,
-  listInstanceTypes,
+  deleteKeyPair,
+  getImage,
+  listAllImages,
+  listAllInstanceTypes,
   listKeyPairs,
   listSecurityGroups,
   listSubnets,
   listVpcs,
+  newClientToken,
   runInstances,
   type CreatedEc2KeyPair,
   type Ec2Image,
@@ -44,6 +47,12 @@ import {
   type Ec2Vpc,
 } from '../api';
 import { toFriendlyEc2Error } from '../errors';
+import {
+  defaultVolumePerformance,
+  validateVolumeIops,
+  validateVolumeSize,
+  volumeTypeLimit,
+} from '../limits';
 import {
   nextDeviceName,
   validateInstanceName,
@@ -76,6 +85,8 @@ interface ExtraVolume {
   deviceName: string;
   sizeGiB: number;
   volumeType: string;
+  /** Only set for volume types that take an explicit IOPS value. */
+  iops?: number;
   deleteOnTermination: boolean;
   encrypted: boolean;
 }
@@ -88,7 +99,9 @@ function downloadKeyMaterial(keyPair: CreatedEc2KeyPair): void {
   anchor.href = url;
   anchor.download = `${keyPair.keyName}.pem`;
   anchor.click();
-  URL.revokeObjectURL(url);
+  // Firefox needs the object URL to outlive the click handler turn; revoking
+  // in the same tick can truncate the download.
+  window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
 }
 
 /** Memory in MiB rendered the way the console does. */
@@ -105,12 +118,26 @@ function platformLabel(image: Ec2Image): string {
   return 'Linux/UNIX';
 }
 
+/** The extra-volume problem for one row, or `null` when the row is valid. */
+function extraVolumeProblem(volume: ExtraVolume): string | null {
+  const sizeProblem = validateVolumeSize(volume.volumeType, volume.sizeGiB);
+  if (sizeProblem !== null) return `Additional volume ${volume.deviceName}: ${sizeProblem}`;
+  const limit = volumeTypeLimit(volume.volumeType).iops;
+  if (limit === undefined) return null;
+  if (volume.iops === undefined) {
+    return `Additional volume ${volume.deviceName}: enter provisioned IOPS for ${volume.volumeType}.`;
+  }
+  const iopsProblem = validateVolumeIops(volume.volumeType, volume.sizeGiB, volume.iops);
+  return iopsProblem === null ? null : `Additional volume ${volume.deviceName}: ${iopsProblem}`;
+}
+
 /**
  * The console's multi-step launch wizard: name and tags, AMI, instance type,
  * key pair, network settings, storage and review, with the right-hand summary
  * column updating on every change. Submitting calls `RunInstances` once, with
  * the Name tag and every extra tag applied in the same call; a key pair created
- * along the way is shown exactly once, like the console's .pem download.
+ * along the way is shown exactly once, like the console's .pem download, and is
+ * kept across a failed launch so it can be downloaded, deleted or reused.
  */
 export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactElement {
   const navigate = useNavigate();
@@ -140,6 +167,9 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
   const [keyPairMode, setKeyPairMode] = useState<'none' | 'existing' | 'new'>('none');
   const [existingKeyName, setExistingKeyName] = useState<string | null>(null);
   const [newKeyName, setNewKeyName] = useState('');
+  const [createdKeyPair, setCreatedKeyPair] = useState<CreatedEc2KeyPair | null>(null);
+  const [keyPairRecoveryError, setKeyPairRecoveryError] = useState<string | null>(null);
+  const [keyPairDeleting, setKeyPairDeleting] = useState(false);
 
   const [vpcs, setVpcs] = useState<readonly Ec2Vpc[]>([]);
   const [vpcId, setVpcId] = useState<string | null>(null);
@@ -152,6 +182,7 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
 
   const [rootSizeGiB, setRootSizeGiB] = useState('8');
   const [rootVolumeType, setRootVolumeType] = useState('gp3');
+  const [rootIops, setRootIops] = useState('3000');
   const [rootEncrypted, setRootEncrypted] = useState(false);
   const [deleteRootOnTermination, setDeleteRootOnTermination] = useState(true);
   const [extraVolumes, setExtraVolumes] = useState<readonly ExtraVolume[]>([]);
@@ -160,43 +191,68 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
   const [activeStepIndex, setActiveStepIndex] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
-  const [createdKeyPair, setCreatedKeyPair] = useState<CreatedEc2KeyPair | null>(null);
   const [createdInstanceId, setCreatedInstanceId] = useState<string | null>(null);
-  const [launchNote, setLaunchNote] = useState<string | null>(null);
+  // One token per wizard mount: a retried launch is idempotent on the service
+  // side instead of creating a second instance.
+  const clientToken = useRef(newClientToken());
+
+  const imagesRequestId = useRef(0);
+  const typesRequestId = useRef(0);
+  const networkRequestId = useRef(0);
 
   const loadImages = useCallback(
     async (scope: 'amazon' | 'self' | 'all'): Promise<void> => {
+      const requestId = imagesRequestId.current + 1;
+      imagesRequestId.current = requestId;
       setImagesLoading(true);
       try {
-        const page = await listImages({
-          ...(scope === 'all' ? {} : { owners: [scope] }),
-        });
-        setImages(page.items);
+        let items = await listAllImages(scope === 'all' ? {} : { owners: [scope] });
+        if (imagesRequestId.current !== requestId) return;
+        // A wizard opened from an AMI outside the current owner scope still
+        // preselects that AMI instead of silently falling back to the first.
+        if (
+          requestedImageId !== null &&
+          !items.some((image) => image.imageId === requestedImageId)
+        ) {
+          try {
+            const requested = await getImage(requestedImageId);
+            if (imagesRequestId.current !== requestId) return;
+            items = [requested, ...items];
+          } catch {
+            // The requested image is gone; the loaded catalogue stays usable.
+          }
+        }
+        setImages(items);
         setImageId((current) => {
-          if (current !== null && page.items.some((image) => image.imageId === current)) {
+          if (current !== null && items.some((image) => image.imageId === current)) {
             return current;
           }
-          const requested = requestedImageId;
-          if (requested !== null && page.items.some((image) => image.imageId === requested)) {
-            return requested;
+          if (
+            requestedImageId !== null &&
+            items.some((image) => image.imageId === requestedImageId)
+          ) {
+            return requestedImageId;
           }
-          return page.items[0]?.imageId ?? null;
+          return items[0]?.imageId ?? null;
         });
         setImagesError(null);
       } catch (caught) {
+        if (imagesRequestId.current !== requestId) return;
         setImagesError(toFriendlyEc2Error(caught).message);
       } finally {
-        setImagesLoading(false);
+        if (imagesRequestId.current === requestId) setImagesLoading(false);
       }
     },
     [requestedImageId],
   );
 
   const loadTypes = useCallback(async (): Promise<void> => {
+    const requestId = typesRequestId.current + 1;
+    typesRequestId.current = requestId;
     setTypesLoading(true);
     try {
-      const result = await listInstanceTypes();
-      const items = result.items;
+      const items = await listAllInstanceTypes();
+      if (typesRequestId.current !== requestId) return;
       setInstanceTypes(items);
       setInstanceType((current) =>
         items.some((entry) => entry.instanceType === current)
@@ -207,21 +263,25 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
       );
       setTypesError(null);
     } catch (caught) {
+      if (typesRequestId.current !== requestId) return;
       setTypesError(toFriendlyEc2Error(caught).message);
     } finally {
-      setTypesLoading(false);
+      if (typesRequestId.current === requestId) setTypesLoading(false);
     }
   }, []);
 
   const loadNetwork = useCallback(async (selectedVpcId: string | null): Promise<void> => {
+    const requestId = networkRequestId.current + 1;
+    networkRequestId.current = requestId;
     setNetworkLoading(true);
     try {
-      const [subnetList, groups] = await Promise.all([
+      const [subnetList, groupPage] = await Promise.all([
         listSubnets(selectedVpcId === null ? {} : { vpcId: selectedVpcId }),
         listSecurityGroups(
           selectedVpcId === null ? {} : { filters: [{ Name: 'vpc-id', Values: [selectedVpcId] }] },
         ),
       ]);
+      if (networkRequestId.current !== requestId) return;
       setSubnets(subnetList);
       setSubnetId((current) =>
         current !== null && subnetList.some((subnet) => subnet.subnetId === current)
@@ -230,19 +290,21 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
             subnetList[0]?.subnetId ??
             null),
       );
-      setSecurityGroups(groups.items);
+      const groups = groupPage.items;
+      setSecurityGroups(groups);
       setSecurityGroupIds((current) => {
-        const available = new Set(groups.items.map((group) => group.groupId));
+        const available = new Set(groups.map((group) => group.groupId));
         const kept = current.filter((id) => available.has(id));
         if (kept.length > 0) return kept;
-        const fallback = groups.items.find((group) => group.groupName === 'default');
+        const fallback = groups.find((group) => group.groupName === 'default');
         return fallback === undefined ? [] : [fallback.groupId];
       });
       setNetworkError(null);
     } catch (caught) {
+      if (networkRequestId.current !== requestId) return;
       setNetworkError(toFriendlyEc2Error(caught).message);
     } finally {
-      setNetworkLoading(false);
+      if (networkRequestId.current === requestId) setNetworkLoading(false);
     }
   }, []);
 
@@ -317,11 +379,43 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
     );
   }, [imageFilter, images]);
 
+  const imageArchitecture = selectedImage?.architecture;
+
+  // The AMI's architecture constrains the instance types: an arm64 image can
+  // only run on arm64 types (and vice versa).
+  const compatibleTypes = useMemo(() => {
+    if (imageArchitecture === undefined) return instanceTypes;
+    return instanceTypes.filter(
+      (type) => type.architecture === undefined || type.architecture === imageArchitecture,
+    );
+  }, [imageArchitecture, instanceTypes]);
+
   const filteredTypes = useMemo(() => {
     const needle = typeFilter.trim().toLowerCase();
-    if (needle.length === 0) return instanceTypes;
-    return instanceTypes.filter((type) => type.instanceType.toLowerCase().includes(needle));
-  }, [instanceTypes, typeFilter]);
+    if (needle.length === 0) return compatibleTypes;
+    return compatibleTypes.filter((type) => type.instanceType.toLowerCase().includes(needle));
+  }, [compatibleTypes, typeFilter]);
+
+  const effectiveInstanceType = useMemo(() => {
+    if (imageArchitecture === undefined || instanceTypes.length === 0) return instanceType;
+    const selected = instanceTypes.find((type) => type.instanceType === instanceType);
+    if (selected?.architecture === undefined || selected.architecture === imageArchitecture) {
+      return instanceType;
+    }
+    // The catalogue loaded after the AMI (or the AMI changed): keep the launch
+    // valid by falling back to the first compatible type instead of leaving a
+    // selection the table cannot even show.
+    return compatibleTypes[0]?.instanceType ?? instanceType;
+  }, [compatibleTypes, imageArchitecture, instanceType, instanceTypes]);
+
+  const architectureProblem = useMemo(() => {
+    if (imageArchitecture === undefined) return null;
+    const selected = instanceTypes.find((type) => type.instanceType === effectiveInstanceType);
+    if (selected?.architecture === undefined) return null;
+    return selected.architecture === imageArchitecture
+      ? null
+      : `The selected AMI is built for ${imageArchitecture}, but ${effectiveInstanceType} supports ${selected.architecture}. Pick an instance type for ${imageArchitecture}.`;
+  }, [effectiveInstanceType, imageArchitecture, instanceTypes]);
 
   const meaningfulTags = tags.filter(
     (tag) => tag.Key.trim().length > 0 || tag.Value.trim().length > 0,
@@ -329,36 +423,90 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
 
   const rootDeviceName = selectedImage?.rootDeviceName ?? '/dev/sda1';
   const rootSize = Number.parseInt(rootSizeGiB, 10);
+  const rootIopsValue = Number.parseInt(rootIops, 10);
+  const rootIopsLimit = volumeTypeLimit(rootVolumeType).iops;
 
-  const storageProblem = !Number.isInteger(rootSize)
-    ? 'Enter the root volume size in GiB.'
-    : rootSize < 1 || rootSize > 16384
-      ? 'The root volume size must be between 1 and 16384 GiB.'
-      : extraVolumes.some((volume) => volume.sizeGiB < 1 || volume.sizeGiB > 16384)
-        ? 'Every additional volume must be between 1 and 16384 GiB.'
-        : null;
+  const rootStorageProblem =
+    validateVolumeSize(rootVolumeType, rootSize) ??
+    (rootIopsLimit === undefined
+      ? null
+      : rootIops.trim().length === 0
+        ? `Enter provisioned IOPS for the ${rootVolumeType} root volume.`
+        : validateVolumeIops(rootVolumeType, rootSize, rootIopsValue));
+
+  const storageProblem =
+    rootStorageProblem ??
+    extraVolumes.map(extraVolumeProblem).find((problem) => problem !== null) ??
+    null;
 
   const nameProblem = validateInstanceName(name);
   const newKeyPairProblem = keyPairMode === 'new' ? validateKeyPairName(newKeyName) : null;
+  const keyPairRecoveryVisible =
+    createdInstanceId === null && createdKeyPair !== null && keyPairRecoveryError !== null;
+
+  const selectRootVolumeType = (next: string): void => {
+    setRootVolumeType(next);
+    const defaults = defaultVolumePerformance(next);
+    if (defaults.iops !== undefined) setRootIops(String(defaults.iops));
+  };
+
+  const selectExtraVolumeType = (rowId: number, next: string): void => {
+    const defaults = defaultVolumePerformance(next);
+    setExtraVolumes((current) =>
+      current.map((entry) =>
+        entry.rowId === rowId ? { ...entry, volumeType: next, iops: defaults.iops } : entry,
+      ),
+    );
+  };
+
+  const removeCreatedKeyPair = async (): Promise<void> => {
+    if (createdKeyPair === null || keyPairDeleting) return;
+    setKeyPairDeleting(true);
+    try {
+      await deleteKeyPair(createdKeyPair.keyName);
+      flashbar.notify({
+        type: 'info',
+        header: 'Key pair deleted',
+        content: `${createdKeyPair.keyName} can be created again with another name or on the next launch.`,
+      });
+      setCreatedKeyPair(null);
+      setKeyPairRecoveryError(null);
+    } catch (caught) {
+      flashbar.notify({
+        type: 'error',
+        header: 'Could not delete the key pair',
+        content: toFriendlyEc2Error(caught).message,
+      });
+    } finally {
+      setKeyPairDeleting(false);
+    }
+  };
 
   const submit = async (): Promise<void> => {
+    if (submitting) return;
     setSubmitting(true);
     setError(null);
-    setLaunchNote(null);
 
     let keyName: string | undefined;
     try {
       if (keyPairMode === 'new') {
-        const created = await createKeyPair(newKeyName);
-        setCreatedKeyPair(created);
-        keyName = created.keyName;
+        if (createdKeyPair !== null) {
+          // A failed launch keeps the created pair; retrying reuses it instead
+          // of failing with InvalidKeyPair.Duplicate.
+          keyName = createdKeyPair.keyName;
+        } else {
+          const created = await createKeyPair(newKeyName);
+          setCreatedKeyPair(created);
+          keyName = created.keyName;
+        }
       } else if (keyPairMode === 'existing' && existingKeyName !== null) {
         keyName = existingKeyName;
       }
 
       const instance = await runInstances({
         imageId: imageId ?? '',
-        instanceType,
+        instanceType: effectiveInstanceType,
+        clientToken: clientToken.current,
         tags: [
           ...(name.trim().length === 0 ? [] : [{ Key: 'Name', Value: name.trim() }]),
           ...meaningfulTags.filter((tag) => tag.Key !== 'Name'),
@@ -382,6 +530,7 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
             volumeType: rootVolumeType,
             deleteOnTermination: deleteRootOnTermination,
             encrypted: rootEncrypted,
+            ...(rootIopsLimit === undefined ? {} : { iops: rootIopsValue }),
           },
           ...extraVolumes.map((volume) => ({
             deviceName: volume.deviceName,
@@ -389,24 +538,26 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
             volumeType: volume.volumeType,
             deleteOnTermination: volume.deleteOnTermination,
             encrypted: volume.encrypted,
+            ...(volume.iops === undefined ? {} : { iops: volume.iops }),
           })),
         ],
       });
 
       flashbar.notify({
-        type: 'success',
+        type: 'info',
         header: 'Launch request submitted',
-        content: `${instance.instanceId} is starting.`,
+        content: `${instance.instanceId} is starting; the instance page refreshes automatically.`,
       });
+      setKeyPairRecoveryError(null);
       setCreatedInstanceId(instance.instanceId);
     } catch (caught) {
       const friendly = toFriendlyEc2Error(caught);
-      if (keyPairMode === 'new' && keyName !== undefined) {
-        setLaunchNote(
-          `The key pair "${keyName}" was created before the launch failed. Delete it if you do not need it.`,
-        );
-      }
       setError({ ...friendly.apiError, message: friendly.message });
+      // A pair created before the failure is kept: the user sees the private
+      // key once and can download it, delete it, or retry with the same pair.
+      if (keyPairMode === 'new' && keyName !== undefined) {
+        setKeyPairRecoveryError(friendly.message);
+      }
       if (friendly.field === 'imageId') setActiveStepIndex(1);
       if (friendly.field === 'instanceType') setActiveStepIndex(2);
       if (friendly.field === 'keyName') setActiveStepIndex(3);
@@ -459,6 +610,7 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
     },
     { id: 'vCpus', header: 'vCPUs', cell: (type) => type.vCpus ?? '—' },
     { id: 'memory', header: 'Memory', cell: (type) => formatMemory(type.memoryMiB) },
+    { id: 'architecture', header: 'Architecture', cell: (type) => type.architecture ?? '—' },
     {
       id: 'storage',
       header: 'Instance storage',
@@ -514,7 +666,7 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
       header={
         <Header
           variant="h2"
-          description="The AMI determines the operating system and the initial root volume. LocalStack reports the images it can emulate."
+          description="The AMI determines the operating system and the initial root volume. LocalDeck loads the full catalogue LocalStack reports for the selected owner."
           actions={
             <Button
               iconName="refresh"
@@ -608,7 +760,7 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
       header={
         <Header
           variant="h2"
-          description="The instance type determines CPU, memory and network capacity. LocalStack reports the catalogue it knows."
+          description="The instance type determines CPU, memory and network capacity. LocalDeck loads the full catalogue LocalStack reports."
           actions={
             <Button
               iconName="refresh"
@@ -627,12 +779,21 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
       <SpaceBetween size="m">
         {typesError === null ? null : <Alert type="error">{typesError}</Alert>}
 
+        {imageArchitecture === undefined ? null : (
+          <Alert type="info">
+            Showing instance types that support <strong>{imageArchitecture}</strong>, the
+            architecture of the selected AMI.
+          </Alert>
+        )}
+
         <Table<Ec2InstanceType>
           variant="embedded"
           loading={typesLoading}
           loadingText="Loading instance types"
           selectionType="single"
-          selectedItems={instanceTypes.filter((type) => type.instanceType === instanceType)}
+          selectedItems={compatibleTypes.filter(
+            (type) => type.instanceType === effectiveInstanceType,
+          )}
           onSelectionChange={({ detail }) => {
             const next = detail.selectedItems[0];
             if (next !== undefined) setInstanceType(next.instanceType);
@@ -670,7 +831,9 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
           }
           empty={
             <Box textAlign="center" color="text-body-secondary">
-              No instance types match this filter.
+              {imageArchitecture === undefined
+                ? 'No instance types match this filter.'
+                : `No instance type for ${imageArchitecture} matches this filter.`}
             </Box>
           }
         />
@@ -727,16 +890,54 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
             label="New key pair name"
             errorText={newKeyPairProblem ?? undefined}
             constraintText={<Box variant="small">{KEY_PAIR_NAME_RULES.join(' · ')}</Box>}
+            description={
+              createdKeyPair === null
+                ? undefined
+                : `"${createdKeyPair.keyName}" already exists from the previous launch attempt; this wizard reuses it. Delete it to use another name.`
+            }
           >
             <Input
               value={newKeyName}
               placeholder="localdeck-key"
+              disabled={createdKeyPair !== null}
               onChange={({ detail }) => {
                 setNewKeyName(detail.value);
               }}
             />
           </FormField>
         ) : null}
+
+        {createdKeyPair === null ? null : (
+          <Alert
+            type="warning"
+            header="The private key is only shown once"
+            action={
+              <SpaceBetween direction="horizontal" size="xs">
+                <Button
+                  onClick={() => {
+                    downloadKeyMaterial(createdKeyPair);
+                  }}
+                >
+                  Download key pair
+                </Button>
+                <Button
+                  loading={keyPairDeleting}
+                  onClick={() => {
+                    void removeCreatedKeyPair();
+                  }}
+                >
+                  Delete key pair
+                </Button>
+              </SpaceBetween>
+            }
+          >
+            LocalDeck created{' '}
+            <Box variant="code" display="inline">
+              {createdKeyPair.keyName}
+            </Box>{' '}
+            for this launch. Download the .pem now or keep it — retrying the launch reuses it.
+          </Alert>
+        )}
 
         <Alert type="info">
           LocalStack stores key pairs like AWS does: the private key material is returned only by
@@ -873,7 +1074,15 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
         <SpaceBetween size="m">
           <Box variant="h3">Root volume ({rootDeviceName})</Box>
           <SpaceBetween direction="horizontal" size="m">
-            <FormField label="Size (GiB)" errorText={storageProblem ?? undefined}>
+            <FormField
+              label="Size (GiB)"
+              errorText={rootStorageProblem ?? undefined}
+              constraintText={
+                rootVolumeType === 'st1' || rootVolumeType === 'sc1'
+                  ? 'st1/sc1 volumes start at 125 GiB.'
+                  : undefined
+              }
+            >
               <Input
                 value={rootSizeGiB}
                 inputMode="numeric"
@@ -891,10 +1100,25 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
                 options={volumeTypeOptions}
                 ariaLabel="Root volume type"
                 onChange={({ detail }) => {
-                  setRootVolumeType(detail.selectedOption.value ?? 'gp3');
+                  selectRootVolumeType(detail.selectedOption.value ?? 'gp3');
                 }}
               />
             </FormField>
+            {rootIopsLimit === undefined ? null : (
+              <FormField
+                label="Provisioned IOPS"
+                description={`${rootVolumeType} supports ${rootIopsLimit.min}–${rootIopsLimit.max} IOPS.`}
+              >
+                <Input
+                  value={rootIops}
+                  inputMode="numeric"
+                  ariaLabel="Root volume IOPS"
+                  onChange={({ detail }) => {
+                    setRootIops(detail.value);
+                  }}
+                />
+              </FormField>
+            )}
           </SpaceBetween>
           <SpaceBetween size="xs">
             <Checkbox
@@ -960,15 +1184,40 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
                     options={volumeTypeOptions}
                     ariaLabel={`Volume type of ${volume.deviceName}`}
                     onChange={({ detail }) => {
-                      const next = detail.selectedOption.value ?? 'gp3';
-                      setExtraVolumes((current) =>
-                        current.map((entry) =>
-                          entry.rowId === volume.rowId ? { ...entry, volumeType: next } : entry,
-                        ),
-                      );
+                      selectExtraVolumeType(volume.rowId, detail.selectedOption.value ?? 'gp3');
                     }}
                   />
                 ),
+              },
+              {
+                id: 'iops',
+                header: 'IOPS',
+                cell: (volume) =>
+                  volumeTypeLimit(volume.volumeType).iops === undefined ? (
+                    '—'
+                  ) : (
+                    <Input
+                      value={volume.iops === undefined ? '' : String(volume.iops)}
+                      inputMode="numeric"
+                      ariaLabel={`Provisioned IOPS of ${volume.deviceName}`}
+                      onChange={({ detail }) => {
+                        const parsed = Number.parseInt(detail.value, 10);
+                        setExtraVolumes((current) =>
+                          current.map((entry) =>
+                            entry.rowId === volume.rowId
+                              ? {
+                                  ...entry,
+                                  iops:
+                                    detail.value.trim().length === 0 || Number.isNaN(parsed)
+                                      ? undefined
+                                      : parsed,
+                                }
+                              : entry,
+                          ),
+                        );
+                      }}
+                    />
+                  ),
               },
               {
                 id: 'delete',
@@ -988,6 +1237,27 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
                     }}
                   >
                     {volume.deleteOnTermination ? 'Yes' : 'No'}
+                  </Checkbox>
+                ),
+              },
+              {
+                id: 'encrypted',
+                header: 'Encryption',
+                cell: (volume) => (
+                  <Checkbox
+                    checked={volume.encrypted}
+                    ariaLabel={`Encrypt ${volume.deviceName}`}
+                    onChange={({ detail }) => {
+                      setExtraVolumes((current) =>
+                        current.map((entry) =>
+                          entry.rowId === volume.rowId
+                            ? { ...entry, encrypted: detail.checked }
+                            : entry,
+                        ),
+                      );
+                    }}
+                  >
+                    {volume.encrypted ? 'Encrypted' : 'Not encrypted'}
                   </Checkbox>
                 ),
               },
@@ -1037,6 +1307,7 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
                   deviceName: next,
                   sizeGiB: 8,
                   volumeType: 'gp3',
+                  iops: defaultVolumePerformance('gp3').iops,
                   deleteOnTermination: false,
                   encrypted: false,
                 },
@@ -1064,14 +1335,14 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
                   ? 'Not selected'
                   : `${selectedImage.name ?? selectedImage.imageId} (${selectedImage.imageId})`,
             },
-            { label: 'Instance type', value: instanceType },
+            { label: 'Instance type', value: effectiveInstanceType },
             {
               label: 'Key pair',
               value:
                 keyPairMode === 'existing'
                   ? (existingKeyName ?? 'Not selected')
                   : keyPairMode === 'new'
-                    ? `${newKeyName} (created on launch)`
+                    ? (createdKeyPair?.keyName ?? `${newKeyName} (created on launch)`)
                     : 'None',
             },
             {
@@ -1150,7 +1421,8 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
             id: 'type',
             title: 'Instance type',
             description: 'Choose CPU and memory.',
-            validate: () => (instanceType.length === 0 ? 'Select an instance type.' : null),
+            validate: () =>
+              instanceType.length === 0 ? 'Select an instance type.' : architectureProblem,
             content: typeStep,
           },
           {
@@ -1158,7 +1430,9 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
             title: 'Key pair',
             description: 'Choose how to log in.',
             validate: () => {
-              if (keyPairMode === 'new') return newKeyPairProblem;
+              if (keyPairMode === 'new') {
+                return createdKeyPair === null ? newKeyPairProblem : null;
+              }
               if (keyPairMode === 'existing' && existingKeyName === null) {
                 return 'Select a key pair or proceed without one.';
               }
@@ -1203,7 +1477,7 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
               keyPairMode === 'existing'
                 ? (existingKeyName ?? '—')
                 : keyPairMode === 'new'
-                  ? `${newKeyName} (new)`
+                  ? (createdKeyPair?.keyName ?? `${newKeyName} (new)`)
                   : 'None',
           },
           { label: 'Subnet', value: subnetId ?? '—' },
@@ -1292,11 +1566,80 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
                 </FormField>
               </SpaceBetween>
             )}
-
-            {launchNote === null ? null : <Alert type="info">{launchNote}</Alert>}
           </SpaceBetween>
         </Modal>
       )}
+
+      {keyPairRecoveryVisible ? (
+        <Modal
+          visible
+          onDismiss={() => {
+            setKeyPairRecoveryError(null);
+          }}
+          header="Launch failed — save your private key"
+          size="large"
+          closeAriaLabel="Close launch failure summary"
+          footer={
+            <Box float="right">
+              <SpaceBetween direction="horizontal" size="xs">
+                <Button
+                  onClick={() => {
+                    if (createdKeyPair !== null) downloadKeyMaterial(createdKeyPair);
+                  }}
+                >
+                  Download key pair
+                </Button>
+                <Button
+                  loading={keyPairDeleting}
+                  onClick={() => {
+                    void removeCreatedKeyPair();
+                  }}
+                >
+                  Delete key pair
+                </Button>
+                <Button
+                  variant="primary"
+                  onClick={() => {
+                    setKeyPairRecoveryError(null);
+                  }}
+                >
+                  Back to the wizard
+                </Button>
+              </SpaceBetween>
+            </Box>
+          }
+        >
+          <SpaceBetween size="m">
+            <Alert type="error" header="The launch request failed">
+              {keyPairRecoveryError}
+            </Alert>
+
+            {createdKeyPair === null ? null : (
+              <>
+                <Alert type="warning" header="This is the only time the private key is shown">
+                  LocalDeck created{' '}
+                  <Box variant="code" display="inline">
+                    {createdKeyPair.keyName}
+                  </Box>{' '}
+                  before the launch failed. Download it now, or keep it — the wizard reuses this
+                  pair on the next launch attempt instead of creating a duplicate.
+                </Alert>
+                <FormField label="Private key material">
+                  <Box variant="code">
+                    <textarea
+                      readOnly
+                      value={createdKeyPair.keyMaterial}
+                      rows={6}
+                      aria-label="Private key material"
+                      style={{ width: '100%', fontFamily: 'monospace' }}
+                    />
+                  </Box>
+                </FormField>
+              </>
+            )}
+          </SpaceBetween>
+        </Modal>
+      ) : null}
     </>
   );
 }

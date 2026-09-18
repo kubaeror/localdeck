@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatJson, parseJson, stringifyJson, toJsonLines, validateJson } from './json';
+import { formatJson, parseJson, stringifyJson, validateJson } from './json';
 
 describe('parseJson', () => {
   it('parses valid documents', () => {
@@ -39,21 +39,6 @@ describe('formatJson', () => {
 
   it('returns null for invalid JSON', () => {
     expect(formatJson('{oops}')).toBeNull();
-  });
-});
-
-describe('toJsonLines', () => {
-  it('splits pretty JSON into lines', () => {
-    const result = toJsonLines('{"a":1,"b":[2,3]}');
-    expect(result.ok).toBe(true);
-    expect(result.lines.length).toBeGreaterThan(3);
-    expect(result.lines.join('\n')).toContain('"b"');
-  });
-
-  it('shows invalid JSON exactly as typed', () => {
-    const result = toJsonLines('{oops}');
-    expect(result.ok).toBe(false);
-    expect(result.lines).toEqual(['{oops}']);
   });
 });
 

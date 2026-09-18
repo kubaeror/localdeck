@@ -8,8 +8,18 @@ export interface GlobalSearchContextValue {
 
 export const GlobalSearchContext = createContext<GlobalSearchContextValue | null>(null);
 
-/** Keyboard shortcut that opens the console service search. */
-export const GLOBAL_SEARCH_SHORTCUT_LABEL = 'Ctrl+/';
+/** True on Apple platforms, where the console shows Cmd instead of Ctrl. */
+function isApplePlatform(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const platform = navigator.platform ?? '';
+  return /mac|iphone|ipad|ipod/i.test(platform) || /Mac OS X/i.test(navigator.userAgent);
+}
+
+/**
+ * Keyboard shortcut that opens the console service search. The handler accepts
+ * Ctrl+/ and Cmd+/; the label matches the platform the console runs on.
+ */
+export const GLOBAL_SEARCH_SHORTCUT_LABEL = isApplePlatform() ? 'Cmd+/' : 'Ctrl+/';
 
 /** True for Ctrl+/ and Cmd+/. */
 export function isGlobalSearchShortcut(event: KeyboardEvent): boolean {

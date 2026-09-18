@@ -6,9 +6,9 @@ import Form from '@cloudscape-design/components/form';
 import Header from '@cloudscape-design/components/header';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import { useState, type ReactElement, type ReactNode } from 'react';
-import { TagsEditor } from '../../../components/TagsEditor';
+import { TagsEditor, validateTags } from '../../../components/TagsEditor';
 import { useFlashbar } from '../../../hooks/useFlashbar';
-import { tagResource, untagResource, type EksCluster } from '../api';
+import { normalizeTags, tagResource, untagResource, type EksCluster } from '../api';
 import { toFriendlyEksError } from '../errors';
 
 export interface ClusterTagsTabProps {
@@ -25,7 +25,8 @@ export interface ClusterTagsTabProps {
  *
  * The editor keeps a draft only while the user is editing (`null` means "show
  * the cluster's tags"), so a background refresh never overwrites an unsaved
- * edit.
+ * edit. Saving is blocked while the tag set violates the AWS rules, and a
+ * partial failure reports exactly which keys were applied.
  */
 export function ClusterTagsTab({
   cluster,
@@ -39,28 +40,61 @@ export function ClusterTagsTab({
 
   const tags = cluster.tags;
   const edited = draft ?? tags;
+  const problems = validateTags(edited);
   const changed = draft !== null && JSON.stringify(edited) !== JSON.stringify(tags);
+  const arn = cluster.arn;
 
   const save = async (): Promise<void> => {
+    if (arn === undefined) {
+      setSaveError(
+        'LocalStack did not report an ARN for this cluster, so LocalDeck cannot tag it.',
+      );
+      return;
+    }
+    if (problems.length > 0) return;
+
     setSaving(true);
     setSaveError(null);
-    try {
-      const loadedByKey = new Map(tags.map((tag) => [tag.Key, tag.Value]));
-      const editedByKey = new Map(edited.map((tag) => [tag.Key, tag.Value]));
-      const upserts = edited.filter((tag) => loadedByKey.get(tag.Key) !== tag.Value);
-      const removedKeys = tags.filter((tag) => !editedByKey.has(tag.Key)).map((tag) => tag.Key);
 
-      if (upserts.length > 0) await tagResource(cluster.arn, upserts);
-      if (removedKeys.length > 0) await untagResource(cluster.arn, removedKeys);
+    const current = normalizeTags(tags);
+    const next = normalizeTags(edited);
+    const loadedByKey = new Map(current.map((tag) => [tag.Key, tag.Value]));
+    const editedByKey = new Map(next.map((tag) => [tag.Key, tag.Value]));
+    const upserts = next.filter((tag) => loadedByKey.get(tag.Key) !== tag.Value);
+    const removedKeys = current.filter((tag) => !editedByKey.has(tag.Key)).map((tag) => tag.Key);
 
-      setDraft(null);
-      flashbar.notify({ type: 'success', header: 'Tags saved', content: cluster.arn });
-      onSaved?.();
-    } catch (caught) {
-      setSaveError(toFriendlyEksError(caught).message);
-    } finally {
-      setSaving(false);
+    const applied: string[] = [];
+    const failures: string[] = [];
+
+    if (upserts.length > 0) {
+      try {
+        await tagResource(arn, upserts);
+        applied.push(...upserts.map((tag) => tag.Key));
+      } catch (caught) {
+        failures.push(toFriendlyEksError(caught).message);
+      }
     }
+    if (removedKeys.length > 0) {
+      try {
+        await untagResource(arn, removedKeys);
+        applied.push(...removedKeys.map((key) => `removed ${key}`));
+      } catch (caught) {
+        failures.push(toFriendlyEksError(caught).message);
+      }
+    }
+
+    if (failures.length > 0) {
+      setSaveError(
+        `${failures.join(' ')}${applied.length === 0 ? '' : ` Already applied: ${applied.join(', ')}.`}`,
+      );
+      setSaving(false);
+      return;
+    }
+
+    setDraft(null);
+    flashbar.notify({ type: 'success', header: 'Tags saved', content: arn });
+    onSaved?.();
+    setSaving(false);
   };
 
   return (
@@ -70,7 +104,7 @@ export function ClusterTagsTab({
           <Button
             variant="primary"
             loading={saving}
-            disabled={!changed}
+            disabled={!changed || problems.length > 0 || arn === undefined}
             onClick={() => {
               void save();
             }}
@@ -80,6 +114,13 @@ export function ClusterTagsTab({
         }
       >
         <SpaceBetween size="m">
+          {arn === undefined ? (
+            <Alert type="warning" header="Cluster ARN not reported">
+              DescribeCluster did not return an ARN for this cluster, so TagResource and
+              UntagResource cannot be called for it. Refresh the page; if LocalStack still omits the
+              ARN, manage tags outside LocalDeck.
+            </Alert>
+          ) : null}
           {saveError === null ? null : <Alert type="error">{saveError}</Alert>}
           <TagsEditor
             tags={[...edited]}

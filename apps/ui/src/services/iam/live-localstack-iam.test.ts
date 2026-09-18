@@ -114,6 +114,7 @@ liveDescribe('IAM module against the live api and LocalStack', () => {
     for (const [entity, name] of [
       ['group', groupName],
       ['role', roleName],
+      ['user', userName],
     ] as const) {
       if (policyArn.length === 0) break;
       try {
@@ -265,6 +266,16 @@ liveDescribe('IAM module against the live api and LocalStack', () => {
     expect(entities.groups.map((entry) => entry.name)).toEqual([groupName]);
     expect(entities.roles.map((entry) => entry.name)).toEqual([roleName]);
 
+    // 6b. Attach/detach a managed policy on a user (the console's Add
+    //     permissions flow for the Permissions tab).
+    await attachPolicy('user', userName, policyArn);
+    expect((await listAttachedPolicies('user', userName)).map((entry) => entry.policyArn)).toEqual([
+      policyArn,
+    ]);
+    expect((await listEntitiesForPolicy(policyArn)).users.map((entry) => entry.name)).toEqual([
+      userName,
+    ]);
+
     // 7. The dashboard counts include everything created above.
     expect((await listAllUsers()).map((user) => user.userName)).toContain(userName);
     expect((await listAllGroups()).map((group) => group.groupName)).toContain(groupName);
@@ -293,6 +304,7 @@ liveDescribe('IAM module against the live api and LocalStack', () => {
 
     // 9. Unwind in dependency order, the way the console flows do.
     await removeUserFromGroup({ userName, groupName });
+    await detachPolicy('user', userName, policyArn);
     await deleteUser(userName);
     expect((await listAllUsers()).map((user) => user.userName)).not.toContain(userName);
 

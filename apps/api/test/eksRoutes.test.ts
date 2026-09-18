@@ -192,6 +192,35 @@ describe('GET /api/eks/:cluster/kubeconfig', () => {
     expect(response.statusCode).toBe(404);
     const body = response.json<ApiErrorResponse>();
     expect(body.error.code).toBe('ResourceNotFoundException');
+    // LD-06: Smithy errors carry no `$service`; the dispatcher must fill it in.
+    expect(body.error.service).toBe('eks');
+  });
+
+  it('uses LOCALSTACK_PUBLIC_ENDPOINT for the generated kubeconfig', async () => {
+    const publicApp = await buildApp({
+      config: loadConfig({
+        ...process.env,
+        NODE_ENV: 'test',
+        LOCALSTACK_ENDPOINT: stub.url,
+        LOCALSTACK_PUBLIC_ENDPOINT: 'http://192.168.1.10:4566',
+        AWS_REGION: 'us-east-1',
+      }),
+      logger: false,
+    });
+    await publicApp.ready();
+
+    const response = await publicApp.inject({
+      method: 'GET',
+      url: '/api/eks/localdeck-cluster/kubeconfig',
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers['x-localdeck-kubeconfig-endpoint']).toBe('http://192.168.1.10:4566');
+    expect(response.body).toContain('value: "http://192.168.1.10:4566"');
+    // The container-internal endpoint must not leak into a file used on the host.
+    expect(response.body).not.toContain(`value: "${stub.url}"`);
+
+    await publicApp.close();
   });
 
   it('validates the cluster name before touching LocalStack', async () => {

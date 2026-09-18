@@ -3,8 +3,8 @@ import Button from '@cloudscape-design/components/button';
 import KeyValuePairs from '@cloudscape-design/components/key-value-pairs';
 import Modal from '@cloudscape-design/components/modal';
 import SpaceBetween from '@cloudscape-design/components/space-between';
-import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import type { ReactElement } from 'react';
+import { ConnectionStatusIndicator } from '../components/ConnectionStatusIndicator';
 import { GLOBAL_SEARCH_SHORTCUT_LABEL } from '../contexts/global-search-context';
 import { useLocalStackStatus } from '../hooks/useLocalStackStatus';
 import { useServiceCatalog } from '../hooks/useServiceCatalog';
@@ -53,16 +53,7 @@ export function ConsoleHelpModal({ visible, onDismiss }: ConsoleHelpModalProps):
             },
             {
               label: 'Connection',
-              value:
-                status.phase === 'connected' ? (
-                  <StatusIndicator type="success">Connected</StatusIndicator>
-                ) : status.phase === 'degraded' ? (
-                  <StatusIndicator type="warning">Connected, degraded</StatusIndicator>
-                ) : status.phase === 'loading' ? (
-                  <StatusIndicator type="in-progress">Checking</StatusIndicator>
-                ) : (
-                  <StatusIndicator type="error">Unreachable</StatusIndicator>
-                ),
+              value: <ConnectionStatusIndicator phase={status.phase} />,
             },
             {
               label: 'Endpoint',

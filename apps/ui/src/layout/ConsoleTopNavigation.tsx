@@ -8,9 +8,7 @@ import { useFlashbar } from '../hooks/useFlashbar';
 import { useGlobalSearch } from '../hooks/useGlobalSearch';
 import { useLocalStackStatus } from '../hooks/useLocalStackStatus';
 import { useRecentlyVisited } from '../hooks/useRecentlyVisited';
-import { CONSOLE_HOME_PATH } from '../services/paths';
-
-const LOCALSTACK_SERVICES_DOCS = 'https://docs.localstack.cloud/aws/services/';
+import { CONSOLE_HOME_PATH, LOCALSTACK_SERVICES_DOCS_URL } from '../services/paths';
 
 export interface ConsoleTopNavigationProps {
   onOpenHelp: () => void;
@@ -18,7 +16,9 @@ export interface ConsoleTopNavigationProps {
 
 /**
  * Console top bar, modeled on the AWS console: brand, global search, region
- * selector, a disabled terminal placeholder, help and the local user pill.
+ * selector, help and the local user pill. The terminal entry is behind the
+ * `VITE_TERMINAL_ENABLED` feature flag because it is a placeholder, not a
+ * working feature.
  */
 export function ConsoleTopNavigation({ onOpenHelp }: ConsoleTopNavigationProps): ReactElement {
   const navigate = useNavigate();
@@ -30,6 +30,15 @@ export function ConsoleTopNavigation({ onOpenHelp }: ConsoleTopNavigationProps):
   const region = status.config?.localstack.region ?? null;
   const endpoint = status.config?.localstack.endpoint ?? null;
   const stack = status.health?.localstack ?? null;
+  const stackVersion = stack?.version ?? null;
+  const stackEdition = stack?.edition ?? null;
+
+  // Stable handlers, so the utilities memo is not rebuilt every time the
+  // status poll produces a new state object.
+  const refreshStatus = status.refresh;
+  const notify = flashbar.notify;
+  const clearRecentlyVisited = recentlyVisited.clear;
+  const openSearch = search.open;
 
   const utilities = useMemo<readonly TopNavigationProps.Utility[]>(() => {
     const regionItems: ButtonDropdownProps.Items = [
@@ -49,9 +58,9 @@ export function ConsoleTopNavigation({ onOpenHelp }: ConsoleTopNavigationProps):
       {
         id: 'stack',
         text:
-          stack === null
+          stackVersion === null
             ? 'LocalStack: unreachable'
-            : `LocalStack ${stack.version ?? 'unknown'} (${stack.edition ?? 'unknown'})`,
+            : `LocalStack ${stackVersion} (${stackEdition ?? 'unknown'})`,
         disabled: true,
       },
       { id: 'refresh', text: 'Refresh status' },
@@ -62,7 +71,7 @@ export function ConsoleTopNavigation({ onOpenHelp }: ConsoleTopNavigationProps):
       {
         id: 'docs',
         text: 'LocalStack documentation',
-        href: LOCALSTACK_SERVICES_DOCS,
+        href: LOCALSTACK_SERVICES_DOCS_URL,
         external: true,
         externalIconAriaLabel: 'Opens in a new tab',
       },
@@ -89,30 +98,66 @@ export function ConsoleTopNavigation({ onOpenHelp }: ConsoleTopNavigationProps):
       },
     ];
 
-    return [
-      {
-        type: 'button',
-        iconName: 'search',
-        text: 'Search',
-        ariaLabel: `Search services (${GLOBAL_SEARCH_SHORTCUT_LABEL})`,
-        disableUtilityCollapse: true,
-        onClick: () => {
-          search.open();
-        },
+    const searchUtility: TopNavigationProps.Utility = {
+      type: 'button',
+      iconName: 'search',
+      text: 'Search',
+      ariaLabel: `Search services (${GLOBAL_SEARCH_SHORTCUT_LABEL})`,
+      disableUtilityCollapse: true,
+      onClick: openSearch,
+    };
+
+    const regionUtility: TopNavigationProps.Utility = {
+      type: 'menu-dropdown',
+      text: region === null ? 'Region (local)' : `${region} (local)`,
+      ariaLabel: 'Region and stack details',
+      disableUtilityCollapse: true,
+      description: 'This console is bound to the LocalStack instance your api is configured with.',
+      items: regionItems,
+      onItemClick: ({ detail }) => {
+        if (detail.id === 'refresh') refreshStatus();
       },
-      {
-        type: 'menu-dropdown',
-        text: region === null ? 'Region (local)' : `${region} (local)`,
-        ariaLabel: 'Region and stack details',
-        disableUtilityCollapse: true,
-        description:
-          'This console is bound to the LocalStack instance your api is configured with.',
-        items: regionItems,
-        onItemClick: ({ detail }) => {
-          if (detail.id === 'refresh') status.refresh();
-        },
+    };
+
+    const helpUtility: TopNavigationProps.Utility = {
+      type: 'menu-dropdown',
+      iconName: 'status-info',
+      ariaLabel: 'Help',
+      disableUtilityCollapse: true,
+      title: 'Help',
+      items: helpItems,
+      onItemClick: ({ detail }) => {
+        if (detail.id === 'about') onOpenHelp();
       },
-      {
+    };
+
+    const userUtility: TopNavigationProps.Utility = {
+      type: 'menu-dropdown',
+      text: 'local',
+      iconName: 'user-profile',
+      ariaLabel: 'Signed in as local',
+      disableUtilityCollapse: true,
+      title: 'local',
+      description:
+        'LocalDeck runs without accounts or logins; every request uses the api credentials.',
+      items: userItems,
+      onItemClick: ({ detail }) => {
+        if (detail.id !== 'clear-recent') return;
+        clearRecentlyVisited();
+        notify({
+          type: 'success',
+          header: 'Recently visited cleared',
+          content: 'The Console Home widget no longer lists any services.',
+        });
+      },
+    };
+
+    const entries: TopNavigationProps.Utility[] = [searchUtility, regionUtility];
+
+    // The terminal does not exist yet; showing it only when explicitly
+    // enabled keeps a dead end out of the default console.
+    if (import.meta.env.VITE_TERMINAL_ENABLED === 'true') {
+      entries.push({
         type: 'menu-dropdown',
         iconName: 'command-prompt',
         ariaLabel: 'Terminal (not implemented yet)',
@@ -129,40 +174,22 @@ export function ConsoleTopNavigation({ onOpenHelp }: ConsoleTopNavigationProps):
             disabled: true,
           },
         ],
-      },
-      {
-        type: 'menu-dropdown',
-        iconName: 'status-info',
-        ariaLabel: 'Help',
-        disableUtilityCollapse: true,
-        title: 'Help',
-        items: helpItems,
-        onItemClick: ({ detail }) => {
-          if (detail.id === 'about') onOpenHelp();
-        },
-      },
-      {
-        type: 'menu-dropdown',
-        text: 'local',
-        iconName: 'user-profile',
-        ariaLabel: 'Signed in as local',
-        disableUtilityCollapse: true,
-        title: 'local',
-        description:
-          'LocalDeck runs without accounts or logins; every request uses the api credentials.',
-        items: userItems,
-        onItemClick: ({ detail }) => {
-          if (detail.id !== 'clear-recent') return;
-          recentlyVisited.clear();
-          flashbar.notify({
-            type: 'success',
-            header: 'Recently visited cleared',
-            content: 'The Console Home widget no longer lists any services.',
-          });
-        },
-      },
-    ];
-  }, [endpoint, flashbar, onOpenHelp, recentlyVisited, region, search, stack, status]);
+      });
+    }
+
+    entries.push(helpUtility, userUtility);
+    return entries;
+  }, [
+    clearRecentlyVisited,
+    endpoint,
+    notify,
+    onOpenHelp,
+    openSearch,
+    refreshStatus,
+    region,
+    stackEdition,
+    stackVersion,
+  ]);
 
   return (
     <TopNavigation

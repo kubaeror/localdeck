@@ -15,11 +15,11 @@ import { useState, type ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { CreateWizard } from '../../../components/CreateWizard';
 import { JsonEditor } from '../../../components/JsonEditor';
-import { TagsEditor } from '../../../components/TagsEditor';
+import { TagsEditor, validateTags } from '../../../components/TagsEditor';
 import { useFlashbar } from '../../../hooks/useFlashbar';
 import { serviceConsolePath } from '../../paths';
 import type { ServicePageProps } from '../../types';
-import { attachPolicy, createRole } from '../api';
+import { attachPolicy, createRole, normalizeTags } from '../api';
 import { PolicyPicker } from '../components/PolicyPicker';
 import { toFriendlyIamError } from '../errors';
 import { IAM_ROLE_NAME_RULES, validateRoleName } from '../naming';
@@ -32,11 +32,6 @@ import {
 } from '../policy';
 
 type TrustedEntityType = 'service' | 'account' | 'custom';
-
-/** Drops tag rows the user added but never filled in. */
-function meaningfulTags(tags: readonly AwsTag[]): readonly AwsTag[] {
-  return tags.filter((tag) => tag.Key.trim().length > 0 || tag.Value.trim().length > 0);
-}
 
 /**
  * The console's create-role wizard: trusted entity (AWS service, another AWS
@@ -69,6 +64,11 @@ export function RoleCreatePage({ descriptor }: ServicePageProps): ReactElement {
         ? buildTrustPolicyForAccount(accountId.trim())
         : customTrustPolicy;
 
+  const tagProblems = validateTags(tags);
+  const tagsProblem =
+    tagProblems.length === 0 ? null : tagProblems.map((problem) => problem.message).join(' ');
+  const normalizedTags = normalizeTags(tags);
+
   const leave = (): void => {
     navigate(`${serviceConsolePath(descriptor.id)}/roles`);
   };
@@ -99,7 +99,7 @@ export function RoleCreatePage({ descriptor }: ServicePageProps): ReactElement {
         roleName,
         trustPolicy,
         ...(description.trim().length === 0 ? {} : { description: description.trim() }),
-        tags: meaningfulTags(tags),
+        tags: normalizedTags,
       });
     } catch (caught) {
       const friendly = toFriendlyIamError(caught, 'roleName');
@@ -314,11 +314,9 @@ export function RoleCreatePage({ descriptor }: ServicePageProps): ReactElement {
             {
               label: 'Tags',
               value:
-                meaningfulTags(tags).length === 0
+                normalizedTags.length === 0
                   ? 'No tags'
-                  : meaningfulTags(tags)
-                      .map((tag) => `${tag.Key}=${tag.Value}`)
-                      .join(', '),
+                  : normalizedTags.map((tag) => `${tag.Key}=${tag.Value}`).join(', '),
             },
           ]}
         />
@@ -372,6 +370,7 @@ export function RoleCreatePage({ descriptor }: ServicePageProps): ReactElement {
           id: 'tags',
           title: 'Tags',
           isOptional: true,
+          validate: () => tagsProblem,
           content: tagsStep,
         },
         {
@@ -385,7 +384,7 @@ export function RoleCreatePage({ descriptor }: ServicePageProps): ReactElement {
         { label: 'Role name', value: roleName.length === 0 ? '—' : roleName },
         { label: 'Trusted entity', value: summarizeTrustedEntities(trustPolicy) },
         { label: 'Policies', value: `${policyArns.length}` },
-        { label: 'Tags', value: `${meaningfulTags(tags).length}` },
+        { label: 'Tags', value: `${normalizedTags.length}` },
       ]}
       summaryTitle="Role summary"
       submitLabel="Create role"

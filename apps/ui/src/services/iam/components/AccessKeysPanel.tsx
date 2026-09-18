@@ -134,8 +134,8 @@ function CreateAccessKeyModal({
         ) : (
           <>
             <Alert type="success" header="Access key created">
-              This is the only time the secret access key is shown. Copy it now, or download the key
-              file from the real console workflow.
+              This is the only time the secret access key is shown. Copy it now, or download the
+              .csv file; IAM cannot return it again.
             </Alert>
             <AccessKeySecret accessKey={created} />
           </>

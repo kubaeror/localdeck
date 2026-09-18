@@ -1,5 +1,5 @@
 import Tooltip from '@cloudscape-design/components/tooltip';
-import { useRef, useState, type ReactElement, type ReactNode } from 'react';
+import { useId, useRef, useState, type ReactElement, type ReactNode } from 'react';
 
 export interface InfoTooltipProps {
   content: ReactNode;
@@ -11,10 +11,14 @@ export interface InfoTooltipProps {
  * Tooltip attached to inline content (for example the "not emulated" badge on
  * a disabled sidebar entry). Cloudscape's Tooltip is track-based, so this
  * wrapper owns the hover/focus state and hands it the trigger element.
+ *
+ * While the tooltip is open the trigger carries `aria-describedby` pointing at
+ * the tooltip content, so assistive technology reads the explanation too.
  */
 export function InfoTooltip({ content, children, className }: InfoTooltipProps): ReactElement {
   const triggerRef = useRef<HTMLSpanElement>(null);
   const [isOpen, setIsOpen] = useState(false);
+  const tooltipId = useId();
 
   return (
     <>
@@ -24,6 +28,7 @@ export function InfoTooltip({ content, children, className }: InfoTooltipProps):
         tabIndex={0}
         className={className}
         aria-label={typeof content === 'string' ? content : undefined}
+        aria-describedby={isOpen ? tooltipId : undefined}
         onPointerEnter={() => {
           setIsOpen(true);
         }}
@@ -41,7 +46,7 @@ export function InfoTooltip({ content, children, className }: InfoTooltipProps):
       </span>
       {isOpen ? (
         <Tooltip
-          content={content}
+          content={<span id={tooltipId}>{content}</span>}
           getTrack={() => triggerRef.current}
           onEscape={() => {
             setIsOpen(false);

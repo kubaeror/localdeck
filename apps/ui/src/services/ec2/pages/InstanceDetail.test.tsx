@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act } from 'react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FlashbarProvider } from '../../../contexts/FlashbarProvider';
@@ -134,5 +135,31 @@ describe('EC2 InstanceDetailPage', () => {
     renderDetail();
 
     expect(await screen.findByText(/returned no instance for "i-alpha"/)).toBeDefined();
+  });
+
+  it('keeps the tabs mounted through a background poll instead of a full-page spinner', async () => {
+    vi.useFakeTimers();
+    try {
+      renderDetail();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      // The stub reports a pending instance, so the 10 s poll is active.
+      expect(screen.getByRole('heading', { level: 1, name: /alpha/ })).toBeDefined();
+      fireEvent.click(screen.getByRole('tab', { name: 'Tags' }));
+      expect(screen.getByText(/Tags applied to the instance/)).toBeDefined();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+
+      // A poll must not tear the tabs down or reset the selected tab.
+      const tagsTab = screen.getByRole('tab', { name: 'Tags' });
+      expect(tagsTab.getAttribute('aria-selected')).toBe('true');
+      expect(screen.getByText(/Tags applied to the instance/)).toBeDefined();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

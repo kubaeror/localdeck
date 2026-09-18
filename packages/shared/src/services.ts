@@ -106,15 +106,6 @@ export function serviceCategories(): readonly ServiceCategorySummary[] {
 }
 
 /**
- * True when the entry can be driven by the generated resource browser
- * (navigation, list page with live data, detail page). Dedicated services may
- * also carry a browser binding, but their own module always wins in the ui.
- */
-export function hasGenericBrowser(service: ServiceDescriptor): boolean {
-  return service.browser !== undefined;
-}
-
-/**
  * Every operation the generic browser calls, in list/describe/delete/tags
  * order, de-duplicated. All of them must appear in `service.operations`.
  */

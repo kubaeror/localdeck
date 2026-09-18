@@ -73,8 +73,38 @@ export function validateScaling(scaling: NodegroupScaling): string | null {
   return null;
 }
 
-/** Parses a scaling form field; `NaN` is reported by `validateScaling`. */
+/** Parses a scaling form field; a non-integer (or a negative) is `NaN`. */
 export function parseScalingValue(value: string): number {
-  const parsed = Number.parseInt(value, 10);
-  return Number.isNaN(parsed) ? Number.NaN : parsed;
+  const trimmed = value.trim();
+  // `Number.parseInt` would accept "3.9" and "3abc"; IAM/EKS count nodes, so
+  // only plain non-negative integers are accepted.
+  if (!/^\d+$/.test(trimmed)) return Number.NaN;
+  const parsed = Number.parseInt(trimmed, 10);
+  return Number.isSafeInteger(parsed) ? parsed : Number.NaN;
+}
+
+/**
+ * Parses optional positive-integer fields such as the node group disk size:
+ * an empty string is `undefined` (use the service default), anything that is
+ * not a plain positive integer is `NaN` and fails validation.
+ */
+export function parsePositiveInteger(value: string): number | undefined {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return undefined;
+  if (!/^\d+$/.test(trimmed)) return Number.NaN;
+  const parsed = Number.parseInt(trimmed, 10);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : Number.NaN;
+}
+
+/** Role ARNs EKS accepts for the cluster and node IAM roles. */
+export const ROLE_ARN_PATTERN = /^arn:[a-z0-9-]+:iam::\d{12}:role\/[A-Za-z0-9+=,.@_/-]+$/;
+
+/** Returns the problem with a role ARN, or `null` when it looks well formed. */
+export function validateRoleArn(value: string): string | null {
+  const arn = value.trim();
+  if (arn.length === 0) return 'Select or enter an IAM role ARN.';
+  if (!ROLE_ARN_PATTERN.test(arn)) {
+    return 'Enter a role ARN such as arn:aws:iam::000000000000:role/eks-cluster-role.';
+  }
+  return null;
 }

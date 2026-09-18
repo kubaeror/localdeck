@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { ApiClientError } from '../../lib/apiClient';
-import { friendlyS3Error, isS3Code, toFriendlyS3Error } from './errors';
+import {
+  annotateS3Error,
+  createdAnnotation,
+  friendlyS3Error,
+  isS3Code,
+  toFriendlyS3Error,
+} from './errors';
 
 describe('friendlyS3Error', () => {
   it('maps a name collision to an inline bucket-name error', () => {
@@ -52,5 +58,20 @@ describe('toFriendlyS3Error and isS3Code', () => {
     expect(isS3Code(error, 'NoSuchBucket')).toBe(false);
     expect(isS3Code(new Error('plain'), 'NoSuchTagSet')).toBe(false);
     expect(toFriendlyS3Error(error).message).toContain('TagSet');
+  });
+
+  it('keeps the "bucket was created" annotation in the friendly message', () => {
+    const annotated = annotateS3Error(
+      new ApiClientError({ code: 'AccessDenied', message: 'Access Denied', statusCode: 403 }),
+      'Bucket "my-bucket" was created, but tagging failed.',
+    );
+
+    const friendly = toFriendlyS3Error(annotated);
+    expect(createdAnnotation(friendly.apiError)).toBe(
+      'Bucket "my-bucket" was created, but tagging failed.',
+    );
+    expect(friendly.message).toContain('Bucket "my-bucket" was created, but tagging failed.');
+    // The canned wording for the code is still appended.
+    expect(friendly.message).toContain('LocalStack denied this action');
   });
 });

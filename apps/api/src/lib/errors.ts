@@ -94,7 +94,7 @@ const NETWORK_ERROR_CODES = new Set([
   'UND_ERR_BODY_TIMEOUT',
 ]);
 
-const NETWORK_ERROR_NAMES = new Set(['TimeoutError', 'AbortError', 'ConnectTimeoutError']);
+const NETWORK_ERROR_NAMES = new Set(['ConnectTimeoutError']);
 
 /**
  * Walks `cause` and `errors` chains (undici nests the real failure there) and
@@ -159,6 +159,56 @@ export function describeNetworkFailure(error: unknown): string | undefined {
   return found;
 }
 
+/**
+ * Classification of a request-level failure, checked before the generic
+ * network mapping so an aborted or timed-out call is never reported as
+ * "LocalStack is unreachable".
+ *
+ * - `timeout` — the SDK's request handler or AbortSignal.timeout gave up
+ *   waiting for a response (HTTP 504).
+ * - `connection-timeout` — the TCP connection was never established, which
+ *   really does mean LocalStack is not accepting connections (HTTP 503).
+ * - `aborted` — the caller went away or Fastify's handler timeout fired
+ *   (HTTP 408).
+ */
+export type RequestFailureKind = 'timeout' | 'connection-timeout' | 'aborted';
+
+export function classifyRequestFailure(error: unknown): RequestFailureKind | undefined {
+  let sawAbort = false;
+  let sawTimeout = false;
+  walkErrorChain(error, (record) => {
+    if (record.name === 'AbortError') {
+      sawAbort = true;
+      return true;
+    }
+    if (record.name === 'TimeoutError') {
+      sawTimeout = true;
+      return true;
+    }
+    return false;
+  });
+
+  // AbortSignal.timeout aborts the request; the SDK wraps the DOMException in
+  // an AbortError, so a TimeoutError anywhere in the chain still means timeout.
+  if (sawAbort) {
+    walkErrorChain(error, (record) => {
+      if (record.name === 'TimeoutError') {
+        sawTimeout = true;
+        return true;
+      }
+      return false;
+    });
+  }
+
+  if (sawTimeout) {
+    const message = describeNetworkFailure(error) ?? '';
+    // @smithy/node-http-handler uses TimeoutError for both the connect and the
+    // request timeout; only the connect one means "nothing is listening".
+    return /did not establish a connection/i.test(message) ? 'connection-timeout' : 'timeout';
+  }
+  return sawAbort ? 'aborted' : undefined;
+}
+
 interface AwsSdkErrorLike {
   name: string;
   message: string;
@@ -169,6 +219,11 @@ interface AwsSdkErrorLike {
 
 function asAwsSdkError(error: unknown): AwsSdkErrorLike | null {
   if (!(error instanceof Error)) return null;
+  // SDK serialization/parameter errors are plain TypeErrors; AWS service
+  // exceptions are Error subclasses, never TypeErrors. The retry middleware
+  // decorates them with $metadata.attempts, so they must not be mistaken for
+  // service errors just because the name ends in "Error".
+  if (error instanceof TypeError) return null;
   const candidate = error as Error & Record<string, unknown>;
   const metadata = candidate.$metadata;
   const metadataRecord =
@@ -199,13 +254,16 @@ function mapAwsSdkError(error: AwsSdkErrorLike, context: ErrorContext): ApiError
   const upstream = error.httpStatusCode ?? 500;
   // 4xx from LocalStack is the caller's problem; 5xx is an upstream failure.
   const statusCode = upstream >= 400 && upstream < 500 ? upstream : 502;
+  // Smithy never writes `$service`; fall back to the registry descriptor id the
+  // dispatcher passed in, so `ApiError.service` is populated for real errors.
+  const service = error.service ?? context.service;
   const apiError: ApiError = {
     code: error.name.length > 0 ? error.name : ApiErrorCodes.awsSdkError,
     message: error.message.length > 0 ? error.message : `AWS SDK call failed with ${error.name}.`,
     statusCode,
   };
   if (error.requestId !== undefined) apiError.requestId = error.requestId;
-  if (error.service !== undefined) apiError.service = error.service;
+  if (service !== undefined) apiError.service = service;
   apiError.details = {
     upstreamStatusCode: upstream,
     ...(context.endpoint === undefined ? {} : { endpoint: context.endpoint }),
@@ -227,7 +285,7 @@ interface FastifyLikeError {
  */
 const MULTIPART_ERRORS: Readonly<Record<string, Omit<ApiError, 'code'> & { code: string }>> = {
   FST_REQ_FILE_TOO_LARGE: {
-    code: 'PAYLOAD_TOO_LARGE',
+    code: ApiErrorCodes.payloadTooLarge,
     statusCode: 413,
     message: 'The file is larger than the 5 GiB single-object limit S3 accepts.',
   },
@@ -270,6 +328,8 @@ function asFastifyError(error: unknown): FastifyLikeError | null {
 
 export interface ErrorContext {
   endpoint?: string;
+  /** Registry service id, used when a real SDK error carries no `$service`. */
+  service?: string;
 }
 
 /**
@@ -283,6 +343,61 @@ export function toApiError(error: unknown, context: ErrorContext = {}): ApiError
   if (asRecord !== null && typeof asRecord.code === 'string') {
     const multipartError = MULTIPART_ERRORS[asRecord.code];
     if (multipartError !== undefined) return { ...multipartError };
+    // Fastify's handlerTimeout aborts request.signal and sends this error; it
+    // means LocalStack never answered, not that the api crashed.
+    if (asRecord.code === 'FST_ERR_HANDLER_TIMEOUT') {
+      return {
+        code: ApiErrorCodes.localstackTimeout,
+        statusCode: 504,
+        message:
+          `LocalStack did not answer the operation within the configured timeout` +
+          `${context.endpoint === undefined ? '' : ` at ${context.endpoint}`}.`,
+        details: {
+          endpoint: context.endpoint ?? null,
+          reason: 'handler-timeout',
+        },
+      };
+    }
+  }
+
+  // Timeouts and client aborts are request-level outcomes: classify them before
+  // the network mapping so they are never reported as "LocalStack is down".
+  const requestFailure = classifyRequestFailure(error);
+  if (requestFailure === 'timeout') {
+    const reason = describeNetworkFailure(error);
+    return {
+      code: ApiErrorCodes.localstackTimeout,
+      statusCode: 504,
+      message:
+        `LocalStack accepted the connection but did not finish the operation in time` +
+        `${context.endpoint === undefined ? '' : ` at ${context.endpoint}`}` +
+        `${reason === undefined ? '' : ` (${reason})`}.`,
+      details: {
+        endpoint: context.endpoint ?? null,
+        reason: reason ?? 'timeout',
+      },
+      ...(context.service === undefined ? {} : { service: context.service }),
+    };
+  }
+  if (requestFailure === 'aborted') {
+    return {
+      code: ApiErrorCodes.requestAborted,
+      statusCode: 408,
+      message: 'The request was aborted before LocalStack answered.',
+      details: { endpoint: context.endpoint ?? null, reason: 'request-aborted' },
+      ...(context.service === undefined ? {} : { service: context.service }),
+    };
+  }
+  if (requestFailure === 'connection-timeout') {
+    const endpoint = context.endpoint ?? 'the configured LocalStack endpoint';
+    return {
+      code: ApiErrorCodes.localstackUnreachable,
+      statusCode: 503,
+      message:
+        `LocalDeck api is running, but LocalStack is unreachable at ${endpoint} (connection timeout). ` +
+        'Start LocalStack, or point LOCALSTACK_ENDPOINT at the instance you want to manage.',
+      details: { endpoint: context.endpoint ?? null, reason: 'connection-timeout' },
+    };
   }
 
   const networkCode = findNetworkErrorCode(error);
@@ -327,10 +442,27 @@ export function toApiError(error: unknown, context: ErrorContext = {}): ApiError
     }
   }
 
+  // A TypeError raised while the SDK serializes the operation input is the
+  // caller's fault (e.g. `Invoke` with a numeric `Payload`), not a 500.
+  if (error instanceof TypeError) {
+    return {
+      code: ApiErrorCodes.validationFailed,
+      statusCode: 400,
+      message: `The operation input could not be serialized (${error.message.slice(0, 200)}).`,
+      details: { reason: 'sdk-input-serialization' },
+    };
+  }
+
   // Unknown failure: keep the details in the logs, not in the response.
   return {
     code: ApiErrorCodes.internal,
     statusCode: 500,
     message: 'LocalDeck api encountered an unexpected error.',
   };
+}
+
+/** Converts anything thrown in a route into a client-shaped ApiProblem. */
+export function asApiProblem(error: unknown, context: ErrorContext = {}): ApiProblem {
+  if (error instanceof ApiProblem) return error;
+  return new ApiProblem({ ...toApiError(error, context), cause: error });
 }

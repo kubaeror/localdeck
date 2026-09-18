@@ -27,11 +27,16 @@ export interface ApiErrorResponse {
 export const ApiErrorCodes = {
   internal: 'INTERNAL_ERROR',
   notFound: 'NOT_FOUND',
+  /** The path exists, but not for the request method. */
+  methodNotAllowed: 'METHOD_NOT_ALLOWED',
   validationFailed: 'VALIDATION_FAILED',
   badGateway: 'BAD_GATEWAY',
-  serviceUnavailable: 'SERVICE_UNAVAILABLE',
   localstackUnreachable: 'LOCALSTACK_UNREACHABLE',
   localstackInvalidResponse: 'LOCALSTACK_INVALID_RESPONSE',
+  /** LocalStack accepted the connection but did not answer in time. */
+  localstackTimeout: 'LOCALSTACK_TIMEOUT',
+  /** The caller went away (or Fastify's handler timeout aborted the request). */
+  requestAborted: 'REQUEST_ABORTED',
   awsSdkError: 'AWS_SDK_ERROR',
   /** The operation exists in AWS but is not on the service's whitelist. */
   operationNotWhitelisted: 'OPERATION_NOT_WHITELISTED',
@@ -39,9 +44,15 @@ export const ApiErrorCodes = {
   serviceNotRegistered: 'SERVICE_NOT_REGISTERED',
   /** The api does not have the service's AWS SDK package installed. */
   sdkPackageUnavailable: 'SDK_PACKAGE_UNAVAILABLE',
+  /** The service is registered as a placeholder and exposes no operations. */
+  servicePlanned: 'SERVICE_PLANNED',
+  /** The operation returned a stream/blob the JSON dispatcher cannot carry. */
+  binaryResponseUnsupported: 'BINARY_RESPONSE_UNSUPPORTED',
+  /** The EKS cluster is not ACTIVE yet, so a kubeconfig cannot be built. */
+  clusterNotReady: 'CLUSTER_NOT_READY',
+  /** A multipart upload exceeded the 5 GiB single-object limit. */
+  payloadTooLarge: 'PAYLOAD_TOO_LARGE',
 } as const;
-
-export type ApiErrorCode = (typeof ApiErrorCodes)[keyof typeof ApiErrorCodes];
 
 export function isApiError(value: unknown): value is ApiError {
   if (typeof value !== 'object' || value === null) return false;

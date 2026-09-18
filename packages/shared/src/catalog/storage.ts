@@ -48,7 +48,12 @@ export const STORAGE_SERVICES = [
     parityLevel: 'dedicated',
     summary: 'Buckets, objects, prefixes, versioning and access points.',
     browser: {
-      list: { operation: 'ListBuckets', resultPath: 'Buckets', idField: 'Name' },
+      list: {
+        operation: 'ListBuckets',
+        resultPath: 'Buckets',
+        idField: 'Name',
+        pagination: { requestField: 'ContinuationToken', responseField: 'ContinuationToken' },
+      },
       describe: { operation: 'HeadBucket', idParam: 'Bucket' },
       delete: { operation: 'DeleteBucket', idParam: 'Bucket' },
       tags: { operation: 'GetBucketTagging', idParam: 'Bucket', resultPath: 'TagSet' },
@@ -85,6 +90,7 @@ export const STORAGE_SERVICES = [
         resultPath: 'tableBuckets',
         idField: 'arn',
         nameField: 'name',
+        pagination: { requestField: 'continuationToken', responseField: 'continuationToken' },
       },
       describe: { operation: 'GetTableBucket', idParam: 'tableBucketARN' },
       delete: { operation: 'DeleteTableBucket', idParam: 'tableBucketARN' },
@@ -109,6 +115,7 @@ export const STORAGE_SERVICES = [
         operation: 'DescribeFileSystems',
         resultPath: 'FileSystems',
         idField: 'FileSystemId',
+        pagination: { requestField: 'Marker', responseField: 'NextMarker' },
       },
       describe: { operation: 'DescribeFileSystems', idParam: 'FileSystemId' },
       delete: { operation: 'DeleteFileSystem', idParam: 'FileSystemId' },
@@ -150,7 +157,13 @@ export const STORAGE_SERVICES = [
     parityLevel: 'browser',
     summary: 'Long-term archive vaults and archive retrieval.',
     browser: {
-      list: { operation: 'ListVaults', resultPath: 'VaultList', idField: 'VaultName' },
+      list: {
+        operation: 'ListVaults',
+        resultPath: 'VaultList',
+        idField: 'VaultName',
+        // Glacier's JSON API uses a lowercase request marker and returns `Marker`.
+        pagination: { requestField: 'marker', responseField: 'Marker' },
+      },
     },
   },
   {

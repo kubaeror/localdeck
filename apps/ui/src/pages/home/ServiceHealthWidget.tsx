@@ -7,30 +7,21 @@ import Header from '@cloudscape-design/components/header';
 import KeyValuePairs from '@cloudscape-design/components/key-value-pairs';
 import Link from '@cloudscape-design/components/link';
 import SpaceBetween from '@cloudscape-design/components/space-between';
-import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import { useMemo, type ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { ConnectionStatusIndicator } from '../../components/ConnectionStatusIndicator';
+import { RegistryCoverage } from '../../components/RegistryCoverage';
 import { useLocalStackStatus } from '../../hooks/useLocalStackStatus';
 import { useServiceCatalog } from '../../hooks/useServiceCatalog';
+import {
+  LOCALDECK_API_ERROR_TITLE,
+  LOCALSTACK_UNREACHABLE_TITLE,
+  STATUS_UNAVAILABLE_COPY,
+} from '../../lib/copy';
 import { formatAvailability, formatLatency, formatRelativeTime } from '../../lib/format';
 import { ALL_SERVICES_PATH, SERVICE_HEALTH_PATH } from '../../services/paths';
 import { BOARD_ITEM_I18N_STRINGS, type ConsoleWidgetProps } from './types';
 import { WidgetSettingsMenu } from './WidgetSettingsMenu';
-
-function connectionIndicator(phase: string): ReactElement {
-  switch (phase) {
-    case 'connected':
-      return <StatusIndicator type="success">Connected</StatusIndicator>;
-    case 'degraded':
-      return <StatusIndicator type="warning">Connected, degraded</StatusIndicator>;
-    case 'unreachable':
-      return <StatusIndicator type="error">LocalStack unreachable</StatusIndicator>;
-    case 'error':
-      return <StatusIndicator type="error">LocalDeck api error</StatusIndicator>;
-    default:
-      return <StatusIndicator type="in-progress">Checking</StatusIndicator>;
-  }
-}
 
 /** Console Home widget: the live stack status straight from /api/health. */
 export function ServiceHealthWidget({ onRemove }: ConsoleWidgetProps): ReactElement {
@@ -77,8 +68,8 @@ export function ServiceHealthWidget({ onRemove }: ConsoleWidgetProps): ReactElem
             type="error"
             header={
               status.phase === 'unreachable'
-                ? 'LocalStack is not reachable'
-                : 'The LocalDeck api returned an error'
+                ? LOCALSTACK_UNREACHABLE_TITLE
+                : LOCALDECK_API_ERROR_TITLE
             }
             action={
               <Button
@@ -90,14 +81,14 @@ export function ServiceHealthWidget({ onRemove }: ConsoleWidgetProps): ReactElem
               </Button>
             }
           >
-            {status.error?.message ?? 'The status could not be loaded.'}
+            {status.error?.message ?? STATUS_UNAVAILABLE_COPY}
           </Alert>
         ) : null}
 
         <KeyValuePairs
           columns={1}
           items={[
-            { label: 'Connection', value: connectionIndicator(status.phase) },
+            { label: 'Connection', value: <ConnectionStatusIndicator phase={status.phase} /> },
             {
               label: 'Endpoint',
               value: <Box variant="code">{config?.localstack.endpoint ?? 'loading…'}</Box>,
@@ -132,12 +123,7 @@ export function ServiceHealthWidget({ onRemove }: ConsoleWidgetProps): ReactElem
                 health === null ? (
                   <Box color="text-status-inactive">unknown</Box>
                 ) : (
-                  <Box>
-                    {coverage.emulated} of {coverage.registered} registered services
-                    {coverage.unregistered.length === 0
-                      ? ''
-                      : ` · ${coverage.unregistered.length} stack services without a console entry`}
-                  </Box>
+                  <RegistryCoverage coverage={coverage} source={catalog.source} variant="summary" />
                 ),
             },
             {

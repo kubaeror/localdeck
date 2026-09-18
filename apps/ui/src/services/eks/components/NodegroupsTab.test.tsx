@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FlashbarProvider } from '../../../contexts/FlashbarProvider';
-import { stubApiFetch } from '../../../test/fixtures';
+import { dispatchedOperationCalls, stubApiFetch } from '../../../test/fixtures';
 import type { EksCluster } from '../api';
 import { NodegroupsTab } from './NodegroupsTab';
 
@@ -48,6 +48,23 @@ const DESCRIBE_NODEGROUP = {
       subnets: ['subnet-1'],
       resources: { autoScalingGroups: [{ name: 'eks-ng-workers-abc' }] },
       health: { issues: [] },
+    },
+  },
+};
+
+const DESCRIBE_DEGRADED = {
+  service: 'eks',
+  operation: 'DescribeNodegroup',
+  result: {
+    nodegroup: {
+      ...DESCRIBE_NODEGROUP.result.nodegroup,
+      status: 'DEGRADED',
+      health: {
+        issues: [
+          { code: 'NodeCreationFailure', message: 'nodes did not join' },
+          { code: 'Ec2InstanceTypeMismatch', message: 'instance type is not available' },
+        ],
+      },
     },
   },
 };
@@ -117,5 +134,41 @@ describe('EKS NodegroupsTab', () => {
 
     const link = await screen.findByRole('link', { name: 'ng-workers-node' });
     expect(link.getAttribute('href')).toBe('/console/ec2/instances/i-worker1');
+  });
+
+  it('shows every health issue, not only the first', async () => {
+    stubApiFetch({
+      operations: {
+        'eks/ListNodegroups': LIST_NODEGROUPS,
+        'eks/DescribeNodegroup': DESCRIBE_DEGRADED,
+        'ec2/DescribeInstances': DESCRIBE_INSTANCES,
+      },
+    });
+    renderTab();
+
+    expect(await screen.findByText(/nodes did not join/)).toBeDefined();
+    expect(screen.getByText(/instance type is not available/)).toBeDefined();
+  });
+
+  it('keeps the unverified console actions visible but disabled with a reason', async () => {
+    renderTab();
+
+    const actions = await screen.findByRole('button', { name: 'Actions for ng-workers' });
+    fireEvent.click(actions);
+    expect(await screen.findByText('Change Kubernetes version')).toBeDefined();
+    expect(screen.getByText(/not whitelisted in LocalDeck yet/)).toBeDefined();
+  });
+
+  it('fetches the emulated EC2 catalogue once per load and refreshes it explicitly', async () => {
+    renderTab();
+
+    await screen.findByRole('link', { name: 'ng-workers-node' });
+    expect(dispatchedOperationCalls('ec2', 'DescribeInstances')).toBe(1);
+
+    // The explicit refresh re-fetches the node groups and the EC2 catalogue.
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh node groups' }));
+    await waitFor(() => {
+      expect(dispatchedOperationCalls('ec2', 'DescribeInstances')).toBe(2);
+    });
   });
 });

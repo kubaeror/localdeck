@@ -14,6 +14,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } 
 import { useNavigate } from 'react-router-dom';
 import { DeleteConfirmModal } from '../../../components/DeleteConfirmModal';
 import { EmptyState } from '../../../components/EmptyState';
+import { InfoTooltip } from '../../../components/InfoTooltip';
 import { useFlashbar } from '../../../hooks/useFlashbar';
 import { toApiError } from '../../../lib/apiClient';
 import { formatBytes, formatDateTime } from '../../../lib/format';
@@ -22,7 +23,6 @@ import {
   deleteFolder,
   deleteObjects,
   downloadObjectUrl,
-  listBuckets,
   listObjects,
   triggerDownload,
   type S3Bucket,
@@ -38,6 +38,11 @@ import { UploadModal } from './UploadModal';
 
 export interface ObjectsTabProps {
   bucket: string;
+  /** Buckets for the left panel and the copy/move picker; owned by the page. */
+  buckets: readonly S3Bucket[];
+  bucketsLoading: boolean;
+  bucketsError: ApiError | null;
+  onRefreshBuckets: () => void;
 }
 
 const EMPTY_PAGE: S3ObjectPage = { folders: [], objects: [] };
@@ -78,13 +83,15 @@ function sortEntries(
  * keys. Uploads, downloads, copy/move, metadata and delete all go through the
  * api proxy.
  */
-export function ObjectsTab({ bucket }: ObjectsTabProps): ReactElement {
+export function ObjectsTab({
+  bucket,
+  buckets,
+  bucketsLoading,
+  bucketsError,
+  onRefreshBuckets,
+}: ObjectsTabProps): ReactElement {
   const navigate = useNavigate();
   const flashbar = useFlashbar();
-
-  const [buckets, setBuckets] = useState<readonly S3Bucket[]>([]);
-  const [bucketsLoading, setBucketsLoading] = useState(true);
-  const [bucketsError, setBucketsError] = useState<ApiError | null>(null);
 
   const [prefix, setPrefix] = useState('');
   const [page, setPage] = useState<S3ObjectPage>(EMPTY_PAGE);
@@ -107,31 +114,18 @@ export function ObjectsTab({ bucket }: ObjectsTabProps): ReactElement {
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const inFlight = useRef<AbortController | null>(null);
-  const bucketsRequestId = useRef(0);
-
-  // Buckets for the left panel and for the copy/move destination picker.
-  const loadBuckets = useCallback(async (): Promise<void> => {
-    const id = bucketsRequestId.current + 1;
-    bucketsRequestId.current = id;
-    setBucketsLoading(true);
-    try {
-      const result = await listBuckets();
-      if (bucketsRequestId.current !== id) return;
-      setBuckets(result.items);
-      setBucketsError(null);
-    } catch (caught) {
-      if (bucketsRequestId.current !== id) return;
-      setBucketsError(toApiError(caught));
-    } finally {
-      if (bucketsRequestId.current === id) setBucketsLoading(false);
-    }
-  }, []);
+  // Bumped whenever the folder (or bucket) changes; a "load more" response that
+  // belongs to a previous generation must never be appended to the new page.
+  const requestGeneration = useRef(0);
 
   const loadObjects = useCallback(async (): Promise<void> => {
     inFlight.current?.abort();
     const controller = new AbortController();
     inFlight.current = controller;
+    const generation = requestGeneration.current + 1;
+    requestGeneration.current = generation;
     setLoading(true);
+    setLoadingMore(false);
     setPage(EMPTY_PAGE);
     setSelected([]);
 
@@ -141,14 +135,16 @@ export function ObjectsTab({ bucket }: ObjectsTabProps): ReactElement {
         ...(prefix.length === 0 ? {} : { prefix }),
         signal: controller.signal,
       });
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted || requestGeneration.current !== generation) return;
       setPage(result);
       setError(null);
     } catch (caught) {
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted || requestGeneration.current !== generation) return;
       setError(toApiError(caught));
     } finally {
-      if (!controller.signal.aborted) setLoading(false);
+      if (!controller.signal.aborted && requestGeneration.current === generation) {
+        setLoading(false);
+      }
     }
   }, [bucket, prefix]);
 
@@ -158,43 +154,49 @@ export function ObjectsTab({ bucket }: ObjectsTabProps): ReactElement {
     void loadObjects();
   }, [loadObjects]);
 
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- initial bucket list
-    void loadBuckets();
-    return () => {
-      bucketsRequestId.current += 1;
-    };
-  }, [loadBuckets]);
-
   // Current prefix, refetched whenever the folder or the bucket changes.
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- data fetch for the current folder
     void loadObjects();
     return () => {
       inFlight.current?.abort();
+      requestGeneration.current += 1;
     };
   }, [loadObjects]);
 
-  const loadMore = async (): Promise<void> => {
-    if (page.nextToken === undefined) return;
+  const loadMore = useCallback(async (): Promise<void> => {
+    const token = page.nextToken;
+    if (token === undefined) return;
+    // Same in-flight slot as the folder fetch: switching folders aborts this
+    // request, and the generation check discards a response that raced it.
+    inFlight.current?.abort();
+    const controller = new AbortController();
+    inFlight.current = controller;
+    const generation = requestGeneration.current;
     setLoadingMore(true);
     try {
       const next = await listObjects({
         bucket,
         ...(prefix.length === 0 ? {} : { prefix }),
-        continuationToken: page.nextToken,
+        continuationToken: token,
+        signal: controller.signal,
       });
-      setPage({
-        folders: [...page.folders, ...next.folders],
-        objects: [...page.objects, ...next.objects],
+      if (controller.signal.aborted || requestGeneration.current !== generation) return;
+      setPage((previous) => ({
+        folders: [...previous.folders, ...next.folders],
+        objects: [...previous.objects, ...next.objects],
         ...(next.nextToken === undefined ? {} : { nextToken: next.nextToken }),
-      });
+      }));
+      setError(null);
     } catch (caught) {
+      if (controller.signal.aborted || requestGeneration.current !== generation) return;
       setError(toApiError(caught));
     } finally {
-      setLoadingMore(false);
+      if (!controller.signal.aborted && requestGeneration.current === generation) {
+        setLoadingMore(false);
+      }
     }
-  };
+  }, [bucket, prefix, page.nextToken]);
 
   const items = useMemo(
     () => sortEntries(page, sortingField, descending),
@@ -268,11 +270,13 @@ export function ObjectsTab({ bucket }: ObjectsTabProps): ReactElement {
         flashbar.notify({ type: 'error', header: 'Could not delete an object', content: failure });
       }
       setDeleteTargets(null);
-      reload();
     } catch (caught) {
       setDeleteError(toFriendlyS3Error(caught).message);
     } finally {
       setDeleting(false);
+      // Deleted keys must disappear even when the delete reported failures, so
+      // the table never keeps showing objects that are already gone.
+      reload();
     }
   };
 
@@ -423,6 +427,9 @@ export function ObjectsTab({ bucket }: ObjectsTabProps): ReactElement {
         Upload
       </Button>
       <Button onClick={() => setCreateFolderVisible(true)}>Create folder</Button>
+      <InfoTooltip content="Version history requires ListObjectVersions, which is not enabled in the LocalDeck registry yet.">
+        <Button disabled>Show versions</Button>
+      </InfoTooltip>
       <Button iconName="refresh" ariaLabel="Refresh objects" loading={loading} onClick={reload} />
     </SpaceBetween>
   );
@@ -469,9 +476,7 @@ export function ObjectsTab({ bucket }: ObjectsTabProps): ReactElement {
           onSelect={(name) => {
             navigate(`${serviceConsolePath('s3')}/buckets/${encodeURIComponent(name)}`);
           }}
-          onRefresh={() => {
-            void loadBuckets();
-          }}
+          onRefresh={onRefreshBuckets}
         />
 
         <Container
@@ -516,7 +521,7 @@ export function ObjectsTab({ bucket }: ObjectsTabProps): ReactElement {
               trackBy={(entry) => entry.key}
               empty={emptyState}
               selectionType="multi"
-              selectedItems={[...selected]}
+              selectedItems={selected}
               ariaLabels={{
                 tableLabel: 'Objects',
                 selectionGroupLabel: 'Object selection',

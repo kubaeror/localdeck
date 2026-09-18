@@ -1,10 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { dispatchedOperationCalls, stubApiFetch } from '../../test/fixtures';
+import { dispatchedOperationCalls, jsonResponse, stubApiFetch } from '../../test/fixtures';
 import {
+  authorizeSecurityGroupIngress,
+  createVolume,
+  getImage,
+  getInstance,
   instanceName,
   isTransitionalInstanceState,
   isVolumeAttached,
+  listAllInstances,
+  listImages,
+  listInstanceVolumes,
   listInstances,
+  listSecurityGroups,
+  listVolumes,
   runInstances,
   startInstances,
   toEc2Image,
@@ -153,6 +162,30 @@ describe('EC2 api mappers', () => {
       ipv4Ranges: ['0.0.0.0/0'],
     });
     expect(legacy?.description).toBe('legacy spelling');
+  });
+
+  it('maps security group references and prefix lists, not only CIDRs', () => {
+    const group = toEc2SecurityGroup({
+      GroupId: 'sg-1',
+      GroupName: 'web',
+      IpPermissions: [
+        {
+          IpProtocol: 'tcp',
+          FromPort: 443,
+          ToPort: 443,
+          Description: 'application tier',
+          PrefixListIds: [{ PrefixListId: 'pl-123' }],
+          UserIdGroupPairs: [{ GroupId: 'sg-app', GroupName: 'app' }],
+        },
+      ],
+    });
+
+    expect(group?.inbound[0]).toMatchObject({
+      protocol: 'tcp',
+      description: 'application tier',
+      prefixListIds: ['pl-123'],
+      referencedGroups: ['sg-app'],
+    });
   });
 
   it('maps instance types, VPCs and subnets', () => {
@@ -305,4 +338,279 @@ describe('EC2 api operations', () => {
     expect(instance.state).toBe('pending');
     expect(dispatchedOperationCalls('ec2', 'RunInstances')).toBe(1);
   });
+
+  it('requires an exact instance id even when LocalStack ignores the filter', async () => {
+    stubApiFetch({
+      operations: {
+        'ec2/DescribeInstances': {
+          service: 'ec2',
+          operation: 'DescribeInstances',
+          result: {
+            Reservations: [
+              {
+                Instances: [
+                  { InstanceId: 'i-other', InstanceType: 't3.micro', State: { Name: 'running' } },
+                ],
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    await expect(getInstance('i-missing')).rejects.toMatchObject({
+      apiError: { code: 'NOT_FOUND' },
+    });
+  });
+
+  it('requires an exact image id even when LocalStack ignores the filter', async () => {
+    stubApiFetch({
+      operations: {
+        'ec2/DescribeImages': {
+          service: 'ec2',
+          operation: 'DescribeImages',
+          result: { Images: [{ ImageId: 'ami-other', Name: 'unrelated' }] },
+        },
+      },
+    });
+
+    await expect(getImage('ami-missing')).rejects.toMatchObject({
+      apiError: { code: 'NOT_FOUND' },
+    });
+  });
+
+  it('sends gp3 throughput and IOPS but never throughput for other types', async () => {
+    stubApiFetch({
+      operations: {
+        'ec2/CreateVolume': {
+          service: 'ec2',
+          operation: 'CreateVolume',
+          result: { VolumeId: 'vol-1' },
+        },
+        'ec2/DescribeVolumes': {
+          service: 'ec2',
+          operation: 'DescribeVolumes',
+          result: { Volumes: [{ VolumeId: 'vol-1', State: 'creating', VolumeType: 'gp3' }] },
+        },
+      },
+    });
+
+    await createVolume({
+      availabilityZone: 'us-east-1a',
+      sizeGiB: 20,
+      volumeType: 'gp3',
+      iops: 4000,
+      throughput: 300,
+      clientToken: 'token-1',
+    });
+
+    const gp3Input = lastDispatchedInput('CreateVolume');
+    expect(gp3Input).toMatchObject({
+      VolumeType: 'gp3',
+      Iops: 4000,
+      Throughput: 300,
+      ClientToken: 'token-1',
+    });
+
+    await createVolume({
+      availabilityZone: 'us-east-1a',
+      sizeGiB: 20,
+      volumeType: 'io2',
+      iops: 4000,
+      throughput: 300,
+    });
+    const io2Input = lastDispatchedInput('CreateVolume');
+    expect(io2Input['Throughput']).toBeUndefined();
+    expect(io2Input).toMatchObject({ VolumeType: 'io2', Iops: 4000 });
+  });
+
+  it('sends the RunInstances client token and per-device IOPS', async () => {
+    await runInstances({
+      imageId: 'ami-1',
+      instanceType: 't3.micro',
+      tags: [],
+      clientToken: 'run-token',
+      blockDevices: [
+        {
+          deviceName: '/dev/sda1',
+          sizeGiB: 20,
+          volumeType: 'gp3',
+          deleteOnTermination: true,
+          iops: 4000,
+        },
+      ],
+    });
+
+    expect(lastDispatchedInput('RunInstances')).toMatchObject({
+      ClientToken: 'run-token',
+      BlockDeviceMappings: [
+        {
+          DeviceName: '/dev/sda1',
+          Ebs: { VolumeSize: 20, VolumeType: 'gp3', Iops: 4000 },
+        },
+      ],
+    });
+  });
+
+  it('keeps every security-group source in the authorize payload', async () => {
+    stubApiFetch({
+      operations: {
+        'ec2/AuthorizeSecurityGroupIngress': {
+          service: 'ec2',
+          operation: 'AuthorizeSecurityGroupIngress',
+          result: {},
+        },
+      },
+    });
+
+    await authorizeSecurityGroupIngress({
+      groupId: 'sg-1',
+      rule: {
+        protocol: 'tcp',
+        fromPort: 443,
+        toPort: 443,
+        description: 'tls from app',
+        cidrIpv4: ['10.0.0.0/16'],
+        referencedGroups: ['sg-app'],
+        prefixListIds: ['pl-123'],
+      },
+    });
+
+    expect(lastDispatchedInput('AuthorizeSecurityGroupIngress')).toMatchObject({
+      GroupId: 'sg-1',
+      IpPermissions: [
+        {
+          IpProtocol: 'tcp',
+          FromPort: 443,
+          ToPort: 443,
+          Description: 'tls from app',
+          IpRanges: [{ CidrIp: '10.0.0.0/16' }],
+          UserIdGroupPairs: [{ GroupId: 'sg-app' }],
+          PrefixListIds: [{ PrefixListId: 'pl-123' }],
+        },
+      ],
+    });
+  });
+
+  it('scopes the volume, subnet and image list requests server-side', async () => {
+    stubApiFetch({
+      operations: {
+        'ec2/DescribeVolumes': {
+          service: 'ec2',
+          operation: 'DescribeVolumes',
+          result: { Volumes: [] },
+        },
+        'ec2/DescribeSecurityGroups': {
+          service: 'ec2',
+          operation: 'DescribeSecurityGroups',
+          result: { SecurityGroups: [] },
+        },
+        'ec2/DescribeImages': {
+          service: 'ec2',
+          operation: 'DescribeImages',
+          result: { Images: [] },
+        },
+      },
+    });
+
+    await listInstanceVolumes('i-1');
+    expect(lastDispatchedInput('DescribeVolumes')).toMatchObject({
+      Filters: [{ Name: 'attachment.instance-id', Values: ['i-1'] }],
+    });
+
+    await listVolumes({ filters: [{ Name: 'status', Values: ['available'] }] });
+    expect(lastDispatchedInput('DescribeVolumes')).toMatchObject({
+      Filters: [{ Name: 'status', Values: ['available'] }],
+    });
+
+    await listSecurityGroups({ filters: [{ Name: 'vpc-id', Values: ['vpc-1'] }] });
+    expect(lastDispatchedInput('DescribeSecurityGroups')).toMatchObject({
+      Filters: [{ Name: 'vpc-id', Values: ['vpc-1'] }],
+    });
+
+    await listImages({ owners: ['amazon'] });
+    expect(lastDispatchedInput('DescribeImages')).toMatchObject({ Owners: ['amazon'] });
+  });
 });
+
+describe('EC2 pagination', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('pages until NextToken disappears', async () => {
+    let call = 0;
+    const pages = [
+      {
+        Reservations: [
+          {
+            Instances: [
+              { InstanceId: 'i-1', InstanceType: 't3.micro', State: { Name: 'running' } },
+            ],
+          },
+        ],
+        NextToken: 't1',
+      },
+      {
+        Reservations: [
+          {
+            Instances: [
+              { InstanceId: 'i-2', InstanceType: 't3.micro', State: { Name: 'running' } },
+            ],
+          },
+        ],
+      },
+    ];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        const page = pages[Math.min(call, pages.length - 1)];
+        call += 1;
+        return jsonResponse({ service: 'ec2', operation: 'DescribeInstances', result: page });
+      }),
+    );
+
+    const items = await listAllInstances();
+    expect(items.map((instance) => instance.instanceId)).toEqual(['i-1', 'i-2']);
+    expect(call).toBe(2);
+  });
+
+  it('stops instead of looping forever when the service repeats a token', async () => {
+    let call = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        call += 1;
+        return jsonResponse({
+          service: 'ec2',
+          operation: 'DescribeInstances',
+          result: {
+            Reservations: [
+              {
+                Instances: [
+                  { InstanceId: `i-${call}`, InstanceType: 't3.micro', State: { Name: 'running' } },
+                ],
+              },
+            ],
+            NextToken: 'stuck',
+          },
+        });
+      }),
+    );
+
+    const items = await listAllInstances();
+    expect(items.map((instance) => instance.instanceId)).toEqual(['i-1', 'i-2']);
+    expect(call).toBe(2);
+  });
+});
+
+/** Parsed input of the last dispatcher request for one operation. */
+function lastDispatchedInput(operation: string): Record<string, unknown> {
+  const calls = vi
+    .mocked(globalThis.fetch)
+    .mock.calls.filter(([input]) => String(input).includes(`/api/services/ec2/${operation}`));
+  const call = calls[calls.length - 1];
+  if (call === undefined) throw new Error(`${operation} was not dispatched`);
+  const request = JSON.parse(String(call[1]?.body)) as { input: Record<string, unknown> };
+  return request.input;
+}

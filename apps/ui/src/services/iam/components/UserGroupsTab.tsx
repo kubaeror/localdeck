@@ -245,7 +245,12 @@ export function UserGroupsTab({ userName }: UserGroupsTabProps): ReactElement {
     {
       id: 'arn',
       header: 'Group ARN',
-      cell: (group) => <Box variant="code">{group.arn}</Box>,
+      cell: (group) =>
+        group.arn === undefined ? (
+          <Box color="text-body-secondary">Not reported</Box>
+        ) : (
+          <Box variant="code">{group.arn}</Box>
+        ),
     },
     {
       id: 'actions',

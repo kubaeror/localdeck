@@ -22,9 +22,6 @@ import { SERVICE_ID } from './spec';
 /** Page size the console asks EC2 for. */
 const PAGE_SIZE = 100;
 
-/** Cap for the dashboard's `listAll…` helpers. */
-const COLLECT_LIMIT = 1000;
-
 export interface Ec2ListOptions {
   /** `NextToken` from the previous page, when one was returned. */
   nextToken?: string;
@@ -65,19 +62,56 @@ function toPage<T>(items: readonly T[], result: TokenPage): Paginated<T> {
   };
 }
 
-/** Walks `NextToken` pages until the service is done or the cap is reached. */
+/**
+ * A dashboard count read from a single page. `hasMore` says the service had
+ * more pages; the caller renders "100+" instead of paying for a full sweep.
+ */
+export interface Ec2Count {
+  count: number;
+  hasMore: boolean;
+}
+
+function toCount(page: Paginated<unknown>, limit: number): Ec2Count {
+  return {
+    count: page.items.length,
+    hasMore: page.nextToken !== undefined || page.items.length >= limit,
+  };
+}
+
+/**
+ * Walks `NextToken` pages until the service stops returning a token. A token
+ * the service already returned is treated as the end of the chain, so a buggy
+ * backend answering with the same token forever cannot spin the loop.
+ */
 async function collectAll<T>(
   fetchPage: (nextToken?: string) => Promise<Paginated<T>>,
-  limit = COLLECT_LIMIT,
 ): Promise<readonly T[]> {
   const items: T[] = [];
+  const seenTokens = new Set<string>();
   let nextToken: string | undefined;
-  do {
+  for (;;) {
     const page = await fetchPage(nextToken);
     items.push(...page.items);
-    nextToken = page.nextToken;
-  } while (nextToken !== undefined && items.length < limit);
+    const token = page.nextToken;
+    if (token === undefined || seenTokens.has(token)) break;
+    seenTokens.add(token);
+    nextToken = token;
+  }
   return items;
+}
+
+/**
+ * A client token for the idempotent create calls (`RunInstances`,
+ * `CreateVolume`): a double-submit or a retried request reuses the same token
+ * instead of creating a second resource.
+ */
+export function newClientToken(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  // Browsers without `randomUUID` (older WebViews) still get a unique-enough
+  // token; the token only has to be stable for one user action.
+  return `localdeck-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 // ------------------------------------------------------------- instances
@@ -305,15 +339,22 @@ export async function listInstances(
   return toPage(items, result);
 }
 
-/** Every instance, paging until LocalStack is done (used by the dashboard). */
+/** Every instance, paging until LocalStack is done (used by live tests). */
 export async function listAllInstances(): Promise<readonly Ec2Instance[]> {
   return collectAll((nextToken) => listInstances(nextToken === undefined ? {} : { nextToken }));
+}
+
+/** Dashboard count: one page, with `hasMore` when the service had more. */
+export async function countInstances(): Promise<Ec2Count> {
+  return toCount(await listInstances(), PAGE_SIZE);
 }
 
 /** `DescribeInstances` for one id; throws a readable error when it is gone. */
 export async function getInstance(instanceId: string): Promise<Ec2Instance> {
   const page = await listInstances({ instanceIds: [instanceId] });
-  const instance = page.items[0];
+  // LocalStack can ignore the id filter; matching exactly keeps the detail page
+  // from rendering an unrelated instance as the requested one.
+  const instance = page.items.find((entry) => entry.instanceId === instanceId);
   if (instance === undefined) {
     throw notFound(`LocalStack returned no instance for "${instanceId}".`);
   }
@@ -511,10 +552,17 @@ export async function listAllImages(options: ImageListOptions = {}): Promise<rea
   );
 }
 
-/** `DescribeImages` for one id. */
+/** Dashboard count: one page, with `hasMore` when the service had more. */
+export async function countImages(): Promise<Ec2Count> {
+  return toCount(await listImages(), PAGE_SIZE);
+}
+
+/** `DescribeImages` for one id; throws a readable error when it is gone. */
 export async function getImage(imageId: string): Promise<Ec2Image> {
   const page = await listImages({ filters: [{ Name: 'image-id', Values: [imageId] }] });
-  const image = page.items.find((entry) => entry.imageId === imageId) ?? page.items[0];
+  // The filter is not a guarantee: LocalStack has ignored it in the past, so
+  // only an exact id match is acceptable.
+  const image = page.items.find((entry) => entry.imageId === imageId);
   if (image === undefined) {
     throw notFound(`LocalStack returned no image for "${imageId}".`);
   }
@@ -678,6 +726,9 @@ export interface CreatedEc2KeyPair {
 
 /** `CreateKeyPair`; the console shows the .pem before leaving the wizard. */
 export async function createKeyPair(keyName: string): Promise<CreatedEc2KeyPair> {
+  // The EC2 API has no ClientToken for CreateKeyPair: idempotency is the
+  // caller's job. The launch wizard keeps the created pair across retries
+  // instead of calling CreateKeyPair again with the same name.
   const result = await callServiceOperation<{
     KeyName?: string;
     KeyPairId?: string;
@@ -839,6 +890,11 @@ export async function listAllSecurityGroups(): Promise<readonly Ec2SecurityGroup
   );
 }
 
+/** Dashboard count: one page, with `hasMore` when the service had more. */
+export async function countSecurityGroups(): Promise<Ec2Count> {
+  return toCount(await listSecurityGroups(), PAGE_SIZE);
+}
+
 /** `DescribeSecurityGroups` for one id. */
 export async function getSecurityGroup(groupId: string): Promise<Ec2SecurityGroup> {
   const result = await callServiceOperation<{ SecurityGroups?: RawSecurityGroup[] }>(
@@ -856,16 +912,19 @@ export async function getSecurityGroup(groupId: string): Promise<Ec2SecurityGrou
   return group;
 }
 
-/** The groups an instance belongs to, with their rules (instance detail tab). */
-export async function getSecurityGroupsForInstance(
-  instance: Pick<Ec2Instance, 'securityGroups'>,
+/**
+ * The security groups an instance belongs to, with their rules. The caller
+ * passes the ids it already has (from the instance description), so a refresh
+ * of the instance cannot trigger an extra `DescribeSecurityGroups` call.
+ */
+export async function listSecurityGroupsByIds(
+  groupIds: readonly string[],
 ): Promise<readonly Ec2SecurityGroup[]> {
-  const ids = instance.securityGroups.map((group) => group.id);
-  if (ids.length === 0) return [];
+  if (groupIds.length === 0) return [];
   const result = await callServiceOperation<{ SecurityGroups?: RawSecurityGroup[] }>(
     SERVICE_ID,
     'DescribeSecurityGroups',
-    { GroupIds: ids },
+    { GroupIds: [...groupIds] },
   );
   return (result.SecurityGroups ?? []).flatMap((raw): Ec2SecurityGroup[] => {
     const group = toEc2SecurityGroup(raw);
@@ -906,7 +965,7 @@ export async function createSecurityGroup(
   return getSecurityGroup(groupId);
 }
 
-/** One ingress rule to authorize/revoke. */
+/** One ingress/egress rule to authorize or revoke. */
 export interface SecurityGroupIngressRule {
   protocol: string;
   fromPort?: number;
@@ -914,9 +973,18 @@ export interface SecurityGroupIngressRule {
   /** CIDR blocks the rule allows. */
   cidrIpv4?: readonly string[];
   cidrIpv6?: readonly string[];
+  /** Source/destination security groups (`UserIdGroupPairs`). */
+  referencedGroups?: readonly string[];
+  /** Prefix list ids (`PrefixListIds`), e.g. `pl-…`. */
+  prefixListIds?: readonly string[];
   description?: string;
 }
 
+/**
+ * Maps a rule onto the SDK's `IpPermission` shape. Every member a rule can
+ * carry round-trips, so a revoke reproduces exactly the stored rule instead of
+ * a broader one that happens to share protocol and ports.
+ */
 function toIpPermission(rule: SecurityGroupIngressRule): Record<string, unknown> {
   return {
     IpProtocol: rule.protocol,
@@ -931,6 +999,12 @@ function toIpPermission(rule: SecurityGroupIngressRule): Record<string, unknown>
     ...(rule.cidrIpv6 === undefined || rule.cidrIpv6.length === 0
       ? {}
       : { Ipv6Ranges: rule.cidrIpv6.map((CidrIpv6) => ({ CidrIpv6 })) }),
+    ...(rule.referencedGroups === undefined || rule.referencedGroups.length === 0
+      ? {}
+      : { UserIdGroupPairs: rule.referencedGroups.map((GroupId) => ({ GroupId })) }),
+    ...(rule.prefixListIds === undefined || rule.prefixListIds.length === 0
+      ? {}
+      : { PrefixListIds: rule.prefixListIds.map((PrefixListId) => ({ PrefixListId })) }),
   };
 }
 
@@ -1065,6 +1139,11 @@ export function isVolumeAttached(volume: Pick<Ec2Volume, 'attachments' | 'state'
   return volume.attachments.length > 0 || volume.state === 'in-use';
 }
 
+/** States that keep changing on their own, so the volume pages auto-refresh. */
+export function isTransitionalVolumeState(state: string): boolean {
+  return state === 'creating' || state === 'deleting';
+}
+
 export interface VolumeListOptions extends Ec2ListOptions {
   volumeIds?: readonly string[];
   filters?: readonly { Name: string; Values: readonly string[] }[];
@@ -1095,9 +1174,14 @@ export async function listVolumes(options: VolumeListOptions = {}): Promise<Pagi
   return toPage(items, result);
 }
 
-/** Every volume, paging until LocalStack is done (the dashboard's count). */
+/** Every volume, paging until LocalStack is done (used by live tests). */
 export async function listAllVolumes(): Promise<readonly Ec2Volume[]> {
   return collectAll((nextToken) => listVolumes(nextToken === undefined ? {} : { nextToken }));
+}
+
+/** Dashboard count: one page, with `hasMore` when the service had more. */
+export async function countVolumes(): Promise<Ec2Count> {
+  return toCount(await listVolumes(), PAGE_SIZE);
 }
 
 /** `DescribeVolumes` for one id. */
@@ -1133,6 +1217,10 @@ export interface CreateVolumeInput {
   snapshotId?: string;
   encrypted?: boolean;
   iops?: number;
+  /** gp3 only: provisioned throughput in MiB/s. */
+  throughput?: number;
+  /** Idempotency token, so a retried submit cannot create a second volume. */
+  clientToken?: string;
   tags?: readonly AwsTag[];
 }
 
@@ -1142,11 +1230,19 @@ export async function createVolume(input: CreateVolumeInput): Promise<Ec2Volume>
     AvailabilityZone: input.availabilityZone,
     Size: input.sizeGiB,
     VolumeType: input.volumeType,
+    ...(input.clientToken === undefined || input.clientToken.length === 0
+      ? {}
+      : { ClientToken: input.clientToken }),
     ...(input.snapshotId === undefined || input.snapshotId.length === 0
       ? {}
       : { SnapshotId: input.snapshotId }),
     ...(input.encrypted === undefined ? {} : { Encrypted: input.encrypted }),
     ...(input.iops === undefined ? {} : { Iops: input.iops }),
+    // `Throughput` is only valid for gp3; sending it for other types is an
+    // upstream InvalidParameterCombination.
+    ...(input.throughput === undefined || input.volumeType !== 'gp3'
+      ? {}
+      : { Throughput: input.throughput }),
     ...(input.tags === undefined || input.tags.length === 0
       ? {}
       : {
@@ -1364,6 +1460,8 @@ export interface RunInstancesInput {
   subnetId?: string;
   securityGroupIds?: readonly string[];
   availabilityZone?: string;
+  /** Idempotency token, so a retried submit cannot launch a second instance. */
+  clientToken?: string;
   /** Additional tags applied to the volumes the launch creates. */
   volumeTags?: readonly AwsTag[];
   blockDevices?: readonly {
@@ -1372,6 +1470,8 @@ export interface RunInstancesInput {
     volumeType: string;
     deleteOnTermination: boolean;
     encrypted?: boolean;
+    /** Required for io1/io2, optional for gp3. */
+    iops?: number;
   }[];
 }
 
@@ -1388,6 +1488,9 @@ export async function runInstances(input: RunInstancesInput): Promise<Ec2Instanc
       InstanceType: input.instanceType,
       MinCount: 1,
       MaxCount: 1,
+      ...(input.clientToken === undefined || input.clientToken.length === 0
+        ? {}
+        : { ClientToken: input.clientToken }),
       ...(input.keyName === undefined || input.keyName.length === 0
         ? {}
         : { KeyName: input.keyName }),
@@ -1410,6 +1513,7 @@ export async function runInstances(input: RunInstancesInput): Promise<Ec2Instanc
                 VolumeType: device.volumeType,
                 DeleteOnTermination: device.deleteOnTermination,
                 ...(device.encrypted === undefined ? {} : { Encrypted: device.encrypted }),
+                ...(device.iops === undefined ? {} : { Iops: device.iops }),
               },
             })),
           }),

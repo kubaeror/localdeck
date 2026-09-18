@@ -7,12 +7,11 @@ import { useCallback, useMemo, useState, type ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { DeleteConfirmModal } from '../../../components/DeleteConfirmModal';
 import { ResourceListPage } from '../../../components/ResourceListPage';
-import { useFlashbar } from '../../../hooks/useFlashbar';
 import { formatDateTime } from '../../../lib/format';
 import { serviceConsolePath } from '../../paths';
 import type { ServicePageProps } from '../../types';
 import { deleteUser, listUsers, type IamUser } from '../api';
-import { toFriendlyIamError } from '../errors';
+import { useBulkDelete } from '../components/useBulkDelete';
 
 /**
  * The IAM users list: user name, ARN and creation date, with per-row and bulk
@@ -21,12 +20,17 @@ import { toFriendlyIamError } from '../errors';
  */
 export function UsersListPage({ descriptor }: ServicePageProps): ReactElement {
   const navigate = useNavigate();
-  const flashbar = useFlashbar();
   const [filteringText, setFilteringText] = useState('');
-  const [deleteTargets, setDeleteTargets] = useState<readonly IamUser[] | null>(null);
-  const [deleting, setDeleting] = useState(false);
-  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
+
+  const bulkDelete = useBulkDelete<IamUser>({
+    noun: 'user',
+    label: (user) => user.userName,
+    remove: (user) => deleteUser(user.userName),
+    onCompleted: () => {
+      setReloadToken((token) => token + 1);
+    },
+  });
 
   const userPath = useCallback(
     (userName: string): string =>
@@ -63,7 +67,12 @@ export function UsersListPage({ descriptor }: ServicePageProps): ReactElement {
       {
         id: 'arn',
         header: 'User ARN',
-        cell: (user) => <Box variant="code">{user.arn}</Box>,
+        cell: (user) =>
+          user.arn === undefined ? (
+            <Box color="text-body-secondary">Not reported</Box>
+          ) : (
+            <Box variant="code">{user.arn}</Box>
+          ),
       },
       {
         id: 'createDate',
@@ -74,29 +83,6 @@ export function UsersListPage({ descriptor }: ServicePageProps): ReactElement {
     ],
     [openUser, userPath],
   );
-
-  const confirmDelete = async (): Promise<void> => {
-    const targets = deleteTargets ?? [];
-    if (targets.length === 0) return;
-
-    setDeleting(true);
-    setDeleteError(null);
-    for (const user of targets) {
-      try {
-        await deleteUser(user.userName);
-        flashbar.notify({ type: 'success', header: 'User deleted', content: user.userName });
-      } catch (caught) {
-        flashbar.notify({
-          type: 'error',
-          header: `Could not delete ${user.userName}`,
-          content: toFriendlyIamError(caught).message,
-        });
-      }
-    }
-    setDeleting(false);
-    setDeleteTargets(null);
-    setReloadToken((token) => token + 1);
-  };
 
   return (
     <>
@@ -122,7 +108,7 @@ export function UsersListPage({ descriptor }: ServicePageProps): ReactElement {
           placeholder: 'Find users by name',
           match: (user, text) =>
             user.userName.toLowerCase().includes(text.trim().toLowerCase()) ||
-            user.arn.toLowerCase().includes(text.trim().toLowerCase()),
+            (user.arn ?? '').toLowerCase().includes(text.trim().toLowerCase()),
         }}
         headerActions={
           <Button
@@ -145,12 +131,11 @@ export function UsersListPage({ descriptor }: ServicePageProps): ReactElement {
             ]}
             onItemClick={({ detail }) => {
               if (detail.id === 'view') openUser(user.userName);
-              if (detail.id === 'copy-arn') {
+              if (detail.id === 'copy-arn' && user.arn !== undefined) {
                 void navigator.clipboard?.writeText(user.arn);
               }
               if (detail.id === 'delete') {
-                setDeleteError(null);
-                setDeleteTargets([user]);
+                bulkDelete.requestDelete([user]);
               }
             }}
           />
@@ -161,8 +146,7 @@ export function UsersListPage({ descriptor }: ServicePageProps): ReactElement {
             items={[{ id: 'delete', text: 'Delete' }]}
             onItemClick={({ detail }) => {
               if (detail.id === 'delete') {
-                setDeleteError(null);
-                setDeleteTargets(selected);
+                bulkDelete.requestDelete(selected);
               }
             }}
           >
@@ -173,23 +157,24 @@ export function UsersListPage({ descriptor }: ServicePageProps): ReactElement {
         emptyDescription="Users are identities with long-term credentials. Create a user to give an application or person access to this account."
       />
 
-      {deleteTargets === null ? null : (
+      {bulkDelete.targets === null ? null : (
         <DeleteConfirmModal
           visible
-          title={deleteTargets.length === 1 ? 'Delete user' : 'Delete users'}
-          subjects={deleteTargets.map((user) => user.userName)}
+          title={bulkDelete.targets.length === 1 ? 'Delete user' : 'Delete users'}
+          subjects={bulkDelete.targets.map((user) => user.userName)}
           description="Deleting a user removes its permissions permanently. Access keys and group memberships must be removed first, and this action cannot be undone."
-          confirmationText={deleteTargets.length === 1 ? undefined : 'delete'}
-          submitLabel={deleteTargets.length === 1 ? 'Delete user' : 'Delete users'}
-          loading={deleting}
-          {...(deleteError === null ? {} : { errorText: deleteError })}
+          confirmationText={bulkDelete.targets.length === 1 ? undefined : 'delete'}
+          submitLabel={bulkDelete.targets.length === 1 ? 'Delete user' : 'Delete users'}
+          loading={bulkDelete.deleting}
+          {...(bulkDelete.failures.length === 0
+            ? {}
+            : { errorText: bulkDelete.failures.join(' ') })}
           onDismiss={() => {
-            if (deleting) return;
-            setDeleteTargets(null);
-            setDeleteError(null);
+            if (bulkDelete.deleting) return;
+            bulkDelete.dismiss();
           }}
           onConfirm={() => {
-            void confirmDelete();
+            void bulkDelete.confirm();
           }}
         />
       )}

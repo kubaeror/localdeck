@@ -5,6 +5,7 @@ import ButtonDropdown from '@cloudscape-design/components/button-dropdown';
 import Link from '@cloudscape-design/components/link';
 import { useCallback, useMemo, useState, type ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { InfoTooltip } from '../../../components/InfoTooltip';
 import { ResourceListPage } from '../../../components/ResourceListPage';
 import { StatusBadge } from '../../../components/StatusBadge';
 import { useFlashbar } from '../../../hooks/useFlashbar';
@@ -23,46 +24,26 @@ import {
   type Ec2Instance,
 } from '../api';
 import { toFriendlyEc2Error } from '../errors';
-import { InstanceActionModal, type InstanceAction } from '../components/InstanceActionModal';
+import { useTransitionTracking } from '../hooks';
+import {
+  canRunInstanceAction,
+  INSTANCE_ACTION_LABELS,
+  INSTANCE_ACTION_PROGRESS,
+  INSTANCE_ACTIONS,
+  type InstanceAction,
+} from '../instanceActions';
+import { InstanceActionModal } from '../components/InstanceActionModal';
+import { EC2_PAGE_SIZE_OPTIONS } from '../listOptions';
 
 /** How often the list reloads while an instance is still settling. */
 const POLL_INTERVAL_MS = 10_000;
 
-/** Which lifecycle actions make sense for the instance's current state. */
-function canRun(action: InstanceAction, instance: Ec2Instance): boolean {
-  switch (action) {
-    case 'start':
-      return instance.state === 'stopped';
-    case 'stop':
-      return instance.state === 'running';
-    case 'reboot':
-      return instance.state === 'running';
-    case 'terminate':
-      return instance.state !== 'terminated' && instance.state !== 'shutting-down';
-  }
-}
-
-const ACTION_LABELS: Readonly<Record<InstanceAction, string>> = {
-  start: 'Start instance',
-  stop: 'Stop instance',
-  reboot: 'Reboot instance',
-  terminate: 'Terminate instance',
-};
-
-/** In-flight wording for the flashbar ("Instance stopping"). */
-const ACTION_PROGRESS: Readonly<Record<InstanceAction, string>> = {
-  start: 'starting',
-  stop: 'stopping',
-  reboot: 'rebooting',
-  terminate: 'terminating',
-};
-
 /**
  * The console's instances list: Name, Instance ID, state, type, availability
  * zone and launch time, with row and bulk lifecycle actions behind confirmation
- * modals. While any instance is pending, stopping or shutting down the page
- * refreshes every 10 seconds so the state transition shows up without a manual
- * reload.
+ * modals. While any instance is pending, stopping or shutting down — and for a
+ * short window after an action — the page refreshes every 10 seconds so the
+ * state transition shows up without a manual reload.
  */
 export function InstancesListPage({ descriptor }: ServicePageProps): ReactElement {
   const navigate = useNavigate();
@@ -74,6 +55,7 @@ export function InstancesListPage({ descriptor }: ServicePageProps): ReactElemen
   const [targets, setTargets] = useState<readonly Ec2Instance[]>([]);
   const [acting, setActing] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const { forcedTracking, trackTransition } = useTransitionTracking();
 
   const fetchPage = useCallback(async (options: { nextToken?: string; signal?: AbortSignal }) => {
     const page = await listInstances({
@@ -87,7 +69,7 @@ export function InstancesListPage({ descriptor }: ServicePageProps): ReactElemen
     return page;
   }, []);
 
-  usePolling(transitional, POLL_INTERVAL_MS, () => {
+  usePolling(transitional || forcedTracking, POLL_INTERVAL_MS, () => {
     setReloadToken((token) => token + 1);
   });
 
@@ -170,7 +152,8 @@ export function InstancesListPage({ descriptor }: ServicePageProps): ReactElemen
   );
 
   const startAction = (next: InstanceAction, instances: readonly Ec2Instance[]): void => {
-    const eligible = instances.filter((instance) => canRun(next, instance));
+    if (acting) return;
+    const eligible = instances.filter((instance) => canRunInstanceAction(next, instance));
     if (eligible.length === 0) {
       flashbar.notify({
         type: 'warning',
@@ -185,7 +168,7 @@ export function InstancesListPage({ descriptor }: ServicePageProps): ReactElemen
   };
 
   const confirmAction = async (): Promise<void> => {
-    if (action === null || targets.length === 0) return;
+    if (acting || action === null || targets.length === 0) return;
     const ids = targets.map((instance) => instance.instanceId);
     setActing(true);
     setActionError(null);
@@ -195,11 +178,14 @@ export function InstancesListPage({ descriptor }: ServicePageProps): ReactElemen
       if (action === 'reboot') await rebootInstances(ids);
       if (action === 'terminate') await terminateInstances(ids);
 
+      // "Requested", not "done": the request was accepted, the state settles
+      // asynchronously and the polling window below tracks it.
       flashbar.notify({
-        type: 'success',
-        header: `${ids.length === 1 ? 'Instance' : 'Instances'} ${ACTION_PROGRESS[action]}`,
-        content: ids.join(', '),
+        type: 'info',
+        header: `${ids.length === 1 ? 'Instance' : 'Instances'} ${INSTANCE_ACTION_PROGRESS[action]} requested`,
+        content: `${ids.join(', ')} — the list refreshes automatically while the state changes.`,
       });
+      trackTransition();
       setAction(null);
       setTargets([]);
     } catch (caught) {
@@ -211,11 +197,14 @@ export function InstancesListPage({ descriptor }: ServicePageProps): ReactElemen
   };
 
   const actionItems = (instances: readonly Ec2Instance[]) =>
-    (['start', 'stop', 'reboot', 'terminate'] as const).map((candidate) => ({
+    INSTANCE_ACTIONS.map((candidate) => ({
       id: candidate,
-      text: ACTION_LABELS[candidate],
-      disabled: instances.filter((instance) => canRun(candidate, instance)).length === 0,
+      text: INSTANCE_ACTION_LABELS[candidate],
+      disabled:
+        instances.filter((instance) => canRunInstanceAction(candidate, instance)).length === 0,
     }));
+
+  const isFiltering = filteringText.trim().length > 0;
 
   return (
     <>
@@ -229,6 +218,8 @@ export function InstancesListPage({ descriptor }: ServicePageProps): ReactElemen
         columns={columns}
         getRowId={(instance) => instance.instanceId}
         reloadToken={reloadToken}
+        preferencesId="ec2-instances-list"
+        pageSizeOptions={EC2_PAGE_SIZE_OPTIONS}
         fetcher={fetchPage}
         filtering={{
           text: filteringText,
@@ -257,22 +248,34 @@ export function InstancesListPage({ descriptor }: ServicePageProps): ReactElemen
           </Button>
         }
         notifications={
-          transitional ? (
+          transitional || forcedTracking ? (
             <Box color="text-body-secondary">
               Refreshing automatically every 10 seconds while instances are pending or stopping.
             </Box>
           ) : undefined
         }
-        rowActions={(instance) => (
-          <ButtonDropdown
-            variant="icon"
-            ariaLabel={`Actions for ${instanceName(instance)}`}
-            items={actionItems([instance])}
-            onItemClick={({ detail }) => {
-              startAction(detail.id as InstanceAction, [instance]);
-            }}
-          />
-        )}
+        rowActions={(instance) => {
+          const menu = (
+            <ButtonDropdown
+              variant="icon"
+              ariaLabel={`Actions for ${instanceName(instance)}`}
+              items={actionItems([instance])}
+              onItemClick={({ detail }) => {
+                startAction(detail.id as InstanceAction, [instance]);
+              }}
+            />
+          );
+          const anyEnabled = INSTANCE_ACTIONS.some((candidate) =>
+            canRunInstanceAction(candidate, instance),
+          );
+          return anyEnabled ? (
+            menu
+          ) : (
+            <InfoTooltip content="No lifecycle action applies to a terminated instance. The record stays until LocalStack drops it.">
+              {menu}
+            </InfoTooltip>
+          );
+        }}
         bulkActions={(selected) => (
           <ButtonDropdown
             ariaLabel="Instance actions"
@@ -284,8 +287,12 @@ export function InstancesListPage({ descriptor }: ServicePageProps): ReactElemen
             Instance actions
           </ButtonDropdown>
         )}
-        emptyTitle="No instances"
-        emptyDescription="An instance is a virtual machine LocalStack emulates. Launch one to see it here."
+        emptyTitle={isFiltering ? 'No matches' : 'No instances'}
+        emptyDescription={
+          isFiltering
+            ? 'No instance matches the current filter. Clear the filter or try another search term.'
+            : 'An instance is a virtual machine LocalStack emulates. Launch one to see it here.'
+        }
       />
 
       {action === null ? null : (

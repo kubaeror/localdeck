@@ -198,7 +198,7 @@ export function PoliciesListPage({ descriptor }: ServicePageProps): ReactElement
           visible
           title="Delete policy"
           subjects={[deleteTarget.policyName]}
-          description="Deleting a policy removes it permanently from every entity it is attached to. This action cannot be undone."
+          description="Deleting a policy is permanent. Detach every user, group and role from it first; LocalStack refuses the deletion while any remain."
           submitLabel="Delete policy"
           loading={deleting}
           {...(deleteError === null ? {} : { errorText: deleteError })}

@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../../App';
-import { dispatchedOperationCalls, stubApiFetch } from '../../test/fixtures';
+import { dispatchedOperationCalls, jsonResponse, stubApiFetch } from '../../test/fixtures';
 
 /**
  * The generated resource browser, exercised through the SNS registry binding:
@@ -155,5 +155,54 @@ describe('generic resource browser (SNS)', () => {
     // The stub names the whitelisted CreateTopic operation in CLI spelling.
     expect((await screen.findAllByText(/create-topic/)).length).toBeGreaterThan(0);
     expect(screen.getByText(/--endpoint-url http:\/\/localhost:4566/)).toBeDefined();
+  });
+
+  it('shows the tag failure message and retries the tags operation', async () => {
+    stubSns();
+    const base = globalThis.fetch;
+    let tagsCalls = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).includes('/sns/ListTagsForResource')) {
+          tagsCalls += 1;
+          if (tagsCalls === 1) {
+            return jsonResponse(
+              { error: { code: 'AccessDenied', message: 'tag access denied', statusCode: 403 } },
+              403,
+            );
+          }
+        }
+        return base(input, init);
+      }),
+    );
+    renderApp('/console/sns');
+
+    fireEvent.click(await screen.findByRole('link', { name: TOPIC_ARN }));
+    fireEvent.click(await screen.findByRole('tab', { name: 'Tags' }));
+
+    expect(await screen.findByText('Could not load the tags')).toBeDefined();
+    expect(screen.getByText('tag access denied')).toBeDefined();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByText('env')).toBeDefined();
+    expect(screen.queryByText('Could not load the tags')).toBeNull();
+  });
+
+  it('does not decode a route parameter a second time', async () => {
+    stubApiFetch({
+      operations: {
+        'logs/DescribeLogGroups': {
+          service: 'logs',
+          operation: 'DescribeLogGroups',
+          result: { logGroups: [{ logGroupName: 'a%20b', storedBytes: 1 }] },
+        },
+      },
+    });
+    // encodeURIComponent('a%20b') = 'a%2520b': the router decodes it once.
+    renderApp('/console/logs/resources/a%2520b');
+
+    expect(await screen.findByRole('heading', { level: 1, name: 'a%20b' })).toBeDefined();
+    expect(screen.queryByRole('heading', { level: 1, name: 'a b' })).toBeNull();
   });
 });

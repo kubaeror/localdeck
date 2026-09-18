@@ -28,13 +28,19 @@ export interface AttachVolumeModalProps {
   onAttached: () => void;
 }
 
-const DEVICE_PATTERN = /^\/dev\/sd[a-z]$/;
+/** The console accepts both the Linux and the Xen device-name prefixes. */
+const DEVICE_PATTERN = /^\/dev\/(sd|xvd)[a-z]$/;
 const DEFAULT_DEVICE = '/dev/sdf';
+
+/** Instances that can accept a volume. */
+const ATTACHABLE_STATES: ReadonlySet<string> = new Set(['running', 'stopped']);
 
 /**
  * Attach an EBS volume to an instance, from either side of the relationship:
  * the volume detail page preselects the volume, the instance storage tab
- * preselects the instance. Only volumes that are not in use are offered.
+ * preselects the instance. Only volumes that are not in use are offered, and
+ * both lists are scoped to the other side's Availability Zone — an instance
+ * can only use volumes from its own zone.
  */
 export function AttachVolumeModal({
   volumeId,
@@ -63,7 +69,9 @@ export function AttachVolumeModal({
         ]);
         if (cancelled) return;
         setVolumes(volumePage.items);
-        setInstances(instancePage.items.filter((instance) => instance.state !== 'terminated'));
+        setInstances(
+          instancePage.items.filter((instance) => ATTACHABLE_STATES.has(instance.state)),
+        );
         setLoadError(null);
       } catch (caught) {
         if (cancelled) return;
@@ -78,25 +86,38 @@ export function AttachVolumeModal({
     };
   }, []);
 
-  const volumeOptions = useMemo<readonly SelectProps.Option[]>(
-    () =>
-      volumes.map((volume) => ({
+  const selectedVolume = useMemo(
+    () => volumes.find((volume) => volume.volumeId === selectedVolumeId) ?? null,
+    [selectedVolumeId, volumes],
+  );
+  const selectedInstance = useMemo(
+    () => instances.find((instance) => instance.instanceId === selectedInstanceId) ?? null,
+    [instances, selectedInstanceId],
+  );
+
+  // The instance determines the volume's zone; the preselected volume narrows
+  // the instance list symmetrically. Unknown zones do not filter anything.
+  const volumeOptions = useMemo<readonly SelectProps.Option[]>(() => {
+    const zone = selectedInstance?.availabilityZone;
+    return volumes
+      .filter((volume) => zone === undefined || volume.availabilityZone === zone)
+      .map((volume) => ({
         label: `${volume.name ?? volume.volumeId} (${volume.volumeId})`,
         description: `${volume.sizeGiB ?? '?'} GiB ${volume.volumeType ?? ''} · ${volume.availabilityZone ?? 'unknown zone'}`,
         value: volume.volumeId,
-      })),
-    [volumes],
-  );
+      }));
+  }, [selectedInstance, volumes]);
 
-  const instanceOptions = useMemo<readonly SelectProps.Option[]>(
-    () =>
-      instances.map((instance) => ({
+  const instanceOptions = useMemo<readonly SelectProps.Option[]>(() => {
+    const zone = selectedVolume?.availabilityZone;
+    return instances
+      .filter((instance) => zone === undefined || instance.availabilityZone === zone)
+      .map((instance) => ({
         label: `${instanceName(instance)} (${instance.instanceId})`,
-        description: `${instance.instanceType} · ${instance.state}`,
+        description: `${instance.instanceType} · ${instance.state} · ${instance.availabilityZone ?? 'unknown zone'}`,
         value: instance.instanceId,
-      })),
-    [instances],
-  );
+      }));
+  }, [instances, selectedVolume]);
 
   const selectedVolumeOption =
     volumeOptions.find((option) => option.value === selectedVolumeId) ?? null;
@@ -104,10 +125,17 @@ export function AttachVolumeModal({
     instanceOptions.find((option) => option.value === selectedInstanceId) ?? null;
 
   const deviceValid = DEVICE_PATTERN.test(device);
-  const ready = selectedVolumeId !== null && selectedInstanceId !== null && deviceValid && !loading;
+  const ready =
+    selectedVolumeOption !== null &&
+    selectedInstanceOption !== null &&
+    deviceValid &&
+    !loading &&
+    !submitting;
 
   const submit = async (): Promise<void> => {
+    if (submitting) return;
     if (selectedVolumeId === null || selectedInstanceId === null) return;
+    if (!deviceValid) return;
     setSubmitting(true);
     setError(null);
     try {
@@ -157,12 +185,30 @@ export function AttachVolumeModal({
           {error === null ? null : <Alert type="error">{error}</Alert>}
 
           <FormField
+            label="Instance"
+            description="Only running or stopped instances are listed; the instance's Availability Zone scopes the volumes."
+          >
+            <Select
+              selectedOption={selectedInstanceOption}
+              options={instanceOptions}
+              disabled={loading || instanceId !== undefined}
+              placeholder="Choose an instance"
+              ariaLabel="Instance"
+              onChange={({ detail }) => {
+                setSelectedInstanceId(detail.selectedOption.value ?? null);
+              }}
+            />
+          </FormField>
+
+          <FormField
             label="Volume"
-            description="Only volumes in the available state are listed."
+            description="Only volumes in the available state and in the selected instance's zone are listed."
             constraintText={
               loading || volumeOptions.length > 0
                 ? undefined
-                : 'No available volumes in this account.'
+                : selectedInstance === null
+                  ? 'No available volumes in this account.'
+                  : `No available volumes in ${selectedInstance.availabilityZone ?? 'the instance zone'}.`
             }
           >
             <Select
@@ -177,23 +223,14 @@ export function AttachVolumeModal({
             />
           </FormField>
 
-          <FormField label="Instance">
-            <Select
-              selectedOption={selectedInstanceOption}
-              options={instanceOptions}
-              disabled={loading || instanceId !== undefined}
-              placeholder="Choose an instance"
-              ariaLabel="Instance"
-              onChange={({ detail }) => {
-                setSelectedInstanceId(detail.selectedOption.value ?? null);
-              }}
-            />
-          </FormField>
-
           <FormField
             label="Device name"
-            description="The device name the instance sees, for example /dev/sdf (Linux) or xvdh (Windows)."
-            errorText={device.length > 0 && !deviceValid ? 'Use a name like /dev/sdf.' : undefined}
+            description="The device name the instance sees, for example /dev/sdf (Linux) or /dev/xvdh (Windows)."
+            errorText={
+              device.length > 0 && !deviceValid
+                ? 'Use a name like /dev/sdf or /dev/xvdh.'
+                : undefined
+            }
           >
             <Input
               value={device}

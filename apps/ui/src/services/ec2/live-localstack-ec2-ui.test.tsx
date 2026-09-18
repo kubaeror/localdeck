@@ -171,6 +171,23 @@ liveDescribe('EC2 console pages against the external LocalStack', () => {
 
     fireEvent.click(screen.getByRole('tab', { name: 'Tags' }));
     expect((await screen.findAllByText('Emulated')).length).toBeGreaterThan(0);
+
+    // The Security tab loads the instance's groups (or says there are none).
+    fireEvent.click(screen.getByRole('tab', { name: 'Security' }));
+    await waitFor(
+      () => {
+        const hasGroups = screen.queryAllByText(/Inbound rules/).length > 0;
+        const hasEmptyState = screen.queryByText(/not associated with any security group/) !== null;
+        expect(hasGroups || hasEmptyState).toBe(true);
+      },
+      { timeout: 20_000 },
+    );
+
+    // The Storage tab renders the root volume it launched with.
+    fireEvent.click(screen.getByRole('tab', { name: 'Storage' }));
+    expect(
+      await screen.findAllByText(/Detaching volumes is not supported/, {}, LIVE_TIMEOUT),
+    ).toBeDefined();
   }, 60_000);
 
   it('gates termination behind the confirmation modal and shows the new state', async () => {

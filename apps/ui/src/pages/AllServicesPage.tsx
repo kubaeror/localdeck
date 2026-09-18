@@ -19,11 +19,15 @@ import TextFilter from '@cloudscape-design/components/text-filter';
 import { useMemo, useState, type ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ConsoleBreadcrumbs } from '../components/ConsoleBreadcrumbs';
+import { InfoTooltip } from '../components/InfoTooltip';
 import { ServiceIcon } from '../components/ServiceIcon';
 import { StatusBadge } from '../components/StatusBadge';
+import { GLOBAL_SEARCH_SHORTCUT_LABEL } from '../contexts/global-search-context';
 import { useGlobalSearch } from '../hooks/useGlobalSearch';
 import { useLocalStackStatus } from '../hooks/useLocalStackStatus';
 import { useServiceCatalog } from '../hooks/useServiceCatalog';
+import { NOT_EMULATED_LABEL, NOT_INSTALLED_SHORT_LABEL, NOT_INSTALLED_TOOLTIP } from '../lib/copy';
+import { PARITY_COLORS, PARITY_LABELS } from '../lib/parity';
 import { searchServices } from '../lib/serviceSearch';
 import { serviceConsolePath } from '../services/paths';
 
@@ -32,18 +36,6 @@ interface ServiceRow {
   status: LocalStackServiceStatus | undefined;
   parity: ServiceParityLevel;
 }
-
-const PARITY_LABELS: Readonly<Record<ServiceParityLevel, string>> = {
-  dedicated: 'Dedicated console',
-  browser: 'Resource browser',
-  planned: 'Planned',
-};
-
-const PARITY_COLORS: Readonly<Record<ServiceParityLevel, 'blue' | 'green' | 'grey'>> = {
-  dedicated: 'blue',
-  browser: 'green',
-  planned: 'grey',
-};
 
 const PAGE_SIZE_OPTIONS = [
   { value: 25, label: '25 services' },
@@ -118,7 +110,10 @@ export function AllServicesPage(): ReactElement {
   }, [catalog.services, filteringText, isSortingDescending, reported, sortingColumn]);
 
   const pagesCount = Math.max(1, Math.ceil(rows.length / pageSize));
-  const visibleRows = rows.slice((currentPageIndex - 1) * pageSize, currentPageIndex * pageSize);
+  // The registry can shrink between polls; clamp instead of showing an empty
+  // page with a counter that no longer exists.
+  const pageIndex = Math.min(currentPageIndex, pagesCount);
+  const visibleRows = rows.slice((pageIndex - 1) * pageSize, pageIndex * pageSize);
 
   const columnDefinitions: TableProps.ColumnDefinition<ServiceRow>[] = [
     {
@@ -153,7 +148,7 @@ export function AllServicesPage(): ReactElement {
       sortingField: 'status',
       cell: (row) =>
         row.status === undefined ? (
-          <Badge color="grey">Not emulated locally</Badge>
+          <Badge color="grey">{NOT_EMULATED_LABEL}</Badge>
         ) : (
           <StatusBadge status={row.status} />
         ),
@@ -162,7 +157,16 @@ export function AllServicesPage(): ReactElement {
       id: 'parity',
       header: 'LocalDeck support',
       sortingField: 'parity',
-      cell: (row) => <Badge color={PARITY_COLORS[row.parity]}>{PARITY_LABELS[row.parity]}</Badge>,
+      cell: (row) => (
+        <SpaceBetween direction="horizontal" size="xs">
+          <Badge color={PARITY_COLORS[row.parity]}>{PARITY_LABELS[row.parity]}</Badge>
+          {row.service.available === false ? (
+            <InfoTooltip content={NOT_INSTALLED_TOOLTIP}>
+              <Badge color="grey">{NOT_INSTALLED_SHORT_LABEL}</Badge>
+            </InfoTooltip>
+          ) : null}
+        </SpaceBetween>
+      ),
     },
     {
       id: 'operations',
@@ -245,7 +249,7 @@ export function AllServicesPage(): ReactElement {
         }
         pagination={
           <Pagination
-            currentPageIndex={currentPageIndex}
+            currentPageIndex={pageIndex}
             pagesCount={pagesCount}
             onChange={({ detail }) => {
               setCurrentPageIndex(detail.currentPageIndex);
@@ -289,7 +293,7 @@ export function AllServicesPage(): ReactElement {
           <Box textAlign="center" color="inherit">
             <Box variant="strong">No services match the filter.</Box>
             <Box variant="p" color="inherit">
-              Clear the filter or search the registry with Ctrl+/.
+              Clear the filter or search the registry with {GLOBAL_SEARCH_SHORTCUT_LABEL}.
             </Box>
           </Box>
         }

@@ -19,11 +19,27 @@ export interface AppConfig {
   corsOrigin: true | string[];
   /** Normalized, no trailing slash, e.g. http://localhost:4566 */
   localstackEndpoint: string;
+  /**
+   * Endpoint written into generated client artifacts (the EKS kubeconfig).
+   * Never used for api→LocalStack traffic: when the api runs in Docker the
+   * internal endpoint (`host.docker.internal`) is not resolvable from the
+   * machine where kubectl runs, so `LOCALSTACK_PUBLIC_ENDPOINT` overrides it.
+   * Falls back to `localstackEndpoint`.
+   */
+  localstackPublicEndpoint: string;
   /** Absolute URL of the LocalStack health endpoint. */
   localstackHealthUrl: string;
   region: string;
   /** Per-request timeout for LocalStack health probes. */
   localstackTimeoutMs: number;
+  /** TCP connect timeout for AWS SDK calls against LocalStack. */
+  localstackConnectionTimeoutMs: number;
+  /** Whole-request timeout for AWS SDK calls against LocalStack. */
+  localstackRequestTimeoutMs: number;
+  /** How long a successful health probe is reused (0 disables the cache). */
+  localstackHealthCacheMs: number;
+  /** How long a graceful shutdown may drain before the process is forced out. */
+  shutdownTimeoutMs: number;
   /** How often the ui should refresh the status widget. */
   statusPollIntervalMs: number;
 }
@@ -44,6 +60,10 @@ const DEFAULTS = {
   localstackEndpoint: 'http://localhost:4566',
   region: 'us-east-1',
   localstackTimeoutMs: 5_000,
+  localstackConnectionTimeoutMs: 5_000,
+  localstackRequestTimeoutMs: 30_000,
+  localstackHealthCacheMs: 2_000,
+  shutdownTimeoutMs: 10_000,
   statusPollIntervalMs: 15_000,
 } as const;
 
@@ -62,7 +82,8 @@ function parseIntEnv(
 ): number {
   const raw = readEnv(env, key);
   if (raw === undefined) return fallback;
-  const parsed = Number.parseInt(raw, 10);
+  // `Number` rejects trailing garbage ("3001abc") that parseInt would accept.
+  const parsed = Number(raw);
   if (!Number.isInteger(parsed) || parsed < bounds.min || parsed > bounds.max) {
     throw new ConfigurationError(
       `${key} must be an integer between ${bounds.min} and ${bounds.max}, received "${raw}"`,
@@ -107,7 +128,11 @@ function parseCorsOrigin(raw: string | undefined): true | string[] {
   return origins.length > 0 ? origins : true;
 }
 
-function readPackageVersion(): string {
+function readPackageVersion(env: NodeJS.ProcessEnv): string {
+  // Release images stamp the git tag as APP_VERSION; it wins over the static
+  // package.json version so /api/config reports the deployed build.
+  const stamped = readEnv(env, 'APP_VERSION');
+  if (stamped !== undefined) return stamped;
   try {
     const packageJson = new URL('../package.json', import.meta.url);
     const parsed: unknown = JSON.parse(readFileSync(packageJson, 'utf8'));
@@ -125,24 +150,51 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const endpoint = normalizeEndpoint(
     readEnv(env, 'LOCALSTACK_ENDPOINT') ?? DEFAULTS.localstackEndpoint,
   );
+  const publicEndpointRaw = readEnv(env, 'LOCALSTACK_PUBLIC_ENDPOINT');
   const environment = readEnv(env, 'NODE_ENV') ?? DEFAULTS.environment;
   const isProduction = environment === 'production';
 
   return {
     applicationName: DEFAULTS.applicationName,
-    version: readPackageVersion(),
+    version: readPackageVersion(env),
     environment,
     isProduction,
     host: readEnv(env, 'HOST') ?? DEFAULTS.host,
     port: parseIntEnv(env, 'PORT', DEFAULTS.port, { min: 1, max: 65_535 }),
     logLevel: readEnv(env, 'LOG_LEVEL') ?? DEFAULTS.logLevel,
-    logPretty: parseBooleanEnv(env, 'LOG_PRETTY', !isProduction),
+    // A production image has no pino-pretty (devDependency); forcing pretty
+    // logging off there keeps LOG_PRETTY=true from breaking startup.
+    logPretty: !isProduction && parseBooleanEnv(env, 'LOG_PRETTY', true),
     corsOrigin: parseCorsOrigin(readEnv(env, 'CORS_ORIGIN')),
     localstackEndpoint: endpoint,
+    localstackPublicEndpoint:
+      publicEndpointRaw === undefined ? endpoint : normalizeEndpoint(publicEndpointRaw),
     localstackHealthUrl: new URL(LOCALSTACK_HEALTH_PATH, `${endpoint}/`).toString(),
     region: readEnv(env, 'AWS_REGION') ?? DEFAULTS.region,
     localstackTimeoutMs: parseIntEnv(env, 'LOCALSTACK_TIMEOUT_MS', DEFAULTS.localstackTimeoutMs, {
       min: 100,
+      max: 120_000,
+    }),
+    localstackConnectionTimeoutMs: parseIntEnv(
+      env,
+      'LOCALSTACK_CONNECTION_TIMEOUT_MS',
+      DEFAULTS.localstackConnectionTimeoutMs,
+      { min: 100, max: 120_000 },
+    ),
+    localstackRequestTimeoutMs: parseIntEnv(
+      env,
+      'LOCALSTACK_REQUEST_TIMEOUT_MS',
+      DEFAULTS.localstackRequestTimeoutMs,
+      { min: 100, max: 600_000 },
+    ),
+    localstackHealthCacheMs: parseIntEnv(
+      env,
+      'LOCALSTACK_HEALTH_CACHE_MS',
+      DEFAULTS.localstackHealthCacheMs,
+      { min: 0, max: 60_000 },
+    ),
+    shutdownTimeoutMs: parseIntEnv(env, 'SHUTDOWN_TIMEOUT_MS', DEFAULTS.shutdownTimeoutMs, {
+      min: 1_000,
       max: 120_000,
     }),
     statusPollIntervalMs: parseIntEnv(

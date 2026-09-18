@@ -45,6 +45,7 @@ export const MACHINE_LEARNING_SERVICES = [
         resultPath: 'modelSummaries',
         idField: 'modelId',
         nameField: 'modelName',
+        pagination: { requestField: 'nextToken', responseField: 'nextToken' },
       },
       describe: { operation: 'GetFoundationModel', idParam: 'modelIdentifier' },
     },

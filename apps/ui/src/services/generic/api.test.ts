@@ -1,8 +1,88 @@
-import type { ServiceBrowserListOperation } from '@localdeck/shared';
-import { describe, expect, it } from 'vitest';
-import { browserOperationInput, mapListResult, nextTokenFromResult } from './api';
+import type {
+  ServiceBrowserListOperation,
+  ServiceBrowserOperation,
+  ServiceBrowserTagsOperation,
+  ServiceDescriptor,
+} from '@localdeck/shared';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  browserOperationInput,
+  describeGenericResource,
+  listGenericResources,
+  loadGenericResourceTags,
+  mapListResult,
+  nextPageFromResult,
+  nextTokenFromResult,
+} from './api';
 
 const LIST: ServiceBrowserListOperation = { operation: 'ListTopics' };
+
+/** Minimal descriptor for one list binding; ids stay unique between tests. */
+function descriptorWithList(
+  id: string,
+  list: ServiceBrowserListOperation,
+  describeOperation?: ServiceBrowserOperation,
+  tagsOperation?: ServiceBrowserTagsOperation,
+): ServiceDescriptor {
+  return {
+    id,
+    displayName: id,
+    category: 'Database',
+    sdkPackage: '@aws-sdk/client-test',
+    iconKey: id,
+    operations: [
+      list.operation,
+      ...(describeOperation === undefined ? [] : [describeOperation.operation]),
+      ...(tagsOperation === undefined ? [] : [tagsOperation.operation]),
+    ],
+    parityLevel: 'browser',
+    summary: 'test',
+    browser: {
+      list,
+      ...(describeOperation === undefined ? {} : { describe: describeOperation }),
+      ...(tagsOperation === undefined ? {} : { tags: { ...tagsOperation } }),
+    },
+  };
+}
+
+interface DispatchedCall {
+  service: string;
+  operation: string;
+  input: Record<string, unknown>;
+}
+
+/** Answers the dispatcher with one result per service/operation. */
+function stubOperations(
+  results: Readonly<Record<string, unknown | ((input: Record<string, unknown>) => unknown)>>,
+): DispatchedCall[] {
+  const calls: DispatchedCall[] = [];
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const match = /\/api\/services\/([^/?]+)\/([^/?]+)/.exec(url);
+    if (match === null) return new Response('{}', { status: 404 });
+    const service = match[1] ?? '';
+    const operation = match[2] ?? '';
+    const body =
+      init?.body === undefined
+        ? {}
+        : (JSON.parse(String(init.body)) as { input?: Record<string, unknown> });
+    const operationInput = body.input ?? {};
+    calls.push({ service, operation, input: operationInput });
+    const configured = results[`${service}/${operation}`];
+    const result =
+      typeof configured === 'function' ? configured(operationInput) : (configured ?? {});
+    return new Response(JSON.stringify({ service, operation, result }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  return calls;
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe('generic browser response mapping', () => {
   it('maps record collections with the registry id/name hints', () => {
@@ -86,5 +166,220 @@ describe('generic browser response mapping', () => {
       AttributeNames: ['All'],
       QueueUrl: 'http://localhost:4566/000000000000/orders',
     });
+  });
+});
+
+describe('generic pagination contracts', () => {
+  it('infers the request field from every AWS token family', () => {
+    expect(nextPageFromResult({ NextToken: 'n1' }, LIST)).toEqual({
+      token: 'n1',
+      requestField: 'NextToken',
+    });
+    expect(nextPageFromResult({ nextToken: 'n2' }, LIST)).toEqual({
+      token: 'n2',
+      requestField: 'nextToken',
+    });
+    expect(nextPageFromResult({ ContinuationToken: 'c1' }, LIST)).toEqual({
+      token: 'c1',
+      requestField: 'ContinuationToken',
+    });
+    expect(nextPageFromResult({ continuationToken: 'c2' }, LIST)).toEqual({
+      token: 'c2',
+      requestField: 'continuationToken',
+    });
+    expect(nextPageFromResult({ NextMarker: 'm-echo' }, LIST)).toEqual({
+      token: 'm-echo',
+      requestField: 'Marker',
+    });
+    expect(nextPageFromResult({ Marker: 'm1' }, LIST)).toEqual({
+      token: 'm1',
+      requestField: 'Marker',
+    });
+    expect(nextPageFromResult({ LastEvaluatedTableName: 'users' }, LIST)).toEqual({
+      token: 'users',
+      requestField: 'ExclusiveStartTableName',
+    });
+    expect(nextPageFromResult({ nextPageToken: 'p1' }, LIST)).toEqual({
+      token: 'p1',
+      requestField: 'nextPageToken',
+    });
+    expect(nextPageFromResult({ IsTruncated: true }, LIST)).toBeUndefined();
+  });
+
+  it('reads nested tokens such as CloudFront and prefers NextMarker over Marker', () => {
+    expect(
+      nextPageFromResult(
+        { DistributionList: { Items: [], Marker: 'current', NextMarker: 'next' } },
+        LIST,
+      ),
+    ).toEqual({ token: 'next', requestField: 'Marker' });
+    expect(nextTokenFromResult({ DistributionList: { NextMarker: 'next' } }, LIST)).toBe('next');
+  });
+
+  it('prefers an explicit registry pagination contract, including dotted paths', () => {
+    const explicit: ServiceBrowserListOperation = {
+      ...LIST,
+      pagination: { requestField: 'NextPageToken', responseField: 'Result.NextPageToken' },
+    };
+    expect(nextPageFromResult({ Result: { NextPageToken: 't1' } }, explicit)).toEqual({
+      token: 't1',
+      requestField: 'NextPageToken',
+    });
+  });
+
+  it('sends an inferred Marker token back as Marker on the next page', async () => {
+    const descriptor = descriptorWithList('rds-pagination', {
+      operation: 'DescribeDBInstances',
+      resultPath: 'DBInstances',
+      idField: 'DBInstanceIdentifier',
+    });
+    const calls = stubOperations({
+      'rds-pagination/DescribeDBInstances': (input: Record<string, unknown>) =>
+        input['Marker'] === undefined
+          ? { DBInstances: [{ DBInstanceIdentifier: 'db-1' }], Marker: 'page-2' }
+          : { DBInstances: [{ DBInstanceIdentifier: 'db-2' }] },
+    });
+
+    const first = await listGenericResources(descriptor);
+    expect(first.nextToken).toBe('page-2');
+    const second = await listGenericResources(descriptor, { nextToken: 'page-2' });
+
+    expect(calls[1]?.input).toEqual({ Marker: 'page-2' });
+    expect(second.items.map((row) => row.id)).toEqual(['db-2']);
+    expect(second.nextToken).toBeUndefined();
+  });
+
+  it('maps LastEvaluatedTableName onto ExclusiveStartTableName', async () => {
+    const descriptor = descriptorWithList('dynamodb-pagination', {
+      operation: 'ListTables',
+      resultPath: 'TableNames',
+    });
+    const calls = stubOperations({
+      'dynamodb-pagination/ListTables': (input: Record<string, unknown>) =>
+        input['ExclusiveStartTableName'] === undefined
+          ? { TableNames: ['users'], LastEvaluatedTableName: 'users' }
+          : { TableNames: ['orders'] },
+    });
+
+    const first = await listGenericResources(descriptor);
+    expect(first.nextToken).toBe('users');
+    await listGenericResources(descriptor, { nextToken: 'users' });
+    expect(calls[1]?.input).toEqual({ ExclusiveStartTableName: 'users' });
+  });
+
+  it('reads a nested CloudFront token and sends it as Marker', async () => {
+    const descriptor = descriptorWithList('cloudfront-pagination', {
+      operation: 'ListDistributions',
+      resultPath: 'DistributionList.Items',
+      idField: 'Id',
+    });
+    const calls = stubOperations({
+      'cloudfront-pagination/ListDistributions': (input: Record<string, unknown>) =>
+        input['Marker'] === undefined
+          ? { DistributionList: { Items: [{ Id: 'E1' }], NextMarker: 'dist-2' } }
+          : { DistributionList: { Items: [{ Id: 'E2' }] } },
+    });
+
+    const first = await listGenericResources(descriptor);
+    expect(first.nextToken).toBe('dist-2');
+    await listGenericResources(descriptor, { nextToken: 'dist-2' });
+    expect(calls[1]?.input).toEqual({ Marker: 'dist-2' });
+  });
+
+  it('uses an explicit requestField for SWF nextPageToken bindings', async () => {
+    const descriptor = descriptorWithList('swf-pagination', {
+      operation: 'ListDomains',
+      resultPath: 'domainInfos',
+      pagination: { requestField: 'nextPageToken', responseField: 'nextPageToken' },
+    });
+    const calls = stubOperations({
+      'swf-pagination/ListDomains': (input: Record<string, unknown>) =>
+        input['nextPageToken'] === undefined
+          ? { domainInfos: [], nextPageToken: 'swf-2' }
+          : { domainInfos: [] },
+    });
+
+    const first = await listGenericResources(descriptor);
+    expect(first.nextToken).toBe('swf-2');
+    await listGenericResources(descriptor, { nextToken: 'swf-2' });
+    expect(calls[1]?.input).toEqual({ nextPageToken: 'swf-2' });
+  });
+});
+
+describe('generic batch describes', () => {
+  it('unwraps the first item of a batch describe (CodeBuild projects)', async () => {
+    const descriptor = descriptorWithList(
+      'codebuild-describe',
+      { operation: 'ListProjects', resultPath: 'projects' },
+      {
+        operation: 'BatchGetProjects',
+        idParam: 'names',
+        idParamIsArray: true,
+        resultItemField: 'projects',
+      },
+    );
+    stubOperations({
+      'codebuild-describe/BatchGetProjects': {
+        projects: [{ name: 'api', description: 'build me' }],
+        projectsNotFound: [],
+      },
+    });
+
+    const described = await describeGenericResource(descriptor, 'api');
+    expect(described).toEqual({ name: 'api', description: 'build me' });
+  });
+
+  it('falls back to the whole response when the batch item is missing', async () => {
+    const descriptor = descriptorWithList(
+      'codebuild-missing',
+      { operation: 'ListProjects', resultPath: 'projects' },
+      {
+        operation: 'BatchGetProjects',
+        idParam: 'names',
+        idParamIsArray: true,
+        resultItemField: 'projects',
+      },
+    );
+    stubOperations({
+      'codebuild-missing/BatchGetProjects': { projects: [], projectsNotFound: ['missing'] },
+    });
+
+    await expect(describeGenericResource(descriptor, 'missing')).resolves.toEqual({
+      projects: [],
+      projectsNotFound: ['missing'],
+    });
+  });
+});
+
+describe('generic tags', () => {
+  it('distinguishes an unavailable tags read from an empty tag set', async () => {
+    const descriptor = descriptorWithList(
+      'sns-tags-missing',
+      { operation: 'ListTopics', resultPath: 'Topics' },
+      undefined,
+      { operation: 'ListTagsForResource', idParam: 'ResourceArn' },
+    );
+    stubOperations({ 'sns-tags-missing/ListTagsForResource': {} });
+    await expect(loadGenericResourceTags(descriptor, {}, 'arn')).resolves.toBeUndefined();
+  });
+
+  it('returns an empty array when the resource really has no tags', async () => {
+    const descriptor = descriptorWithList(
+      'sns-tags-empty',
+      { operation: 'ListTopics', resultPath: 'Topics' },
+      undefined,
+      { operation: 'ListTagsForResource', idParam: 'ResourceArn', resultPath: 'Tags' },
+    );
+    stubOperations({ 'sns-tags-empty/ListTagsForResource': { Tags: [] } });
+    await expect(loadGenericResourceTags(descriptor, {}, 'arn')).resolves.toEqual([]);
+  });
+
+  it('marks embedded tags unavailable when the describe response has none', async () => {
+    const descriptor = descriptorWithList('sns-embedded', {
+      operation: 'ListTopics',
+      resultPath: 'Topics',
+    });
+    await expect(loadGenericResourceTags(descriptor, {}, 'arn')).resolves.toBeUndefined();
+    await expect(loadGenericResourceTags(descriptor, { Tags: [] }, 'arn')).resolves.toEqual([]);
   });
 });

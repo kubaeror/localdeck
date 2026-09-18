@@ -3,6 +3,9 @@
 # ONLY the LocalDeck api and ui run here. LocalStack is managed externally by
 # the user and is deliberately NOT part of this project: LocalDeck never starts,
 # stops, reconfigures or wipes it.
+#
+# Requires Docker Compose >= 2.24 (docker-compose.loopback.yml uses the `!reset`
+# tag, introduced in that release). `docker compose version` reports yours.
 name: localdeck
 
 services:
@@ -10,8 +13,15 @@ services:
     build:
       context: .
       dockerfile: apps/api/Dockerfile
+      args:
+        # Stamped into the OCI labels; release builds pass the git tag.
+        APP_VERSION: ${APP_VERSION:-dev}
     image: localdeck/api:local
     restart: unless-stopped
+    init: true
+    # Give the api time to finish in-flight requests during its graceful
+    # shutdown; the image default (10s) can cut long operations short.
+    stop_grace_period: 30s
     environment:
       NODE_ENV: production
       HOST: 0.0.0.0
@@ -19,16 +29,33 @@ services:
       # LocalStack runs on the Docker host, so the default reaches it through
       # the host gateway. Override for a remote or loopback-bound instance.
       LOCALSTACK_ENDPOINT: ${LOCALSTACK_ENDPOINT:-http://host.docker.internal:4566}
+      # Endpoint written into generated kubeconfigs, which are consumed on the
+      # host (not in this container). Defaults to LOCALSTACK_ENDPOINT.
+      LOCALSTACK_PUBLIC_ENDPOINT: ${LOCALSTACK_PUBLIC_ENDPOINT:-}
       AWS_REGION: ${AWS_REGION:-us-east-1}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-test}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-test}
+      # Temporary credentials for LocalStack deployments that validate the
+      # session token; empty means "no token", like the api's own default.
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
       CORS_ORIGIN: '${CORS_ORIGIN:-*}'
       LOG_LEVEL: ${LOG_LEVEL:-info}
       LOG_PRETTY: 'false'
+      # Release builds stamp the git tag; /api/config reports it.
+      APP_VERSION: ${APP_VERSION:-dev}
+      # Outbound LocalStack timeouts and health-cache tuning (ms).
+      LOCALSTACK_CONNECTION_TIMEOUT_MS: ${LOCALSTACK_CONNECTION_TIMEOUT_MS:-3000}
+      LOCALSTACK_REQUEST_TIMEOUT_MS: ${LOCALSTACK_REQUEST_TIMEOUT_MS:-30000}
+      LOCALSTACK_HEALTH_CACHE_MS: ${LOCALSTACK_HEALTH_CACHE_MS:-2000}
+      # Graceful-shutdown deadline (ms) before the process exits forcefully.
+      SHUTDOWN_TIMEOUT_MS: ${SHUTDOWN_TIMEOUT_MS:-10000}
     extra_hosts:
       - host.docker.internal:host-gateway
     ports:
-      - '${API_PORT:-3001}:3001'
+      # Loopback only: the bundled ui reaches the api over the compose network
+      # (same-origin through nginx), so the api does not need to be exposed to
+      # the LAN. Set API_BIND_ADDR=0.0.0.0 to publish it on all interfaces.
+      - '${API_BIND_ADDR:-127.0.0.1}:${API_PORT:-3001}:3001'
     healthcheck:
       # Liveness only: a stopped LocalStack must not make the api unhealthy.
       test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1:3001/api/health/live']
@@ -36,6 +63,16 @@ services:
       timeout: 5s
       retries: 12
       start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1g
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
     networks:
       - localdeck
 
@@ -43,8 +80,17 @@ services:
     build:
       context: .
       dockerfile: apps/ui/Dockerfile
+      args:
+        APP_VERSION: ${APP_VERSION:-dev}
+        # VITE_* values are baked into the bundle at build time. Leave empty
+        # (the default) for same-origin `/api` through nginx; set it only when
+        # the ui calls an api on another origin. Runtime routing between the ui
+        # and api containers is API_UPSTREAM below, not VITE_API_BASE_URL.
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-}
     image: localdeck/ui:local
     restart: unless-stopped
+    init: true
+    stop_grace_period: 15s
     environment:
       # nginx proxies /api to the api service, so the browser stays same-origin.
       API_UPSTREAM: ${API_UPSTREAM:-http://api:3001}
@@ -61,6 +107,16 @@ services:
       timeout: 5s
       retries: 12
       start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
     networks:
       - localdeck
 

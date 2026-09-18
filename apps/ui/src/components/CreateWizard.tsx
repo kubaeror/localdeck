@@ -76,7 +76,7 @@ export function CreateWizard({
   activeStepIndex,
 }: CreateWizardProps): ReactElement {
   const [internalStepIndex, setInternalStepIndex] = useState(0);
-  const [stepError, setStepError] = useState<string | null>(null);
+  const [stepError, setStepError] = useState<{ stepId: string; message: string } | null>(null);
   const selectedStepIndex = activeStepIndex ?? internalStepIndex;
 
   const wizardSteps = useMemo<readonly WizardProps.Step[]>(
@@ -86,12 +86,40 @@ export function CreateWizard({
         ...(step.description === undefined ? {} : { description: step.description }),
         content: step.content,
         ...(step.isOptional === true ? { isOptional: true } : {}),
-        ...(selectedStepIndex >= 0 && steps[selectedStepIndex]?.id === step.id && stepError !== null
-          ? { errorText: stepError }
-          : {}),
+        ...(stepError?.stepId === step.id ? { errorText: stepError.message } : {}),
       })),
-    [selectedStepIndex, stepError, steps],
+    [stepError, steps],
   );
+
+  /**
+   * Validates every step up to `upToIndex` (inclusive) and returns the first
+   * failure. Validating the whole range, not just the step the user is on,
+   * closes the "Skip to Review" bypass where a required step was never shown
+   * its validator.
+   */
+  const firstInvalidStep = (upToIndex: number): { index: number; message: string } | null => {
+    const lastIndex = Math.min(upToIndex, steps.length - 1);
+    for (let index = 0; index <= lastIndex; index += 1) {
+      const step = steps[index];
+      if (step === undefined) break;
+      const message = step.validate?.() ?? null;
+      if (message !== null) return { index, message };
+    }
+    return null;
+  };
+
+  const goToStep = (index: number): void => {
+    if (activeStepIndex === undefined) setInternalStepIndex(index);
+    onStepChange?.(index);
+  };
+
+  /** Shows the message on its own step and moves the user there. */
+  const reportStepError = (failure: { index: number; message: string }): void => {
+    const step = steps[failure.index];
+    if (step === undefined) return;
+    setStepError({ stepId: step.id, message: failure.message });
+    goToStep(failure.index);
+  };
 
   // The summary is the console's right-hand column: it stays next to the wizard
   // on wide screens and stacks above it on small ones.
@@ -148,31 +176,38 @@ export function CreateWizard({
             allowSkipTo={steps.some((step) => step.isOptional === true)}
             onCancel={onCancel}
             onNavigate={({ detail }) => {
-              // Leaving the current step forward (or skipping over optional
-              // steps): run its validator first. Going back is always allowed.
-              if (detail.reason === 'next' || detail.reason === 'skip') {
-                const message = steps[selectedStepIndex]?.validate?.() ?? null;
-                if (message !== null) {
-                  setStepError(message);
-                  return;
-                }
+              // Going back is always allowed. Every other navigation validates
+              // all steps up to the requested one, so skipping over a required
+              // step can no longer bypass its validator.
+              if (detail.reason === 'previous') {
+                setStepError(null);
+                goToStep(detail.requestedStepIndex);
+                return;
+              }
+
+              const failure = firstInvalidStep(detail.requestedStepIndex);
+              if (failure !== null) {
+                reportStepError(failure);
+                return;
               }
 
               setStepError(null);
-              if (activeStepIndex === undefined) setInternalStepIndex(detail.requestedStepIndex);
-              onStepChange?.(detail.requestedStepIndex);
+              goToStep(detail.requestedStepIndex);
             }}
             onSubmit={() => {
-              const message = steps[selectedStepIndex]?.validate?.() ?? null;
-              if (message !== null) {
-                setStepError(message);
+              // Submitting validates the whole flow, not only the visible step.
+              const failure = firstInvalidStep(steps.length - 1);
+              if (failure !== null) {
+                reportStepError(failure);
                 return;
               }
               setStepError(null);
-              void Promise.resolve(onSubmit()).catch((caught: unknown) => {
-                // The parent owns error reporting through the `error` prop.
-                console.error('CreateWizard onSubmit failed', caught);
-              });
+              void Promise.resolve()
+                .then(() => onSubmit())
+                .catch((caught: unknown) => {
+                  // The parent owns error reporting through the `error` prop.
+                  console.error('CreateWizard onSubmit failed', caught);
+                });
             }}
           />
           {summaryColumn}

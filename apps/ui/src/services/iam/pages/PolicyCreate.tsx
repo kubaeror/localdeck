@@ -16,10 +16,16 @@ import { useFlashbar } from '../../../hooks/useFlashbar';
 import { serviceConsolePath } from '../../paths';
 import type { ServicePageProps } from '../../types';
 import { createPolicy } from '../api';
+import { FullAdminConfirmModal } from '../components/FullAdminConfirmModal';
 import { PolicyEditor } from '../components/PolicyEditor';
 import { toFriendlyIamError } from '../errors';
 import { IAM_POLICY_NAME_RULES, validatePolicyName } from '../naming';
-import { buildIdentityPolicyText, validateIdentityPolicy } from '../policy';
+import {
+  buildIdentityPolicyText,
+  isFullAdminPolicy,
+  policyWarnings,
+  validateIdentityPolicy,
+} from '../policy';
 
 /**
  * The console's create-policy wizard: the step-based editor (or the raw JSON
@@ -39,6 +45,7 @@ export function PolicyCreatePage({ descriptor }: ServicePageProps): ReactElement
   const [nameError, setNameError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
+  const [confirmFullAdmin, setConfirmFullAdmin] = useState(false);
 
   const leave = (): void => {
     navigate(`${serviceConsolePath(descriptor.id)}/policies`);
@@ -53,7 +60,7 @@ export function PolicyCreatePage({ descriptor }: ServicePageProps): ReactElement
     return null;
   };
 
-  const submit = async (): Promise<void> => {
+  const performCreate = async (): Promise<void> => {
     setSubmitting(true);
     setError(null);
     setNameError(null);
@@ -65,6 +72,7 @@ export function PolicyCreatePage({ descriptor }: ServicePageProps): ReactElement
       });
       flashbar.notify({ type: 'success', header: 'Policy created', content: policyName });
       setSubmitting(false);
+      setConfirmFullAdmin(false);
       navigate(`${serviceConsolePath(descriptor.id)}/policies/${encodeURIComponent(policy.arn)}`);
     } catch (caught) {
       const friendly = toFriendlyIamError(caught, 'policyName');
@@ -79,6 +87,14 @@ export function PolicyCreatePage({ descriptor }: ServicePageProps): ReactElement
       }
       setSubmitting(false);
     }
+  };
+
+  const submit = (): void => {
+    if (isFullAdminPolicy(documentText)) {
+      setConfirmFullAdmin(true);
+      return;
+    }
+    void performCreate();
   };
 
   const permissionsStep = (
@@ -151,47 +167,62 @@ export function PolicyCreatePage({ descriptor }: ServicePageProps): ReactElement
   );
 
   return (
-    <CreateWizard
-      title="Create policy"
-      description={descriptor.summary}
-      breadcrumbs={[
-        { text: descriptor.displayName, href: serviceConsolePath(descriptor.id) },
-        { text: 'Policies', href: `${serviceConsolePath(descriptor.id)}/policies` },
-        { text: 'Create policy' },
-      ]}
-      activeStepIndex={activeStepIndex}
-      steps={[
-        {
-          id: 'permissions',
-          title: 'Specify permissions',
-          description: 'Build or paste the policy document.',
-          validate: documentProblem,
-          content: permissionsStep,
-        },
-        {
-          id: 'review',
-          title: 'Review and create',
-          description: 'Name the policy and confirm the document.',
-          validate: () => validatePolicyName(policyName),
-          content: reviewStep,
-        },
-      ]}
-      summary={[
-        { label: 'Service', value: descriptor.displayName },
-        { label: 'Policy name', value: policyName.length === 0 ? '—' : policyName },
-        {
-          label: 'Document',
-          value: validateIdentityPolicy(documentText).valid ? 'Valid' : 'Needs attention',
-        },
-      ]}
-      summaryTitle="Policy summary"
-      submitLabel="Create policy"
-      submitting={submitting}
-      error={error}
-      onSubmit={submit}
-      onCancel={leave}
-      onStepChange={setActiveStepIndex}
-    />
+    <>
+      <CreateWizard
+        title="Create policy"
+        description={descriptor.summary}
+        breadcrumbs={[
+          { text: descriptor.displayName, href: serviceConsolePath(descriptor.id) },
+          { text: 'Policies', href: `${serviceConsolePath(descriptor.id)}/policies` },
+          { text: 'Create policy' },
+        ]}
+        activeStepIndex={activeStepIndex}
+        steps={[
+          {
+            id: 'permissions',
+            title: 'Specify permissions',
+            description: 'Build or paste the policy document.',
+            validate: documentProblem,
+            content: permissionsStep,
+          },
+          {
+            id: 'review',
+            title: 'Review and create',
+            description: 'Name the policy and confirm the document.',
+            validate: () => validatePolicyName(policyName),
+            content: reviewStep,
+          },
+        ]}
+        summary={[
+          { label: 'Service', value: descriptor.displayName },
+          { label: 'Policy name', value: policyName.length === 0 ? '—' : policyName },
+          {
+            label: 'Document',
+            value: validateIdentityPolicy(documentText).valid ? 'Valid' : 'Needs attention',
+          },
+        ]}
+        summaryTitle="Policy summary"
+        submitLabel="Create policy"
+        submitting={submitting}
+        error={error}
+        onSubmit={submit}
+        onCancel={leave}
+        onStepChange={setActiveStepIndex}
+      />
+
+      <FullAdminConfirmModal
+        visible={confirmFullAdmin}
+        subject="policy"
+        warnings={policyWarnings(documentText)}
+        busy={submitting}
+        onDismiss={() => {
+          setConfirmFullAdmin(false);
+        }}
+        onConfirm={() => {
+          void performCreate();
+        }}
+      />
+    </>
   );
 }
 

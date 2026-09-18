@@ -76,6 +76,18 @@ describe('apiClient', () => {
     expect(error.apiError.statusCode).toBe(0);
   });
 
+  it('reports a malformed success body as UNEXPECTED_RESPONSE, not NETWORK_ERROR', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>().mockResolvedValue(new Response('<html>proxy</html>', { status: 200 })),
+    );
+
+    const error = (await getHealth().catch((caught: unknown) => caught)) as ApiClientError;
+    expect(error).toBeInstanceOf(ApiClientError);
+    expect(error.apiError.code).toBe('UNEXPECTED_RESPONSE');
+    expect(error.apiError.statusCode).toBe(200);
+  });
+
   it('passes an ApiError through toApiError unchanged', () => {
     const apiError = { code: 'X', message: 'm', statusCode: 418 };
     expect(toApiError(new ApiClientError(apiError))).toEqual(apiError);

@@ -12,17 +12,22 @@ import type { MultiselectProps } from '@cloudscape-design/components/multiselect
 import RadioGroup from '@cloudscape-design/components/radio-group';
 import Select from '@cloudscape-design/components/select';
 import SpaceBetween from '@cloudscape-design/components/space-between';
-import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { CreateWizard } from '../../../components/CreateWizard';
-import { TagsEditor } from '../../../components/TagsEditor';
+import { TagsEditor, validateTags } from '../../../components/TagsEditor';
 import { useFlashbar } from '../../../hooks/useFlashbar';
 import { listSecurityGroups, listSubnets, listVpcs } from '../../ec2/api';
 import { serviceConsolePath } from '../../paths';
 import type { ServicePageProps } from '../../types';
-import { createCluster, listClusterVersions, type EksClusterVersion } from '../api';
+import { createCluster, listClusterVersions, normalizeTags, type EksClusterVersion } from '../api';
 import { toFriendlyEksError } from '../errors';
-import { CLUSTER_NAME_RULES, validateClusterName, validateKubernetesVersion } from '../naming';
+import {
+  CLUSTER_NAME_RULES,
+  validateClusterName,
+  validateKubernetesVersion,
+  validateRoleArn,
+} from '../naming';
 import { RoleField } from '../components/RoleField';
 
 type EndpointAccess = 'public-and-private' | 'public' | 'private';
@@ -112,11 +117,17 @@ export function ClusterCreatePage({ descriptor }: ServicePageProps): ReactElemen
   const [activeStepIndex, setActiveStepIndex] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
+  const versionsInFlight = useRef<AbortController | null>(null);
+  const networkInFlight = useRef<AbortController | null>(null);
 
   const loadVersions = useCallback(async (): Promise<void> => {
+    versionsInFlight.current?.abort();
+    const controller = new AbortController();
+    versionsInFlight.current = controller;
     setVersionsLoading(true);
     try {
-      const result = await listClusterVersions();
+      const result = await listClusterVersions(controller.signal);
+      if (controller.signal.aborted) return;
       setVersions(result);
       const fallback = result.find((entry) => entry.defaultVersion) ?? result[0];
       setVersion((current) =>
@@ -130,21 +141,29 @@ export function ClusterCreatePage({ descriptor }: ServicePageProps): ReactElemen
           : null,
       );
     } catch (caught) {
+      if (controller.signal.aborted) return;
       setVersionsError(toFriendlyEksError(caught).message);
     } finally {
-      setVersionsLoading(false);
+      if (!controller.signal.aborted) setVersionsLoading(false);
     }
   }, []);
 
   const loadNetwork = useCallback(async (selectedVpcId: string | null): Promise<void> => {
+    networkInFlight.current?.abort();
+    const controller = new AbortController();
+    networkInFlight.current = controller;
+    const signal = controller.signal;
     setNetworkLoading(true);
     try {
       const [subnets, groups] = await Promise.all([
-        listSubnets(selectedVpcId === null ? {} : { vpcId: selectedVpcId }),
+        listSubnets(selectedVpcId === null ? { signal } : { vpcId: selectedVpcId, signal }),
         listSecurityGroups(
-          selectedVpcId === null ? {} : { filters: [{ Name: 'vpc-id', Values: [selectedVpcId] }] },
+          selectedVpcId === null
+            ? { signal }
+            : { filters: [{ Name: 'vpc-id', Values: [selectedVpcId] }], signal },
         ),
       ]);
+      if (signal.aborted) return;
       const options = subnets.map((subnet) => ({
         label: `${subnet.subnetId}${subnet.availabilityZone === undefined ? '' : ` · ${subnet.availabilityZone}`}`,
         value: subnet.subnetId,
@@ -170,41 +189,52 @@ export function ClusterCreatePage({ descriptor }: ServicePageProps): ReactElemen
       });
       setNetworkError(null);
     } catch (caught) {
+      if (signal.aborted) return;
       setNetworkError(toFriendlyEksError(caught).message);
     } finally {
-      setNetworkLoading(false);
+      if (!signal.aborted) setNetworkLoading(false);
     }
   }, []);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- wizard catalogue fetch
     void loadVersions();
+    return () => {
+      versionsInFlight.current?.abort();
+    };
   }, [loadVersions]);
 
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
     const load = async (): Promise<void> => {
       try {
-        const result = await listVpcs();
-        if (cancelled) return;
+        const result = await listVpcs(controller.signal);
+        if (cancelled || controller.signal.aborted) return;
         setVpcs(result);
         setVpcId(
           (current) =>
             current ?? result.find((vpc) => vpc.isDefault)?.vpcId ?? result[0]?.vpcId ?? null,
         );
       } catch (caught) {
-        if (!cancelled) setNetworkError(toFriendlyEksError(caught).message);
+        if (!cancelled && !controller.signal.aborted) {
+          setNetworkError(toFriendlyEksError(caught).message);
+        }
       }
     };
     void load();
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, []);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- wizard network fetch
     void loadNetwork(vpcId);
+    return () => {
+      networkInFlight.current?.abort();
+    };
   }, [loadNetwork, vpcId]);
 
   const versionOptions = useMemo(
@@ -237,12 +267,16 @@ export function ClusterCreatePage({ descriptor }: ServicePageProps): ReactElemen
 
   const nameProblem = name.length > 0 ? validateClusterName(name) : null;
   const versionProblem = version.length > 0 ? validateKubernetesVersion(version) : null;
+  const roleProblem = roleArn.length > 0 ? validateRoleArn(roleArn) : null;
   const subnetProblem =
     subnetIds.length < 2 ? 'Select at least two subnets in different Availability Zones.' : null;
 
   const selectedVpc = vpcs.find((vpc) => vpc.vpcId === vpcId);
 
-  const meaningfulTags = tags.filter((tag) => tag.Key.trim().length > 0);
+  const normalizedTags = normalizeTags(tags);
+  const tagProblems = validateTags(tags);
+  const tagsProblem =
+    tagProblems.length === 0 ? null : tagProblems.map((problem) => problem.message).join(' ');
 
   const submit = async (): Promise<void> => {
     setSubmitting(true);
@@ -257,7 +291,7 @@ export function ClusterCreatePage({ descriptor }: ServicePageProps): ReactElemen
         endpointPublicAccess: endpointAccess !== 'private',
         endpointPrivateAccess: endpointAccess !== 'public',
         ...(endpointAccess === 'private' ? {} : { publicAccessCidrs: cidrs }),
-        tags: meaningfulTags,
+        tags: normalizedTags,
       });
 
       flashbar.notify({
@@ -270,10 +304,19 @@ export function ClusterCreatePage({ descriptor }: ServicePageProps): ReactElemen
     } catch (caught) {
       const friendly = toFriendlyEksError(caught);
       setError({ ...friendly.apiError, message: friendly.message });
-      if (friendly.field === 'name') setActiveStepIndex(0);
-      if (friendly.field === 'version' || friendly.field === 'roleArn') setActiveStepIndex(0);
-      if (friendly.field === 'network') setActiveStepIndex(1);
-      if (friendly.field === 'endpointAccess') setActiveStepIndex(2);
+      // Both fields live on the configuration step; the middle steps are only
+      // selected for their own failures.
+      if (
+        friendly.field === 'name' ||
+        friendly.field === 'version' ||
+        friendly.field === 'roleArn'
+      ) {
+        setActiveStepIndex(0);
+      } else if (friendly.field === 'network') {
+        setActiveStepIndex(1);
+      } else if (friendly.field === 'endpointAccess') {
+        setActiveStepIndex(2);
+      }
     } finally {
       setSubmitting(false);
     }
@@ -328,6 +371,7 @@ export function ClusterCreatePage({ descriptor }: ServicePageProps): ReactElemen
             description="The role EKS uses for the control plane. LocalStack stores the ARN and reports it from DescribeCluster; it does not validate the trust policy."
             value={roleArn}
             disabled={submitting}
+            {...(roleProblem === null ? {} : { errorText: roleProblem })}
             onChange={setRoleArn}
           />
 
@@ -509,9 +553,9 @@ export function ClusterCreatePage({ descriptor }: ServicePageProps): ReactElemen
           {
             label: 'Tags',
             value:
-              meaningfulTags.length === 0
+              normalizedTags.length === 0
                 ? 'None'
-                : meaningfulTags.map((tag) => `${tag.Key}=${tag.Value}`).join(', '),
+                : normalizedTags.map((tag) => `${tag.Key}=${tag.Value}`).join(', '),
           },
         ]}
       />
@@ -538,8 +582,7 @@ export function ClusterCreatePage({ descriptor }: ServicePageProps): ReactElemen
             if (nameProblemValue !== null) return nameProblemValue;
             const versionProblemValue = validateKubernetesVersion(version);
             if (versionProblemValue !== null) return versionProblemValue;
-            if (roleArn.trim().length === 0) return 'Select or enter the cluster IAM role ARN.';
-            return null;
+            return validateRoleArn(roleArn);
           },
           content: configurationStep,
         },
@@ -567,6 +610,7 @@ export function ClusterCreatePage({ descriptor }: ServicePageProps): ReactElemen
           title: 'Tags',
           description: 'Optional key-value pairs.',
           isOptional: true,
+          validate: () => tagsProblem,
           content: tagsStep,
         },
         {
@@ -583,7 +627,7 @@ export function ClusterCreatePage({ descriptor }: ServicePageProps): ReactElemen
         { label: 'VPC', value: vpcId ?? '—' },
         { label: 'Subnets', value: `${subnetIds.length}` },
         { label: 'Endpoint access', value: endpointAccess.replace(/-/g, ' ') },
-        { label: 'Tags', value: `${meaningfulTags.length}` },
+        { label: 'Tags', value: `${normalizedTags.length}` },
       ]}
       summaryTitle="Cluster summary"
       submitLabel="Create cluster"

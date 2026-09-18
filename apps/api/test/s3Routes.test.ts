@@ -1,10 +1,12 @@
 import { once } from 'node:events';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import type { Readable } from 'node:stream';
 import type { ApiErrorResponse, S3UploadResponse } from '@localdeck/shared';
 import type { FastifyInstance } from 'fastify';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
+import { rejectUploadPart } from '../src/routes/s3.js';
 
 const BUCKET = 'localdeck-proxy-test';
 
@@ -118,9 +120,19 @@ async function startStubLocalStack(): Promise<StubLocalStack> {
         return;
       }
 
-      // GetObject (presigned): GET /<bucket>/<key>
+      // A GetObject (presigned): GET /<bucket>/<key>
       if (request.method === 'GET' && key.startsWith(`${BUCKET}/`)) {
         const objectKey = key.slice(BUCKET.length + 1);
+        if (objectKey === 'huge-error.txt') {
+          // A misbehaving endpoint with an unbounded error body (API-008).
+          const filler = 'x'.repeat(256 * 1024);
+          xml(
+            response,
+            404,
+            `<Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message><Padding>${filler}</Padding></Error>`,
+          );
+          return;
+        }
         const body = stored.get(objectKey);
         if (body === undefined) {
           xml(
@@ -327,5 +339,49 @@ describe('S3 object proxy routes', () => {
     });
     expect(missingKey.statusCode).toBe(400);
     expect(stub.requests).toHaveLength(requestsBefore);
+  });
+
+  it('enforces the 1024 UTF-8 byte key limit, not UTF-16 code units (API-020)', async () => {
+    const requestsBefore = stub.requests.length;
+    const emojiKey = '\u{1f600}'.repeat(400);
+    expect(emojiKey.length).toBe(800);
+
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/services/s3/objects/download?bucket=${BUCKET}&key=${encodeURIComponent(emojiKey)}`,
+    });
+
+    expect(response.statusCode).toBe(400);
+    const body = response.json<ApiErrorResponse>();
+    expect(body.error.code).toBe('VALIDATION_FAILED');
+    expect(body.error.details?.['actualBytes']).toBe(1600);
+    expect(stub.requests).toHaveLength(requestsBefore);
+  });
+
+  it('caps a huge upstream error body before parsing it (API-008)', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/services/s3/objects/download?bucket=${BUCKET}&key=huge-error.txt`,
+    });
+
+    expect(response.statusCode).toBe(404);
+    const body = response.json<ApiErrorResponse>();
+    expect(body.error.code).toBe('NoSuchKey');
+    expect(body.error.message).toBe('The specified key does not exist.');
+  });
+});
+
+describe('rejected multipart parts', () => {
+  it('resumes the rejected part stream before throwing (API-007)', async () => {
+    const resume = vi.fn();
+    const part = {
+      fieldname: 'attachment',
+      file: { resume } as unknown as Readable,
+    };
+
+    expect(() => rejectUploadPart(part, { bucket: BUCKET, key: 'x.txt' })).toThrow(
+      /Expected the file part to be named "file"/,
+    );
+    expect(resume).toHaveBeenCalledTimes(1);
   });
 });

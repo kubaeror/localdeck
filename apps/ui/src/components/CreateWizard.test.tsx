@@ -77,7 +77,6 @@ describe('CreateWizard', () => {
   afterEach(() => {
     cleanup();
   });
-
   it('renders the first step with the right-hand summary column', () => {
     render(<Harness />);
 
@@ -141,18 +140,20 @@ describe('CreateWizard', () => {
   });
 
   it('shows the submit button in a loading state while submitting', () => {
-    render(<Harness submitting />);
+    const { rerender } = render(<Harness />);
 
     fireEvent.change(screen.getByRole('textbox', { name: 'Bucket name' }), {
       target: { value: 'my-bucket' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Next' }));
     fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    expect(screen.getByText('Ready to create')).toBeDefined();
+
+    rerender(<Harness submitting />);
 
     // The wizard's primary button is blocked while the request runs.
-    const submit = document.querySelector<HTMLElement>('[class*="awsui_primary-button"]');
-    expect(submit).not.toBeNull();
-    expect(submit?.getAttribute('aria-disabled')).toBe('true');
+    const submit = screen.getByRole('button', { name: 'Create' });
+    expect(submit.getAttribute('aria-disabled')).toBe('true');
   });
 
   it('cancels the flow', () => {
@@ -163,4 +164,116 @@ describe('CreateWizard', () => {
 
     expect(onCancel).toHaveBeenCalled();
   });
+
+  it('validates optional steps that a Skip to navigation passes over', () => {
+    render(<SkipHarness />);
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Bucket name' }), {
+      target: { value: 'my-bucket' },
+    });
+    // "Skip to Review" jumps over the optional step; its validator must still
+    // run (previously only the current step was validated).
+    fireEvent.click(screen.getByRole('button', { name: 'Skip to Review' }));
+
+    expect(screen.getByText('Choose a size.')).toBeDefined();
+    expect(screen.queryByText('Ready to create')).toBeNull();
+  });
+
+  it('validates every step at submit, even when the controlled step skipped ahead', () => {
+    const onSubmit = vi.fn();
+    render(<ControlledHarness onSubmit={onSubmit} />);
+
+    expect(screen.getByText('Step 2 of 2')).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+
+    expect(screen.getByText('Enter a bucket name.')).toBeDefined();
+    expect(onSubmit).not.toHaveBeenCalled();
+    // The wizard sent the user back to the failing step.
+    expect(screen.getByText('Step 1 of 2')).toBeDefined();
+  });
 });
+
+/** Three steps where the optional one also has a validator. */
+function SkipHarness(): ReactElement {
+  const [name, setName] = useState('');
+  const [size, setSize] = useState('');
+
+  return (
+    <MemoryRouter>
+      <CreateWizard
+        title="Create bucket"
+        breadcrumbs={[{ text: 'S3', href: '/console/s3' }, { text: 'Create' }]}
+        steps={[
+          {
+            id: 'details',
+            title: 'Details',
+            validate: () => (name.trim().length === 0 ? 'Enter a bucket name.' : null),
+            content: (
+              <Input
+                value={name}
+                ariaLabel="Bucket name"
+                onChange={({ detail }) => {
+                  setName(detail.value);
+                }}
+              />
+            ),
+          },
+          {
+            id: 'options',
+            title: 'Options',
+            isOptional: true,
+            validate: () => (size.trim().length === 0 ? 'Choose a size.' : null),
+            content: (
+              <Input
+                value={size}
+                ariaLabel="Max size"
+                onChange={({ detail }) => {
+                  setSize(detail.value);
+                }}
+              />
+            ),
+          },
+          { id: 'review', title: 'Review', content: <div>Ready to create</div> },
+        ]}
+        onSubmit={() => undefined}
+        onCancel={() => undefined}
+      />
+    </MemoryRouter>
+  );
+}
+
+/** A wizard whose active step is controlled by the parent. */
+function ControlledHarness({ onSubmit }: { onSubmit: () => void }): ReactElement {
+  const [name, setName] = useState('');
+  const [stepIndex, setStepIndex] = useState(1);
+
+  return (
+    <MemoryRouter>
+      <CreateWizard
+        title="Create bucket"
+        breadcrumbs={[{ text: 'S3', href: '/console/s3' }, { text: 'Create' }]}
+        activeStepIndex={stepIndex}
+        onStepChange={setStepIndex}
+        steps={[
+          {
+            id: 'details',
+            title: 'Details',
+            validate: () => (name.trim().length === 0 ? 'Enter a bucket name.' : null),
+            content: (
+              <Input
+                value={name}
+                ariaLabel="Bucket name"
+                onChange={({ detail }) => {
+                  setName(detail.value);
+                }}
+              />
+            ),
+          },
+          { id: 'review', title: 'Review', content: <div>Ready to create</div> },
+        ]}
+        onSubmit={onSubmit}
+        onCancel={() => undefined}
+      />
+    </MemoryRouter>
+  );
+}

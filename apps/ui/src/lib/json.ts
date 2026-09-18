@@ -69,15 +69,3 @@ export function stringifyJson(value: unknown, indentation = 2): string {
     return String(value);
   }
 }
-
-export interface JsonLines {
-  ok: boolean;
-  /** One entry per line, so the viewer can add line numbers. */
-  lines: readonly string[];
-}
-
-/** Splits JSON text into lines; invalid JSON is still shown, as typed. */
-export function toJsonLines(text: string): JsonLines {
-  const pretty = formatJson(text);
-  return { ok: pretty !== null, lines: (pretty ?? text).split('\n') };
-}

@@ -7,9 +7,10 @@ import Modal from '@cloudscape-design/components/modal';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import { useState, type ReactElement, type ReactNode } from 'react';
 import { instanceName, type Ec2Instance } from '../api';
+import type { InstanceAction } from '../instanceActions';
 
-/** The four lifecycle actions the instances list and detail page offer. */
-export type InstanceAction = 'start' | 'stop' | 'reboot' | 'terminate';
+// Re-exported for callers that only need the type alongside the modal.
+export type { InstanceAction } from '../instanceActions';
 
 interface ActionWording {
   verb: string;

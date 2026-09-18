@@ -16,8 +16,11 @@
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
+  copyObject,
   createBucket,
+  createFolder,
   deleteBucket,
+  deleteFolder,
   deleteObjects,
   downloadObjectUrl,
   getBucketPolicy,
@@ -57,6 +60,8 @@ const reportKey = 'folder/live-report.txt';
 const reportBody = 'LocalDeck live UI client verification\n';
 const largeKey = 'large/live-multipart.bin';
 const largeBody = new Uint8Array(8 * 1024 * 1024 + 512).fill(0x62);
+const specialKey = 'folder/unicode %?#& é.txt';
+const specialCopyKey = 'folder/unicode-copy.txt';
 
 liveDescribe('S3 module against the live api and LocalStack', () => {
   beforeAll(() => {
@@ -67,7 +72,10 @@ liveDescribe('S3 module against the live api and LocalStack', () => {
     // Best-effort cleanup, even when an assertion failed earlier.
     for (const bucket of [bucketName, settingsBucket]) {
       try {
-        await deleteObjects({ bucket, keys: [reportKey, largeKey] });
+        await deleteObjects({
+          bucket,
+          keys: [reportKey, largeKey, specialKey, specialCopyKey],
+        });
       } catch {
         // Ignore: the bucket may not exist.
       }
@@ -182,8 +190,40 @@ liveDescribe('S3 module against the live api and LocalStack', () => {
     expect((await getPublicAccessBlock(settingsBucket)).BlockPublicPolicy).toBe(true);
     await deleteBucket(settingsBucket);
 
-    // 8. Delete: objects first, then the bucket.
-    const deleted = await deleteObjects({ bucket: bucketName, keys: [reportKey, largeKey] });
+    // 8. Folder markers: nested zero-byte keys are real folders to S3, and
+    //    deleting the folder must remove the markers themselves too.
+    await createFolder({ bucket: bucketName, prefix: '', name: 'live-folder' });
+    await createFolder({ bucket: bucketName, prefix: 'live-folder/', name: 'nested' });
+    const withFolder = await listObjects({ bucket: bucketName });
+    expect(withFolder.folders.map((folder) => folder.key)).toContain('live-folder/');
+
+    const folderDelete = await deleteFolder({ bucket: bucketName, prefix: 'live-folder/' });
+    expect(folderDelete.failures).toEqual([]);
+    expect(folderDelete.deleted).toEqual(
+      expect.arrayContaining(['live-folder/', 'live-folder/nested/']),
+    );
+    const afterFolderDelete = await listObjects({ bucket: bucketName });
+    expect(afterFolderDelete.folders.map((folder) => folder.key)).not.toContain('live-folder/');
+
+    // 9. Special characters in object keys round-trip through CopySource.
+    await uploadObject({
+      bucket: bucketName,
+      key: specialKey,
+      file: new File(['special'], 'special.txt', { type: 'text/plain' }),
+    });
+    await copyObject({
+      sourceBucket: bucketName,
+      sourceKey: specialKey,
+      destinationBucket: bucketName,
+      destinationKey: specialCopyKey,
+    });
+    expect((await headObject({ bucket: bucketName, key: specialCopyKey })).size).toBe(7);
+
+    // 10. Delete: objects first, then the bucket.
+    const deleted = await deleteObjects({
+      bucket: bucketName,
+      keys: [reportKey, largeKey, specialKey, specialCopyKey],
+    });
     expect(deleted.failures).toEqual([]);
     await deleteBucket(bucketName);
     expect((await listBuckets()).items.some((bucket) => bucket.name === bucketName)).toBe(false);

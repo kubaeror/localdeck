@@ -72,10 +72,28 @@ const FRIENDLY: Readonly<Record<string, { field: S3ErrorField | null; message: s
   },
 };
 
+/**
+ * Extracts the "Bucket … was created, but … failed." sentence that
+ * {@link annotateS3Error} prepends, when one is present.
+ */
+export function createdAnnotation(apiError: ApiError): string | undefined {
+  const match = /^(Bucket ".*?" was created, but .*? failed\.)\s+/.exec(apiError.message);
+  return match?.[1];
+}
+
 /** Maps one api error to console wording and, when relevant, a form field. */
 export function friendlyS3Error(apiError: ApiError): FriendlyS3Error {
   const known = FRIENDLY[apiError.code];
-  if (known !== undefined) return { ...known, apiError };
+  const annotation = createdAnnotation(apiError);
+  if (known !== undefined) {
+    return {
+      ...known,
+      // A post-create failure is really two facts: the bucket exists, and the
+      // follow-up step failed. Never let the canned wording hide the first.
+      message: annotation === undefined ? known.message : `${annotation} ${known.message}`,
+      apiError,
+    };
+  }
   return { field: null, message: apiError.message, apiError };
 }
 

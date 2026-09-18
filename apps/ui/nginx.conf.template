@@ -1,9 +1,36 @@
+# WebSocket-capable connection upgrade. `map` is an http-context directive, so
+# this file is included from nginx's http block (conf.d). The map is needed so
+# the `Connection` header is only set to "upgrade" for actual upgrade requests.
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
 server {
     listen 80;
     server_name _;
 
     root /usr/share/nginx/html;
     index index.html;
+
+    # Compression for the bundle and JSON responses. The api also compresses
+    # with @fastify/compress; nginx only compresses what the upstream leaves
+    # uncompressed.
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_min_length 1024;
+    gzip_types
+        application/javascript
+        application/json
+        application/xml
+        application/xml+rss
+        image/svg+xml
+        text/css
+        text/javascript
+        text/plain
+        text/xml;
 
     # Proxy for the LocalDeck api. ${API_UPSTREAM} is substituted by the nginx
     # container entrypoint (envsubst); nginx's own $variables stay untouched.
@@ -14,7 +41,24 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_read_timeout 60s;
+
+        # WebSocket / long-poll upgrades (the api is free to add an async
+        # progress channel; the headers are already in place).
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+
+        # Object uploads stream straight to S3 through the api: never buffer the
+        # request body on disk and lift the default 1 MiB client body cap (S3's
+        # single-object maximum is 5 GiB; nginx accepts up to 5120m).
+        client_max_body_size 5120m;
+        proxy_request_buffering off;
+
+        # Streaming responses (downloads, long-polling) must not be buffered;
+        # EKS cluster creation legitimately runs for minutes, so the read/send
+        # timeouts are far above nginx's 60s default.
+        proxy_buffering off;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
     }
 
     location = /healthz {

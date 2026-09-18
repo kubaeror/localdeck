@@ -237,7 +237,12 @@ export function GroupMembersTab({ groupName }: GroupMembersTabProps): ReactEleme
     {
       id: 'arn',
       header: 'User ARN',
-      cell: (user) => <Box variant="code">{user.arn}</Box>,
+      cell: (user) =>
+        user.arn === undefined ? (
+          <Box color="text-body-secondary">Not reported</Box>
+        ) : (
+          <Box variant="code">{user.arn}</Box>
+        ),
     },
     {
       id: 'actions',

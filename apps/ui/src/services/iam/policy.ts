@@ -20,7 +20,18 @@ export interface IamPolicyValidation {
   structureErrors: readonly string[];
   /** True when the document is valid JSON and passes every structural check. */
   valid: boolean;
+  /** UTF-16 length of the document as submitted. */
+  size: number;
+  /** IAM's size limit for this document kind (managed policy vs trust policy). */
+  sizeLimit: number;
 }
+
+/** AWS managed policy size limit, in characters. */
+export const MANAGED_POLICY_MAX_CHARS = 6144;
+/** IAM trust policy size limit, in characters. */
+export const TRUST_POLICY_MAX_CHARS = 2048;
+
+const FULL_WILDCARD = '*';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -35,6 +46,11 @@ function isStringOrStringArray(value: unknown): boolean {
     );
   }
   return false;
+}
+
+function includesFullWildcard(value: unknown): boolean {
+  if (value === FULL_WILDCARD) return true;
+  return Array.isArray(value) && value.some((entry) => entry === FULL_WILDCARD);
 }
 
 const EFFECTS = new Set(['Allow', 'Deny']);
@@ -112,9 +128,16 @@ function checkStatement(
 }
 
 function validateDocument(text: string, kind: 'identity' | 'trust'): IamPolicyValidation {
+  const sizeLimit = kind === 'identity' ? MANAGED_POLICY_MAX_CHARS : TRUST_POLICY_MAX_CHARS;
   const parsed = parseJson(text);
   if (!parsed.ok) {
-    return { jsonError: parsed.error, structureErrors: [], valid: false };
+    return {
+      jsonError: parsed.error,
+      structureErrors: [],
+      valid: false,
+      size: text.length,
+      sizeLimit,
+    };
   }
 
   if (!isRecord(parsed.value)) {
@@ -122,11 +145,21 @@ function validateDocument(text: string, kind: 'identity' | 'trust'): IamPolicyVa
       jsonError: null,
       structureErrors: ['The policy document must be a JSON object.'],
       valid: false,
+      size: text.length,
+      sizeLimit,
     };
   }
 
   const errors: string[] = [];
   const policy = parsed.value;
+
+  // IAM rejects documents over its size limit with LimitExceeded/ValidationError;
+  // catching it here keeps the failure next to the editor.
+  if (text.length > sizeLimit) {
+    errors.push(
+      `The policy document is ${text.length} characters long; IAM accepts at most ${sizeLimit} for this document.`,
+    );
+  }
 
   const version = policy['Version'];
   if (version === undefined) {
@@ -156,7 +189,13 @@ function validateDocument(text: string, kind: 'identity' | 'trust'): IamPolicyVa
     errors.push(...checkStatement(entry, index, kind).errors);
   });
 
-  return { jsonError: null, structureErrors: errors, valid: errors.length === 0 };
+  return {
+    jsonError: null,
+    structureErrors: errors,
+    valid: errors.length === 0,
+    size: text.length,
+    sizeLimit,
+  };
 }
 
 /** Validates an identity-based policy document (Version + Statement + ...). */
@@ -167,6 +206,37 @@ export function validateIdentityPolicy(text: string): IamPolicyValidation {
 /** Validates a role trust policy document (Version + Statement + Principal). */
 export function validateTrustPolicy(text: string): IamPolicyValidation {
   return validateDocument(text, 'trust');
+}
+
+/**
+ * Console warnings (not errors) for a structurally valid identity policy.
+ * A statement that allows every action on every resource is legal IAM but the
+ * real console flags it as full administrative access; callers show these
+ * warnings and ask for confirmation before saving.
+ */
+export function policyWarnings(text: string): readonly string[] {
+  const parsed = parseJson(text);
+  if (!parsed.ok || !isRecord(parsed.value)) return [];
+  const statement = parsed.value['Statement'];
+  const statements = Array.isArray(statement) ? statement : [statement];
+  const warnings: string[] = [];
+
+  statements.forEach((entry, index) => {
+    if (!isRecord(entry)) return;
+    if (entry['Effect'] !== 'Allow') return;
+    if (!includesFullWildcard(entry['Action'])) return;
+    if (!includesFullWildcard(entry['Resource'])) return;
+    warnings.push(
+      `Statement[${index}] allows every action ("*") on every resource ("*"). That is full administrative access.`,
+    );
+  });
+
+  return warnings;
+}
+
+/** True when the policy contains at least one full-admin Allow statement. */
+export function isFullAdminPolicy(text: string): boolean {
+  return policyWarnings(text).length > 0;
 }
 
 // -------------------------------------------------------------- visual editor

@@ -1,10 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
+  S3_BUCKET_NAME_MAX_LENGTH,
+  S3_BUCKET_NAME_PATTERN,
+  S3_KEY_MAX_BYTES,
   S3_PROXY_PATHS,
   S3_PUBLIC_ACCESS_ALL_BLOCKED,
   S3_PUBLIC_ACCESS_DEFAULTS,
+  isS3KeyWithinLimit,
   s3DownloadPath,
   s3UploadPath,
+  utf8ByteLength,
 } from '../src/index.js';
 
 describe('S3 proxy paths', () => {
@@ -32,6 +37,31 @@ describe('S3 proxy paths', () => {
     expect(s3UploadPath({ bucket: 'b', key: 'a/b.txt' })).toBe(
       `${S3_PROXY_PATHS.upload}?bucket=b&key=a%2Fb.txt`,
     );
+  });
+});
+
+describe('S3 naming rules', () => {
+  it('exposes the bucket pattern and length used by both apps', () => {
+    const pattern = new RegExp(S3_BUCKET_NAME_PATTERN);
+    expect(pattern.test('my-bucket')).toBe(true);
+    expect(pattern.test('localdeck.verify-1')).toBe(true);
+    expect(pattern.test('INVALID_BUCKET')).toBe(false);
+    expect(S3_BUCKET_NAME_MAX_LENGTH).toBe(63);
+  });
+
+  it('measures keys in UTF-8 bytes, not UTF-16 code units', () => {
+    // 400 four-byte emoji are 800 UTF-16 code units but 1600 UTF-8 bytes.
+    const emojiKey = '\u{1f600}'.repeat(400);
+    expect(emojiKey.length).toBe(800);
+    expect(utf8ByteLength(emojiKey)).toBe(1600);
+    expect(isS3KeyWithinLimit(emojiKey)).toBe(false);
+    expect(S3_KEY_MAX_BYTES).toBe(1024);
+  });
+
+  it('accepts ASCII keys at the limit and rejects empty keys', () => {
+    expect(isS3KeyWithinLimit('a'.repeat(S3_KEY_MAX_BYTES))).toBe(true);
+    expect(isS3KeyWithinLimit('a'.repeat(S3_KEY_MAX_BYTES + 1))).toBe(false);
+    expect(isS3KeyWithinLimit('')).toBe(false);
   });
 });
 

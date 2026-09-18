@@ -26,6 +26,19 @@ const INITIAL_STATE: LocalStackStatusState = {
 const FALLBACK_POLL_INTERVAL_MS = 15_000;
 
 /**
+ * Client-side bounds for the server-supplied interval. The api is trusted, but
+ * the console must not be able to spin (0 ms) or stall (days) if a proxy or a
+ * future api version returns something malformed.
+ */
+const MIN_POLL_INTERVAL_MS = 1_000;
+const MAX_POLL_INTERVAL_MS = 600_000;
+
+function clampPollIntervalMs(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return FALLBACK_POLL_INTERVAL_MS;
+  return Math.min(MAX_POLL_INTERVAL_MS, Math.max(MIN_POLL_INTERVAL_MS, value));
+}
+
+/**
  * Single poller for LocalStack status, shared by the whole console (sidebar,
  * Console Home widgets, service health page). The browser never talks to
  * LocalStack directly — only to the LocalDeck api proxy.
@@ -75,7 +88,7 @@ export function LocalStackStatusProvider({ children }: { children: ReactNode }):
     };
   }, [refresh]);
 
-  const pollIntervalMs = state.config?.ui.statusPollIntervalMs ?? FALLBACK_POLL_INTERVAL_MS;
+  const pollIntervalMs = clampPollIntervalMs(state.config?.ui.statusPollIntervalMs);
 
   useEffect(() => {
     const timer = window.setInterval(refresh, pollIntervalMs);

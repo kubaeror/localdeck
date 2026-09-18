@@ -1,4 +1,3 @@
-import type { ApiError } from '@localdeck/shared';
 import Alert from '@cloudscape-design/components/alert';
 import Box from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
@@ -7,15 +6,23 @@ import Header from '@cloudscape-design/components/header';
 import Link from '@cloudscape-design/components/link';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import Spinner from '@cloudscape-design/components/spinner';
-import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
+import { useCallback, type ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { toApiError } from '../../../lib/apiClient';
 import { serviceConsolePath } from '../../paths';
-import { getSecurityGroupsForInstance, type Ec2Instance, type Ec2SecurityGroup } from '../api';
+import { listSecurityGroupsByIds } from '../api';
+import { useEc2Resource } from '../hooks';
 import { SecurityGroupRulesTable } from './SecurityGroupRulesTable';
 
 export interface InstanceSecurityTabProps {
-  instance: Ec2Instance;
+  instanceId: string;
+  /**
+   * Security group ids from the instance description. Only the serialized ids
+   * drive the fetch: a polling refresh returns a new array object every time,
+   * which used to trigger an extra DescribeSecurityGroups call every 10 s.
+   */
+  securityGroupIds: readonly string[];
+  /** Service descriptor id, so links do not hardcode `ec2` (EC2-D04). */
+  serviceId: string;
 }
 
 /**
@@ -24,37 +31,18 @@ export interface InstanceSecurityTabProps {
  * own console page. Security groups here are read-only because editing them
  * belongs to the group, not the instance — the group page has the editor.
  */
-export function InstanceSecurityTab({ instance }: InstanceSecurityTabProps): ReactElement {
+export function InstanceSecurityTab({
+  instanceId,
+  securityGroupIds,
+  serviceId,
+}: InstanceSecurityTabProps): ReactElement {
   const navigate = useNavigate();
-  const [groups, setGroups] = useState<readonly Ec2SecurityGroup[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<ApiError | null>(null);
-  const requestId = useRef(0);
-
-  const load = useCallback(async (): Promise<void> => {
-    const id = requestId.current + 1;
-    requestId.current = id;
-    setLoading(true);
-    try {
-      const result = await getSecurityGroupsForInstance(instance);
-      if (requestId.current !== id) return;
-      setGroups(result);
-      setError(null);
-    } catch (caught) {
-      if (requestId.current !== id) return;
-      setError(toApiError(caught));
-    } finally {
-      if (requestId.current === id) setLoading(false);
-    }
-  }, [instance]);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- security group fetch for the tab
-    void load();
-    return () => {
-      requestId.current += 1;
-    };
-  }, [load]);
+  const idsKey = securityGroupIds.join(',');
+  const loader = useCallback(
+    () => listSecurityGroupsByIds(idsKey.length === 0 ? [] : idsKey.split(',')),
+    [idsKey],
+  );
+  const { data, loading, error, reload } = useEc2Resource(loader);
 
   if (loading) {
     return (
@@ -72,7 +60,7 @@ export function InstanceSecurityTab({ instance }: InstanceSecurityTabProps): Rea
         action={
           <Button
             onClick={() => {
-              void load();
+              void reload();
             }}
           >
             Retry
@@ -84,15 +72,22 @@ export function InstanceSecurityTab({ instance }: InstanceSecurityTabProps): Rea
     );
   }
 
+  const groups = data ?? [];
+
   if (groups.length === 0) {
     return (
       <Container header={<Header variant="h2">Security groups</Header>}>
         <Box color="text-body-secondary">
-          This instance is not associated with any security group.
+          {securityGroupIds.length === 0
+            ? `Instance ${instanceId} is not associated with any security group.`
+            : `Instance ${instanceId} reports security group ids that LocalStack no longer returns. Refresh the instance to reconcile them.`}
         </Box>
       </Container>
     );
   }
+
+  const groupPath = (groupId: string): string =>
+    `${serviceConsolePath(serviceId)}/security-groups/${encodeURIComponent(groupId)}`;
 
   return (
     <SpaceBetween size="l">
@@ -106,9 +101,7 @@ export function InstanceSecurityTab({ instance }: InstanceSecurityTabProps): Rea
               actions={
                 <Button
                   onClick={() => {
-                    navigate(
-                      `${serviceConsolePath('ec2')}/security-groups/${encodeURIComponent(group.groupId)}`,
-                    );
+                    navigate(groupPath(group.groupId));
                   }}
                 >
                   View security group
@@ -117,12 +110,10 @@ export function InstanceSecurityTab({ instance }: InstanceSecurityTabProps): Rea
             >
               {group.groupName}{' '}
               <Link
-                href={`${serviceConsolePath('ec2')}/security-groups/${encodeURIComponent(group.groupId)}`}
+                href={groupPath(group.groupId)}
                 onFollow={(event) => {
                   event.preventDefault();
-                  navigate(
-                    `${serviceConsolePath('ec2')}/security-groups/${encodeURIComponent(group.groupId)}`,
-                  );
+                  navigate(groupPath(group.groupId));
                 }}
               >
                 ({group.groupId})

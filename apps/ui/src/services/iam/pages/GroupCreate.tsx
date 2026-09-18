@@ -7,32 +7,54 @@ import FormField from '@cloudscape-design/components/form-field';
 import Header from '@cloudscape-design/components/header';
 import Input from '@cloudscape-design/components/input';
 import KeyValuePairs from '@cloudscape-design/components/key-value-pairs';
+import Multiselect from '@cloudscape-design/components/multiselect';
 import SpaceBetween from '@cloudscape-design/components/space-between';
-import { useState, type ReactElement } from 'react';
+import { useEffect, useState, type ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { CreateWizard } from '../../../components/CreateWizard';
 import { useFlashbar } from '../../../hooks/useFlashbar';
+import { toApiError } from '../../../lib/apiClient';
 import { serviceConsolePath } from '../../paths';
 import type { ServicePageProps } from '../../types';
-import { attachPolicy, createGroup } from '../api';
+import { addUserToGroup, attachPolicy, createGroup, listAllUsers } from '../api';
 import { PolicyPicker } from '../components/PolicyPicker';
 import { toFriendlyIamError } from '../errors';
 import { IAM_GROUP_NAME_RULES, validateGroupName } from '../naming';
 
 /**
- * The console's create-group wizard: name the group, optionally attach managed
- * policies, review. The group is created first; every policy attach that
- * follows reports its own failure instead of hiding a partial result.
+ * The console's create-group wizard: name the group, optionally add members and
+ * attach managed policies, then review. The group is created first; every
+ * membership and policy attach that follows reports its own failure instead of
+ * hiding a partial result.
  */
 export function GroupCreatePage({ descriptor }: ServicePageProps): ReactElement {
   const navigate = useNavigate();
   const flashbar = useFlashbar();
   const [groupName, setGroupName] = useState('');
   const [policyArns, setPolicyArns] = useState<readonly string[]>([]);
+  const [members, setMembers] = useState<readonly string[]>([]);
+  const [userNames, setUserNames] = useState<readonly string[]>([]);
+  const [membersError, setMembersError] = useState<string | null>(null);
   const [activeStepIndex, setActiveStepIndex] = useState(0);
   const [nameError, setNameError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    listAllUsers()
+      .then((result) => {
+        if (cancelled) return;
+        setUserNames(result.map((user) => user.userName));
+        setMembersError(null);
+      })
+      .catch((caught: unknown) => {
+        if (!cancelled) setMembersError(toApiError(caught).message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const leave = (): void => {
     navigate(`${serviceConsolePath(descriptor.id)}/groups`);
@@ -57,9 +79,20 @@ export function GroupCreatePage({ descriptor }: ServicePageProps): ReactElement 
     }
 
     const failures: string[] = [];
+    let membersAdded = 0;
+    let policiesAttached = 0;
+    for (const userName of members) {
+      try {
+        await addUserToGroup({ userName, groupName });
+        membersAdded += 1;
+      } catch (caught) {
+        failures.push(`${userName}: ${toFriendlyIamError(caught).message}`);
+      }
+    }
     for (const policyArn of policyArns) {
       try {
         await attachPolicy('group', groupName, policyArn);
+        policiesAttached += 1;
       } catch (caught) {
         failures.push(`${policyArn}: ${toFriendlyIamError(caught).message}`);
       }
@@ -69,14 +102,12 @@ export function GroupCreatePage({ descriptor }: ServicePageProps): ReactElement 
       type: 'success',
       header: 'Group created',
       content:
-        policyArns.length === 0
+        members.length === 0 && policyArns.length === 0
           ? groupName
-          : `${groupName} with ${policyArns.length - failures.length} attached ${
-              policyArns.length - failures.length === 1 ? 'policy' : 'policies'
-            }.`,
+          : `${groupName} with ${membersAdded} member(s) and ${policiesAttached} attached ${policiesAttached === 1 ? 'policy' : 'policies'}.`,
     });
     for (const failure of failures) {
-      flashbar.notify({ type: 'error', header: 'Could not attach a policy', content: failure });
+      flashbar.notify({ type: 'error', header: 'Could not finish a group step', content: failure });
     }
 
     setSubmitting(false);
@@ -107,6 +138,35 @@ export function GroupCreatePage({ descriptor }: ServicePageProps): ReactElement 
     </Container>
   );
 
+  const membersStep = (
+    <Container header={<Header variant="h2">Add users</Header>}>
+      <SpaceBetween size="m">
+        <Alert type="info">
+          Optional. Members inherit the permissions attached to this group. You can change the
+          membership later from the group&apos;s Users tab.
+        </Alert>
+        {membersError === null ? null : <Alert type="warning">{membersError}</Alert>}
+        <Multiselect
+          selectedOptions={members.map((userName) => ({ label: userName, value: userName }))}
+          options={userNames.map((userName) => ({ label: userName, value: userName }))}
+          filteringType="auto"
+          filteringPlaceholder="Find users"
+          placeholder={userNames.length === 0 ? 'No users exist yet' : 'Choose users'}
+          tokenLimit={8}
+          disabled={submitting}
+          ariaLabel="Members"
+          onChange={({ detail }) => {
+            setMembers(
+              detail.selectedOptions
+                .map((option) => option.value ?? '')
+                .filter((value) => value.length > 0),
+            );
+          }}
+        />
+      </SpaceBetween>
+    </Container>
+  );
+
   const policiesStep = (
     <Container header={<Header variant="h2">Attach policies</Header>}>
       <SpaceBetween size="m">
@@ -127,6 +187,13 @@ export function GroupCreatePage({ descriptor }: ServicePageProps): ReactElement 
           items={[
             { label: 'Group name', value: <Box variant="code">{groupName}</Box> },
             {
+              label: 'Members to add',
+              value:
+                members.length === 0
+                  ? 'None'
+                  : `${members.length} selected (added after the group is created)`,
+            },
+            {
               label: 'Policies to attach',
               value:
                 policyArns.length === 0
@@ -136,8 +203,8 @@ export function GroupCreatePage({ descriptor }: ServicePageProps): ReactElement 
           ]}
         />
         <Alert type="info" header="What happens next">
-          LocalDeck creates the group, then attaches the selected policies one by one. A failed
-          attach names the policy instead of hiding the group.
+          LocalDeck creates the group, then adds the selected users and attaches the selected
+          policies one by one. A failed step names the user or policy instead of hiding the group.
         </Alert>
       </SpaceBetween>
     </Container>
@@ -162,6 +229,13 @@ export function GroupCreatePage({ descriptor }: ServicePageProps): ReactElement 
           content: detailsStep,
         },
         {
+          id: 'members',
+          title: 'Add users',
+          description: 'Optional. Add the first members.',
+          isOptional: true,
+          content: membersStep,
+        },
+        {
           id: 'policies',
           title: 'Attach policies',
           description: 'Optional. Grant the group permissions.',
@@ -177,6 +251,7 @@ export function GroupCreatePage({ descriptor }: ServicePageProps): ReactElement 
       summary={[
         { label: 'Service', value: descriptor.displayName },
         { label: 'Group name', value: groupName.length === 0 ? '—' : groupName },
+        { label: 'Members', value: `${members.length}` },
         { label: 'Policies', value: `${policyArns.length}` },
       ]}
       summaryTitle="Group summary"

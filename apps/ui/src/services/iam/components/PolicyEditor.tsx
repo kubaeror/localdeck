@@ -15,6 +15,7 @@ import type { AceJsonBundle } from '../../../lib/aceJsonBundle';
 import {
   buildIdentityPolicyText,
   IAM_ACTION_CATALOG,
+  policyWarnings,
   readPolicyStatement,
   validateIdentityPolicy,
   type PolicyStatementDraft,
@@ -82,6 +83,7 @@ export function PolicyEditor({
   const [visualNotice, setVisualNotice] = useState<string | null>(null);
 
   const validation = validateIdentityPolicy(value);
+  const warnings = policyWarnings(value);
   const structureErrors =
     validation.jsonError === null && validation.structureErrors.length > 0
       ? validation.structureErrors
@@ -263,6 +265,12 @@ export function PolicyEditor({
 
       {mode === 'visual' && errorText !== undefined ? (
         <Alert type="error">{errorText}</Alert>
+      ) : null}
+
+      {validation.valid && warnings.length > 0 ? (
+        <Alert type="warning" header="Full administrative access">
+          {warnings.join(' ')} Creating or saving this policy asks for confirmation.
+        </Alert>
       ) : null}
 
       {validation.valid ? (

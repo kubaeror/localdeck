@@ -148,8 +148,16 @@ async function verifyGenericBrowserAcceptance(config: AppConfig): Promise<void> 
           service.browser === undefined || service.parityLevel !== 'planned',
           `${service.id} is planned but carries a browser binding`,
         );
+        assert(
+          service.parityLevel === 'planned' ? service.available === false : true,
+          `${service.id} is planned but marked available`,
+        );
       }
-      return `${body.services.length} services, ${browserServices.length} generic browsers, ${body.categories.length} categories`;
+      const available = browserServices.filter((service) => service.available === true);
+      return (
+        `${body.services.length} services, ${browserServices.length} generic browsers ` +
+        `(${available.length} with their SDK installed), ${body.categories.length} categories`
+      );
     });
 
     await check(
@@ -275,9 +283,18 @@ async function verifyGenericBrowserAcceptance(config: AppConfig): Promise<void> 
 
     const healthResponse = await apiRequest(app, { method: 'GET', url: '/api/health' });
     const health = healthResponse.json<HealthResponse>();
+    const registryResponse = await apiRequest(app, { method: 'GET', url: '/api/services' });
+    const registry = registryResponse.json<ServiceRegistryResponse>();
 
     for (const serviceId of GENERIC_BROWSER_SWEEP) {
       await check(`generic browser: ${serviceId} listOp against the stack`, async () => {
+        const descriptorEntry = registry.services.find((service) => service.id === serviceId);
+        assert(descriptorEntry !== undefined, `${serviceId} is missing from GET /api/services`);
+        assert(
+          descriptorEntry.available === true,
+          `${serviceId} is marked unavailable but is part of the verification sweep; ` +
+            'install its SDK package or remove it from GENERIC_BROWSER_SWEEP',
+        );
         if (health.localstack.services[serviceId] === undefined) {
           return `skipped: LocalStack does not report ${serviceId}`;
         }
@@ -1258,8 +1275,11 @@ async function verifyEksAcceptance(config: AppConfig): Promise<void> {
     return `${settled} (observed: ${trail.join(' → ')})`;
   };
 
-  const waitForNodegroup = async (wanted: readonly string[]): Promise<string> => {
-    const deadline = Date.now() + 10 * 60_000;
+  const waitForNodegroup = async (
+    wanted: readonly string[],
+    timeoutMs = 10 * 60_000,
+  ): Promise<string> => {
+    const deadline = Date.now() + timeoutMs;
     let status = '';
     const trail: string[] = [];
     for (;;) {
@@ -1270,8 +1290,13 @@ async function verifyEksAcceptance(config: AppConfig): Promise<void> {
       if (response.statusCode === 200) {
         const body = response.json<ServiceOperationResponse<{ nodegroup?: EksNodegroupShape }>>();
         status = body.result.nodegroup?.status ?? 'unknown';
-      } else {
-        status = status === '' ? 'not-found' : status;
+      } else if (response.statusCode === 404) {
+        // Absence is the success state for a deletion: LocalStack returns 404
+        // once the node group is gone, and waiting for DELETE_FAILED would
+        // stall every cleanup run for the full timeout.
+        status = 'not-found';
+      } else if (status === '') {
+        status = `error-${response.statusCode}`;
       }
       if (trail[trail.length - 1] !== status) trail.push(status);
       if (wanted.includes(status) || Date.now() >= deadline) break;
@@ -1357,13 +1382,16 @@ async function verifyEksAcceptance(config: AppConfig): Promise<void> {
     await check('acceptance: EKS cluster reaches a terminal state', async () => {
       if (!clusterCreated) return 'skipped: CreateCluster failed';
       const detail = await waitForCluster(['ACTIVE', 'FAILED']);
-      assert(
-        infraFailure === null,
-        `LocalStack reported the cluster as FAILED before ACTIVE (${detail}). ` +
-          "LocalStack's k3d provider could not start the Kubernetes control plane; " +
-          'check the LocalStack EKS logs and Docker/k3d connectivity. This is an ' +
-          'external LocalStack environment issue, not a LocalDeck failure.',
-      );
+      if (infraFailure !== null) {
+        // LocalStack's k3d provider cannot always start the control plane in
+        // this environment. That is an external infrastructure limitation, so
+        // the dependent EKS checks below are skipped rather than failed.
+        return (
+          'skipped: LocalStack reported the cluster as FAILED before ACTIVE ' +
+          `(${detail}); LocalStack's k3d provider could not start the Kubernetes ` +
+          'control plane — external environment issue, not a LocalDeck failure'
+        );
+      }
       return detail;
     });
 
@@ -1506,7 +1534,8 @@ async function verifyEksAcceptance(config: AppConfig): Promise<void> {
     try {
       if (nodegroupCreated) {
         await eks('DeleteNodegroup', { clusterName, nodegroupName });
-        await waitForNodegroup(['DELETE_FAILED']);
+        // 404 (absence) is deletion success; DELETE_FAILED is the failure state.
+        await waitForNodegroup(['DELETE_FAILED', 'not-found'], 60_000);
         nodegroupCreated = false;
       }
     } catch {
@@ -1666,7 +1695,10 @@ async function run(): Promise<void> {
       });
       assert(response.statusCode === 404, `expected 404, received ${response.statusCode}`);
       const body = response.json<ApiErrorResponse>();
-      assert(body.error.code === 'NOT_FOUND', `expected NOT_FOUND, received ${body.error.code}`);
+      assert(
+        body.error.code === 'SERVICE_NOT_REGISTERED',
+        `expected SERVICE_NOT_REGISTERED, received ${body.error.code}`,
+      );
       return `${body.error.code}: ${body.error.message}`;
     } finally {
       await app.close();

@@ -35,6 +35,18 @@ import { UpdateScalingModal } from './UpdateScalingModal';
 /** How often the Compute tab refreshes while a node group is still settling. */
 const POLL_INTERVAL_MS = 10_000;
 
+/**
+ * Operations the real EKS console offers but LocalDeck does not call yet,
+ * because they are not whitelisted/verified against the running LocalStack.
+ * They are rendered disabled with the reason instead of being hidden.
+ */
+const UPDATE_VERSION_REASON =
+  'UpdateNodegroupVersion is not whitelisted in LocalDeck yet, so the Kubernetes version of a node group cannot be changed here.';
+const FARGATE_REASON =
+  'Fargate profiles are not whitelisted in LocalDeck yet (CreateFargateProfile is not verified against LocalStack).';
+const ADDON_REASON =
+  'EKS add-ons are not whitelisted in LocalDeck yet (CreateAddon is not verified against LocalStack).';
+
 export interface NodegroupsTabProps {
   cluster: EksCluster;
 }
@@ -45,6 +57,14 @@ function formatScaling(nodegroup: EksNodegroup): string {
   return `${minSize ?? '—'}/${maxSize ?? '—'}/${desiredSize ?? '—'}`;
 }
 
+/** Every health issue the service reported, not only the first one. */
+function healthIssueText(nodegroup: EksNodegroup): string | null {
+  if (nodegroup.healthIssues.length === 0) return null;
+  return nodegroup.healthIssues
+    .map((issue) => issue.message ?? `Health issue: ${issue.code ?? 'unknown'}`)
+    .join('; ');
+}
+
 /**
  * The cluster's Compute tab: managed node groups with their status, instance
  * types and scaling configuration, in-place scaling, create/delete, and deep
@@ -53,10 +73,16 @@ function formatScaling(nodegroup: EksNodegroup): string {
  * LocalStack creates and deletes node groups asynchronously (k3d agents in
  * Docker), so the table polls DescribeNodegroup while anything is in a
  * transitional state and reports the transitions through the app flashbar.
+ * The emulated EC2 instances behind the nodes are fetched once per cluster and
+ * then only when a node group status actually changes, so the periodic poll
+ * does not walk the whole EC2 instance list every 10 seconds.
  */
 export function NodegroupsTab({ cluster }: NodegroupsTabProps): ReactElement {
   const navigate = useNavigate();
-  const flashbar = useFlashbar();
+  // Only `notify` is taken from the context: the context value changes whenever
+  // a message appears, and depending on the whole object would restart the
+  // loader (and the poll) on every notification.
+  const { notify } = useFlashbar();
 
   const [nodegroups, setNodegroups] = useState<readonly EksNodegroup[]>([]);
   const [instances, setInstances] = useState<readonly Ec2Instance[]>([]);
@@ -68,22 +94,44 @@ export function NodegroupsTab({ cluster }: NodegroupsTabProps): ReactElement {
   const [deletingTarget, setDeletingTarget] = useState<EksNodegroup | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [sortingColumn, setSortingColumn] = useState<
+    TableProps.SortingColumn<EksNodegroup> | undefined
+  >(undefined);
+  const [sortingDescending, setSortingDescending] = useState(false);
 
   /** Last status seen per node group, so transitions can be announced once. */
   const previousStatus = useRef(new Map<string, string>());
   /** Node groups the user asked to delete; announced when they disappear. */
   const pendingDelete = useRef(new Set<string>());
-  const inFlight = useRef<number>(0);
+  /** Status signature the currently loaded EC2 instances belong to. */
+  const instanceSignature = useRef<string | null>(null);
+  const inFlight = useRef<AbortController | null>(null);
+  const instancesInFlight = useRef(0);
+
+  const loadInstances = useCallback(async (): Promise<void> => {
+    const request = instancesInFlight.current + 1;
+    instancesInFlight.current = request;
+    try {
+      const result = await listAllInstances();
+      if (instancesInFlight.current !== request) return;
+      setInstances(result);
+    } catch {
+      if (instancesInFlight.current !== request) return;
+      setInstances([]);
+    }
+  }, []);
 
   const load = useCallback(
     async (options: { silent?: boolean } = {}): Promise<void> => {
-      const request = inFlight.current + 1;
-      inFlight.current = request;
-      if (options.silent !== true)
+      inFlight.current?.abort();
+      const controller = new AbortController();
+      inFlight.current = controller;
+      if (options.silent !== true) {
         setPhase((current) => (current === 'ready' ? current : 'loading'));
+      }
       try {
-        const page = await listNodegroups(cluster.name);
-        if (inFlight.current !== request) return;
+        const page = await listNodegroups(cluster.name, controller.signal);
+        if (controller.signal.aborted) return;
 
         // Announce lifecycle transitions the user is waiting on.
         const seen = new Set(page.items.map((nodegroup) => nodegroup.nodegroupName));
@@ -92,7 +140,7 @@ export function NodegroupsTab({ cluster }: NodegroupsTabProps): ReactElement {
           previousStatus.current.set(nodegroup.nodegroupName, nodegroup.status);
           if (previous === undefined || previous === nodegroup.status) continue;
           if (nodegroup.status === 'ACTIVE') {
-            flashbar.notify({
+            notify({
               type: 'success',
               header: `Node group ${nodegroup.nodegroupName} is active`,
               content: `${nodegroup.instanceTypes.join(', ') || 'Default instance type'} · ${formatScaling(nodegroup)} (min/max/desired)`,
@@ -102,12 +150,11 @@ export function NodegroupsTab({ cluster }: NodegroupsTabProps): ReactElement {
             nodegroup.status === 'DELETE_FAILED' ||
             nodegroup.status === 'DEGRADED'
           ) {
-            const issue = nodegroup.healthIssues[0]?.message;
-            flashbar.notify({
+            notify({
               type: 'error',
               header: `Node group ${nodegroup.nodegroupName} is ${nodegroup.status.toLowerCase().replace(/_/g, ' ')}`,
               content:
-                issue ??
+                healthIssueText(nodegroup) ??
                 'LocalStack reported a failure for this node group. Open it in the table for details.',
             });
           }
@@ -116,48 +163,65 @@ export function NodegroupsTab({ cluster }: NodegroupsTabProps): ReactElement {
           if (seen.has(name)) continue;
           pendingDelete.current.delete(name);
           previousStatus.current.delete(name);
-          flashbar.notify({
+          notify({
             type: 'success',
             header: `Node group ${name} deleted`,
             content: cluster.name,
           });
         }
 
+        // Scaling or a lifecycle transition can change the emulated EC2
+        // instances; a plain poll with unchanged statuses must not.
+        const signature = page.items
+          .map((nodegroup) => `${nodegroup.nodegroupName}:${nodegroup.status}`)
+          .sort()
+          .join('|');
+        const previousSignature = instanceSignature.current;
+        instanceSignature.current = signature;
+        if (previousSignature !== null && previousSignature !== signature) {
+          void loadInstances();
+        }
+
         setNodegroups(page.items);
         setError(null);
         setPhase('ready');
       } catch (caught) {
-        if (inFlight.current !== request) return;
+        if (controller.signal.aborted) return;
         setError(toApiError(caught));
         setPhase('error');
       }
     },
-    [cluster.name, flashbar],
+    [cluster.name, loadInstances, notify],
   );
+
+  // Reset the announcement state when the tab is re-pointed at another cluster
+  // (the component instance can be reused; ClusterDetail also keys it by name).
+  useEffect(() => {
+    previousStatus.current = new Map();
+    pendingDelete.current = new Set();
+    instanceSignature.current = null;
+  }, [cluster.name]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- node group lookup for the tab
     void load();
+    return () => {
+      inFlight.current?.abort();
+    };
   }, [load, reloadToken]);
-
-  const loadInstances = useCallback(async (): Promise<void> => {
-    try {
-      setInstances(await listAllInstances());
-    } catch {
-      setInstances([]);
-    }
-  }, []);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- EC2 deep-link catalogue
     void loadInstances();
-  }, [loadInstances, reloadToken]);
+    return () => {
+      instancesInFlight.current += 1;
+    };
+  }, [loadInstances, cluster.name, reloadToken]);
 
   const transitional = nodegroups.some((nodegroup) => isNodegroupTransitional(nodegroup.status));
 
   usePolling(transitional, POLL_INTERVAL_MS, () => {
     void load({ silent: true });
-    void loadInstances();
   });
 
   const instancesFor = useCallback(
@@ -181,7 +245,7 @@ export function NodegroupsTab({ cluster }: NodegroupsTabProps): ReactElement {
     try {
       await deleteNodegroup(cluster.name, name);
       pendingDelete.current.add(name);
-      flashbar.notify({
+      notify({
         type: 'info',
         header: `Deleting node group ${name}`,
         content: 'LocalStack is removing the k3d agents and their emulated EC2 instances.',
@@ -208,21 +272,24 @@ export function NodegroupsTab({ cluster }: NodegroupsTabProps): ReactElement {
         id: 'status',
         header: 'Status',
         sortingField: 'status',
-        cell: (nodegroup) => (
-          <SpaceBetween size="xxs">
-            <StatusBadge status={nodegroupStatusName(nodegroup.status)} />
-            {nodegroup.healthIssues.length === 0 ? null : (
-              <Box variant="small" color="text-status-error">
-                {nodegroup.healthIssues[0]?.message ??
-                  `Health issue: ${nodegroup.healthIssues[0]?.code ?? 'unknown'}`}
-              </Box>
-            )}
-          </SpaceBetween>
-        ),
+        cell: (nodegroup) => {
+          const issue = healthIssueText(nodegroup);
+          return (
+            <SpaceBetween size="xxs">
+              <StatusBadge status={nodegroupStatusName(nodegroup.status)} />
+              {issue === null ? null : (
+                <Box variant="small" color="text-status-error">
+                  {issue}
+                </Box>
+              )}
+            </SpaceBetween>
+          );
+        },
       },
       {
         id: 'instanceTypes',
         header: 'Instance types',
+        sortingField: 'instanceTypes',
         cell: (nodegroup) =>
           nodegroup.instanceTypes.length === 0 ? (
             '—'
@@ -243,6 +310,7 @@ export function NodegroupsTab({ cluster }: NodegroupsTabProps): ReactElement {
       {
         id: 'version',
         header: 'Kubernetes version',
+        sortingField: 'version',
         cell: (nodegroup) => nodegroup.version ?? '—',
       },
       {
@@ -298,6 +366,12 @@ export function NodegroupsTab({ cluster }: NodegroupsTabProps): ReactElement {
             items={[
               { id: 'scaling', text: 'Edit scaling' },
               {
+                id: 'update-version',
+                text: 'Change Kubernetes version',
+                disabled: true,
+                disabledReason: UPDATE_VERSION_REASON,
+              },
+              {
                 id: 'delete',
                 text: 'Delete',
                 disabled: nodegroup.status === 'DELETING',
@@ -324,6 +398,25 @@ export function NodegroupsTab({ cluster }: NodegroupsTabProps): ReactElement {
       description="Managed node groups run one k3d agent per desired node and register an emulated EC2 instance for each."
       actions={
         <SpaceBetween direction="horizontal" size="xs">
+          <ButtonDropdown
+            items={[
+              {
+                id: 'fargate',
+                text: 'Create Fargate profile',
+                disabled: true,
+                disabledReason: FARGATE_REASON,
+              },
+              {
+                id: 'addon',
+                text: 'Create add-on',
+                disabled: true,
+                disabledReason: ADDON_REASON,
+              },
+            ]}
+            onItemClick={() => undefined}
+          >
+            More
+          </ButtonDropdown>
           <Button
             iconName="refresh"
             ariaLabel="Refresh node groups"
@@ -384,6 +477,12 @@ export function NodegroupsTab({ cluster }: NodegroupsTabProps): ReactElement {
             items={[...nodegroups]}
             columnDefinitions={columns}
             trackBy={(nodegroup) => nodegroup.nodegroupName}
+            sortingColumn={sortingColumn}
+            sortingDescending={sortingDescending}
+            onSortingChange={({ detail }) => {
+              setSortingColumn(detail.sortingColumn);
+              setSortingDescending(detail.isDescending === true);
+            }}
             ariaLabels={{ tableLabel: 'Node groups', selectionGroupLabel: 'Node group selection' }}
             empty={
               <Box textAlign="center" color="text-body-secondary">
@@ -412,7 +511,7 @@ export function NodegroupsTab({ cluster }: NodegroupsTabProps): ReactElement {
           onCreated={(nodegroup) => {
             setCreating(false);
             previousStatus.current.set(nodegroup.nodegroupName, 'CREATING');
-            flashbar.notify({
+            notify({
               type: 'info',
               header: `Creating node group ${nodegroup.nodegroupName}`,
               content: 'LocalStack is starting the k3d agents. This usually takes a minute or two.',
@@ -433,7 +532,7 @@ export function NodegroupsTab({ cluster }: NodegroupsTabProps): ReactElement {
           onUpdated={(nodegroup) => {
             setScalingTarget(null);
             previousStatus.current.set(nodegroup.nodegroupName, nodegroup.status);
-            flashbar.notify({
+            notify({
               type: 'info',
               header: `Updating ${nodegroup.nodegroupName}`,
               content: `Scaling configuration is now ${formatScaling(nodegroup)} (min/max/desired).`,

@@ -1,7 +1,38 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ConsoleWidgetId, ConsoleWidgetItem } from './types';
 
-const LAYOUT_STORAGE_KEY = 'localdeck.console-home.layout';
+/** Exported so tests can assert the persisted shape without duplicating it. */
+export const CONSOLE_HOME_LAYOUT_STORAGE_KEY = 'localdeck.console-home.layout';
+
+const LAYOUT_STORAGE_KEY = CONSOLE_HOME_LAYOUT_STORAGE_KEY;
+
+/** Grid span that a widget can never shrink below its definition. */
+function isSpan(value: unknown, minimum: number): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= minimum;
+}
+
+/**
+ * Column offsets are a per-layout mapping (`{ [columns]: offset }`). An entry
+ * is kept only when it is a non-negative integer and the widget's minimum span
+ * still fits on that layout; anything else is dropped rather than handed to
+ * the board. (Rows have no offset in the Cloudscape board: vertical placement
+ * is the item order, which is part of the persisted layout.)
+ */
+function readColumnOffsets(
+  value: unknown,
+  minColumnSpan: number,
+): { [columns: number]: number } | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const offsets: { [columns: number]: number } = {};
+  for (const [key, offset] of Object.entries(value)) {
+    const columns = Number(key);
+    if (!Number.isInteger(columns) || columns <= 0) continue;
+    if (typeof offset !== 'number' || !Number.isInteger(offset) || offset < 0) continue;
+    if (offset + minColumnSpan > columns) continue;
+    offsets[columns] = offset;
+  }
+  return Object.keys(offsets).length === 0 ? undefined : offsets;
+}
 
 /** The layout Console Home starts from. Spans live on a 6 column grid. */
 export const DEFAULT_CONSOLE_WIDGETS: readonly ConsoleWidgetItem[] = [
@@ -52,10 +83,14 @@ function readStoredLayout(): readonly ConsoleWidgetItem[] {
       if (!isWidgetId(record.id)) continue;
       const fallback = DEFAULT_CONSOLE_WIDGETS.find((item) => item.id === record.id);
       if (fallback === undefined) continue;
+      const minColumnSpan = fallback.definition?.minColumnSpan ?? 1;
+      const minRowSpan = fallback.definition?.minRowSpan ?? 1;
+      const columnOffset = readColumnOffsets(record.columnOffset, minColumnSpan);
       restored.push({
         ...fallback,
-        ...(typeof record.columnSpan === 'number' ? { columnSpan: record.columnSpan } : {}),
-        ...(typeof record.rowSpan === 'number' ? { rowSpan: record.rowSpan } : {}),
+        ...(isSpan(record.columnSpan, minColumnSpan) ? { columnSpan: record.columnSpan } : {}),
+        ...(isSpan(record.rowSpan, minRowSpan) ? { rowSpan: record.rowSpan } : {}),
+        ...(columnOffset === undefined ? {} : { columnOffset }),
       });
     }
     return restored;
@@ -76,10 +111,14 @@ export function useConsoleHomeLayout(): ConsoleHomeLayout {
 
   useEffect(() => {
     try {
+      // The full Cloudscape configurable-dashboard pattern: spans, column
+      // offsets and (through the item order) row placement, so widgets come
+      // back where they were left.
       const compact = items.map((item) => ({
         id: item.id,
         columnSpan: item.columnSpan,
         rowSpan: item.rowSpan,
+        columnOffset: item.columnOffset,
       }));
       window.localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(compact));
     } catch {

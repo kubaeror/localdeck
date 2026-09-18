@@ -42,6 +42,13 @@ async function startStubLocalStack(): Promise<StubLocalStack> {
       return;
     }
 
+    // GetObject: raw bytes, which the SDK exposes as a Node stream.
+    if (request.method === 'GET' && request.url?.startsWith('/binary-bucket/')) {
+      response.writeHead(200, { 'content-type': 'application/octet-stream' });
+      response.end(Buffer.from('object bytes'));
+      return;
+    }
+
     if (request.method === 'PUT' && request.url !== undefined && request.url !== '/') {
       response.writeHead(200, { 'content-type': 'application/xml' });
       response.end('');
@@ -116,6 +123,21 @@ describe('service operation dispatcher', () => {
     });
   });
 
+  it('does not abort a dispatcher call that carries a request body over real HTTP', async () => {
+    // Regression: Fastify's request.signal aborts when the request stream
+    // closes, which for a POST happens right after the body is parsed. Using
+    // it as the SDK abort signal made every body-carrying call answer 408.
+    const address = await app.listen({ port: 0, host: '127.0.0.1' });
+    const response = await fetch(`${address}/api/services/s3/ListBuckets`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ input: {} }),
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as ServiceOperationResponse;
+    expect(body.operation).toBe('ListBuckets');
+  });
+
   it('uses path-style addressing for S3', async () => {
     const response = await app.inject({
       method: 'POST',
@@ -181,7 +203,7 @@ describe('service operation dispatcher', () => {
 
     expect(response.statusCode).toBe(404);
     const body = response.json<ApiErrorResponse>();
-    expect(body.error.code).toBe('NOT_FOUND');
+    expect(body.error.code).toBe('SERVICE_NOT_REGISTERED');
     expect(body.error.details?.['serviceId']).toBe('not-a-service');
   });
 
@@ -235,5 +257,31 @@ describe('service operation dispatcher', () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json<ServiceOperationResponse>().operation).toBe('ListBuckets');
+  });
+
+  it('rejects stream-producing operations with a clean 501 (API-001)', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/services/s3/GetObject',
+      payload: { input: { Bucket: 'binary-bucket', Key: 'file.bin' } },
+    });
+
+    expect(response.statusCode).toBe(501);
+    const body = response.json<ApiErrorResponse>();
+    expect(body.error.code).toBe('BINARY_RESPONSE_UNSUPPORTED');
+    expect(body.error.message).toContain('dedicated S3 object routes');
+  });
+
+  it('maps SDK serializer TypeErrors to 400 VALIDATION_FAILED (LD-09)', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/services/lambda/Invoke',
+      payload: { input: { FunctionName: 'demo', Payload: 5 } },
+    });
+
+    expect(response.statusCode).toBe(400);
+    const body = response.json<ApiErrorResponse>();
+    expect(body.error.code).toBe('VALIDATION_FAILED');
+    expect(body.error.details?.['reason']).toBe('sdk-input-serialization');
   });
 });

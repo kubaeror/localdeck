@@ -2,25 +2,10 @@ import Box from '@cloudscape-design/components/box';
 import Container from '@cloudscape-design/components/container';
 import Header from '@cloudscape-design/components/header';
 import KeyValuePairs from '@cloudscape-design/components/key-value-pairs';
-import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import type { ReactElement } from 'react';
 import type { UseLocalStackStatusResult } from '../hooks/useLocalStackStatus';
 import { formatAvailability, formatLatency, formatRelativeTime } from '../lib/format';
-
-function connectionIndicator(status: UseLocalStackStatusResult): ReactElement {
-  switch (status.phase) {
-    case 'connected':
-      return <StatusIndicator type="success">Connected</StatusIndicator>;
-    case 'degraded':
-      return <StatusIndicator type="warning">Connected, degraded</StatusIndicator>;
-    case 'unreachable':
-      return <StatusIndicator type="error">LocalStack unreachable</StatusIndicator>;
-    case 'error':
-      return <StatusIndicator type="error">LocalDeck api error</StatusIndicator>;
-    default:
-      return <StatusIndicator type="in-progress">Checking</StatusIndicator>;
-  }
-}
+import { ConnectionStatusIndicator } from './ConnectionStatusIndicator';
 
 function unknownValue(): ReactElement {
   return <Box color="text-status-inactive">unknown</Box>;
@@ -49,7 +34,7 @@ export function LocalStackStatusCard({ status }: LocalStackStatusCardProps): Rea
       <KeyValuePairs
         columns={3}
         items={[
-          { label: 'Connection', value: connectionIndicator(status) },
+          { label: 'Connection', value: <ConnectionStatusIndicator phase={status.phase} /> },
           {
             label: 'Endpoint',
             value: config ? <Box variant="code">{config.localstack.endpoint}</Box> : unknownValue(),

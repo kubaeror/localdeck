@@ -6,12 +6,11 @@ import { useCallback, useMemo, useState, type ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { DeleteConfirmModal } from '../../../components/DeleteConfirmModal';
 import { ResourceListPage } from '../../../components/ResourceListPage';
-import { useFlashbar } from '../../../hooks/useFlashbar';
 import { formatDateTime } from '../../../lib/format';
 import { serviceConsolePath } from '../../paths';
 import type { ServicePageProps } from '../../types';
 import { deleteRole, listRoles, type IamRole } from '../api';
-import { toFriendlyIamError } from '../errors';
+import { useBulkDelete } from '../components/useBulkDelete';
 import { summarizeTrustedEntities } from '../policy';
 
 /**
@@ -21,12 +20,17 @@ import { summarizeTrustedEntities } from '../policy';
  */
 export function RolesListPage({ descriptor }: ServicePageProps): ReactElement {
   const navigate = useNavigate();
-  const flashbar = useFlashbar();
   const [filteringText, setFilteringText] = useState('');
-  const [deleteTargets, setDeleteTargets] = useState<readonly IamRole[] | null>(null);
-  const [deleting, setDeleting] = useState(false);
-  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
+
+  const bulkDelete = useBulkDelete<IamRole>({
+    noun: 'role',
+    label: (role) => role.roleName,
+    remove: (role) => deleteRole(role.roleName),
+    onCompleted: () => {
+      setReloadToken((token) => token + 1);
+    },
+  });
 
   const rolePath = useCallback(
     (roleName: string): string =>
@@ -75,29 +79,6 @@ export function RolesListPage({ descriptor }: ServicePageProps): ReactElement {
     [openRole, rolePath],
   );
 
-  const confirmDelete = async (): Promise<void> => {
-    const targets = deleteTargets ?? [];
-    if (targets.length === 0) return;
-
-    setDeleting(true);
-    setDeleteError(null);
-    for (const role of targets) {
-      try {
-        await deleteRole(role.roleName);
-        flashbar.notify({ type: 'success', header: 'Role deleted', content: role.roleName });
-      } catch (caught) {
-        flashbar.notify({
-          type: 'error',
-          header: `Could not delete ${role.roleName}`,
-          content: toFriendlyIamError(caught).message,
-        });
-      }
-    }
-    setDeleting(false);
-    setDeleteTargets(null);
-    setReloadToken((token) => token + 1);
-  };
-
   return (
     <>
       <ResourceListPage<IamRole>
@@ -143,12 +124,11 @@ export function RolesListPage({ descriptor }: ServicePageProps): ReactElement {
             ]}
             onItemClick={({ detail }) => {
               if (detail.id === 'view') openRole(role.roleName);
-              if (detail.id === 'copy-arn') {
+              if (detail.id === 'copy-arn' && role.arn !== undefined) {
                 void navigator.clipboard?.writeText(role.arn);
               }
               if (detail.id === 'delete') {
-                setDeleteError(null);
-                setDeleteTargets([role]);
+                bulkDelete.requestDelete([role]);
               }
             }}
           />
@@ -159,8 +139,7 @@ export function RolesListPage({ descriptor }: ServicePageProps): ReactElement {
             items={[{ id: 'delete', text: 'Delete' }]}
             onItemClick={({ detail }) => {
               if (detail.id === 'delete') {
-                setDeleteError(null);
-                setDeleteTargets(selected);
+                bulkDelete.requestDelete(selected);
               }
             }}
           >
@@ -171,23 +150,24 @@ export function RolesListPage({ descriptor }: ServicePageProps): ReactElement {
         emptyDescription="Roles are identities that trusted entities assume. Create a role to grant temporary access to a service or account."
       />
 
-      {deleteTargets === null ? null : (
+      {bulkDelete.targets === null ? null : (
         <DeleteConfirmModal
           visible
-          title={deleteTargets.length === 1 ? 'Delete role' : 'Delete roles'}
-          subjects={deleteTargets.map((role) => role.roleName)}
+          title={bulkDelete.targets.length === 1 ? 'Delete role' : 'Delete roles'}
+          subjects={bulkDelete.targets.map((role) => role.roleName)}
           description="Deleting a role removes its permissions permanently. Every attached policy must be detached first, and this action cannot be undone."
-          confirmationText={deleteTargets.length === 1 ? undefined : 'delete'}
-          submitLabel={deleteTargets.length === 1 ? 'Delete role' : 'Delete roles'}
-          loading={deleting}
-          {...(deleteError === null ? {} : { errorText: deleteError })}
+          confirmationText={bulkDelete.targets.length === 1 ? undefined : 'delete'}
+          submitLabel={bulkDelete.targets.length === 1 ? 'Delete role' : 'Delete roles'}
+          loading={bulkDelete.deleting}
+          {...(bulkDelete.failures.length === 0
+            ? {}
+            : { errorText: bulkDelete.failures.join(' ') })}
           onDismiss={() => {
-            if (deleting) return;
-            setDeleteTargets(null);
-            setDeleteError(null);
+            if (bulkDelete.deleting) return;
+            bulkDelete.dismiss();
           }}
           onConfirm={() => {
-            void confirmDelete();
+            void bulkDelete.confirm();
           }}
         />
       )}

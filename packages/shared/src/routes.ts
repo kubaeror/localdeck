@@ -8,11 +8,9 @@ export const API_PATHS = {
   liveness: '/api/health/live',
   services: '/api/services',
   serviceOperations: '/api/services/:serviceId/operations',
-  serviceOperation: '/api/services/:service/:operation',
+  serviceOperation: '/api/services/:serviceId/:operation',
   eksKubeconfig: '/api/eks/:cluster/kubeconfig',
 } as const;
-
-export type ApiPath = (typeof API_PATHS)[keyof typeof API_PATHS];
 
 /**
  * Path of the dynamic service dispatcher: one route that proxies any
@@ -20,14 +18,6 @@ export type ApiPath = (typeof API_PATHS)[keyof typeof API_PATHS];
  */
 export function serviceOperationPath(serviceId: string, operation: string): string {
   return `/api/services/${encodeURIComponent(serviceId)}/${encodeURIComponent(operation)}`;
-}
-
-/**
- * Path of one service's operation metadata: the whitelist the dispatcher
- * enforces plus the generic-browser binding, straight from the registry.
- */
-export function serviceOperationsPath(serviceId: string): string {
-  return `/api/services/${encodeURIComponent(serviceId)}/operations`;
 }
 
 /**

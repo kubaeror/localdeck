@@ -104,6 +104,35 @@ const FRIENDLY: Readonly<Record<string, { field: Ec2ErrorField; message: string 
     field: null,
     message: 'This volume no longer exists in LocalStack. Refresh the list.',
   },
+  'InvalidVolume.ZoneMismatch': {
+    field: null,
+    message:
+      'The volume and the instance are in different Availability Zones. Attach a volume from the instance zone, or create one there first.',
+  },
+  'InvalidPermission.NotFound': {
+    field: null,
+    message:
+      'That rule is no longer on the security group. Refresh the page and check the current rules.',
+  },
+  'InvalidPermission.Duplicate': {
+    field: 'securityGroups',
+    message:
+      'An identical rule already exists on this security group. Edit the existing rule instead of adding a duplicate.',
+  },
+  RulesPerSecurityGroupLimitExceeded: {
+    field: null,
+    message: 'This security group has reached the rule limit. Revoke a rule before adding another.',
+  },
+  InvalidParameterCombination: {
+    field: null,
+    message:
+      'LocalStack rejected this combination of parameters. Check the values that belong together, for example a provisioned IOPS value with a volume type that supports it.',
+  },
+  'InvalidSnapshot.NotFound': {
+    field: 'volumeSize',
+    message:
+      'LocalStack does not have this snapshot. Check the snapshot id, or create the volume without one.',
+  },
   'InvalidKeyPair.NotFound': {
     field: 'keyName',
     message:

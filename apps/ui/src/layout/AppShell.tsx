@@ -5,7 +5,14 @@ import Input from '@cloudscape-design/components/input';
 import SideNavigation from '@cloudscape-design/components/side-navigation';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import { colorTextStatusInactive } from '@cloudscape-design/design-tokens';
-import { useMemo, useState, type CSSProperties, type ReactElement } from 'react';
+import {
+  useCallback,
+  useDeferredValue,
+  useMemo,
+  useState,
+  type CSSProperties,
+  type ReactElement,
+} from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { FLASHBAR_I18N } from '../contexts/flashbar-context';
 import { useFlashbar } from '../hooks/useFlashbar';
@@ -36,6 +43,9 @@ export function AppShell(): ReactElement {
   const [isNavigationOpen, setIsNavigationOpen] = useState(readNavigationOpen);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [filter, setFilter] = useState('');
+  // Typing stays responsive while the (comparatively expensive) fuzzy match
+  // and the ~150 navigation elements rebuild on the deferred value.
+  const deferredFilter = useDeferredValue(filter);
 
   const location = useLocation();
   const navigate = useNavigate();
@@ -45,28 +55,32 @@ export function AppShell(): ReactElement {
   const recentlyVisited = useRecentlyVisited();
 
   const serviceStatuses = useMemo(() => status.health?.localstack.services ?? {}, [status.health]);
+  const recentlyVisitedIds = useMemo(
+    () => recentlyVisited.visited.map((entry) => entry.id),
+    [recentlyVisited.visited],
+  );
 
   const navigation = useMemo(
     () =>
       buildNavigation({
         services: catalog.services,
         serviceStatuses,
-        filter,
-        recentlyVisited: recentlyVisited.visited.map((entry) => entry.id),
+        filter: deferredFilter,
+        recentlyVisited: recentlyVisitedIds,
       }),
-    [catalog.services, serviceStatuses, filter, recentlyVisited.visited],
+    [catalog.services, deferredFilter, recentlyVisitedIds, serviceStatuses],
   );
+
+  const openHelp = useCallback(() => {
+    setIsHelpOpen(true);
+  }, []);
 
   const activeHref = navigationActiveHref(location.pathname);
 
   return (
     <div className="app-shell">
       <div id="top-navigation">
-        <ConsoleTopNavigation
-          onOpenHelp={() => {
-            setIsHelpOpen(true);
-          }}
-        />
+        <ConsoleTopNavigation onOpenHelp={openHelp} />
       </div>
       <div className="app-shell__main">
         <AppLayout

@@ -23,7 +23,6 @@ export default tseslint.config(
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'module',
-      globals: { ...globals.node },
     },
     rules: {
       '@typescript-eslint/no-explicit-any': 'error',
@@ -51,6 +50,43 @@ export default tseslint.config(
       ],
       eqeqeq: ['error', 'smart'],
       'no-console': 'off',
+    },
+  },
+  {
+    // Node-side workspaces and repository tooling. Browser globals are NOT
+    // available here, and Node globals are not available in apps/ui.
+    files: [
+      'apps/api/**/*.{ts,tsx}',
+      'packages/**/*.{ts,tsx}',
+      'e2e/**/*.{ts,tsx}',
+      'scripts/**/*.{ts,tsx,mjs,js}',
+      '*.{mjs,js,ts}',
+    ],
+    languageOptions: {
+      globals: { ...globals.node },
+    },
+  },
+  {
+    // Type-aware rules for every workspace whose files belong to a tsconfig
+    // project. `scripts/` and root config files are intentionally excluded:
+    // they are executed by tsx and are not part of a tsconfig project.
+    files: [
+      'apps/api/**/*.{ts,tsx}',
+      'apps/ui/**/*.{ts,tsx}',
+      'packages/**/*.{ts,tsx}',
+      'e2e/**/*.{ts,tsx}',
+    ],
+    languageOptions: {
+      parserOptions: {
+        projectService: true,
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
+    rules: {
+      // `void promise` is the codebase's explicit fire-and-forget marker.
+      '@typescript-eslint/no-floating-promises': ['error', { ignoreVoid: true, ignoreIIFE: true }],
+      '@typescript-eslint/await-thenable': 'error',
+      '@typescript-eslint/no-misused-promises': ['error', { checksVoidReturn: false }],
     },
   },
   {

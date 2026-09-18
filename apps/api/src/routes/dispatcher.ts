@@ -5,20 +5,23 @@ import {
 } from '@localdeck/shared';
 import type { FastifyInstance } from 'fastify';
 import type { AwsClientConfigOverrides } from '../lib/awsClients.js';
+import { clientDisconnectSignal } from '../lib/http.js';
 import { dispatchServiceOperation } from '../registry/dispatcher.js';
 
 interface DispatcherParams {
-  service: string;
+  serviceId: string;
   operation: string;
 }
 
 /**
- * `POST /api/services/:service/:operation` — the dynamic service dispatcher.
+ * `POST /api/services/:serviceId/:operation` — the dynamic service dispatcher.
  *
  * The body is `{ "input": { ... } }` with the operation input exactly as the
- * AWS SDK expects it. Validation here only rejects malformed requests; the
- * registry decides whether the service exists (404) and whether the operation
- * is whitelisted (400).
+ * AWS SDK expects it (`additionalProperties: true` is intentional: every AWS
+ * operation has a different input shape, and the SDK serializer is the
+ * authority on what it accepts). Validation here only rejects malformed
+ * requests; the registry decides whether the service exists (404) and whether
+ * the operation is whitelisted (400).
  */
 export function registerDispatcherRoutes(
   app: FastifyInstance,
@@ -30,9 +33,15 @@ export function registerDispatcherRoutes(
       schema: {
         params: {
           type: 'object',
-          required: ['service', 'operation'],
+          required: ['serviceId', 'operation'],
+          additionalProperties: false,
           properties: {
-            service: { type: 'string', minLength: 1, maxLength: 64 },
+            serviceId: {
+              type: 'string',
+              minLength: 1,
+              maxLength: 64,
+              pattern: '^[a-z0-9][a-z0-9-]*$',
+            },
             operation: {
               type: 'string',
               minLength: 1,
@@ -53,10 +62,15 @@ export function registerDispatcherRoutes(
         },
       },
     },
-    async (request): Promise<ServiceOperationResponse> => {
-      const { service, operation } = request.params;
+    async (request, reply): Promise<ServiceOperationResponse> => {
+      const { serviceId, operation } = request.params;
       const input = request.body?.input ?? {};
-      return dispatchServiceOperation(service, operation, input, clientOverrides);
+      // The client-disconnect signal is combined with the SDK request timeout
+      // inside the dispatcher; Fastify's own request.signal is unusable here
+      // because it aborts as soon as a request body has been parsed.
+      return dispatchServiceOperation(serviceId, operation, input, clientOverrides, {
+        signal: clientDisconnectSignal(reply),
+      });
     },
   );
 }

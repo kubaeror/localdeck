@@ -1,6 +1,7 @@
 import type { ApiError } from '@localdeck/shared';
 import Box from '@cloudscape-design/components/box';
 import ButtonDropdown from '@cloudscape-design/components/button-dropdown';
+import SpaceBetween from '@cloudscape-design/components/space-between';
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { DeleteConfirmModal } from '../../../components/DeleteConfirmModal';
@@ -11,9 +12,14 @@ import { serviceConsolePath } from '../../paths';
 import type { ServicePageProps } from '../../types';
 import { deleteRole, getRole, type IamRole } from '../api';
 import { AttachedPoliciesPanel } from '../components/AttachedPoliciesPanel';
+import { PermissionsBoundaryNotice } from '../components/PermissionsBoundaryNotice';
 import { TagsTab } from '../components/TagsTab';
 import { TrustPolicyPanel } from '../components/TrustPolicyPanel';
 import { isIamCode, toFriendlyIamError } from '../errors';
+
+/** Inline policies are not whitelisted/verified against LocalStack yet. */
+const INLINE_POLICIES_REASON =
+  'Inline policies (PutRolePolicy / ListRolePolicies / GetRolePolicy / DeleteRolePolicy) are not whitelisted in LocalDeck yet, so inline policies cannot be read or written here.';
 
 /**
  * One IAM role: Permissions, Trust relationships (editable) and Tags. The
@@ -87,13 +93,19 @@ export function RoleDetailPage({ descriptor }: ServicePageProps): ReactElement {
     <>
       <ResourceDetailPage
         title={roleName}
-        description={role === null ? undefined : <Box variant="code">{role.arn}</Box>}
+        description={
+          role === null ? undefined : role.arn === undefined ? (
+            <Box color="text-body-secondary">ARN not reported</Box>
+          ) : (
+            <Box variant="code">{role.arn}</Box>
+          )
+        }
         breadcrumbs={[
           { text: descriptor.displayName, href: serviceConsolePath(descriptor.id) },
           { text: 'Roles', href: `${serviceConsolePath(descriptor.id)}/roles` },
           { text: roleName },
         ]}
-        loading={loading}
+        loading={loading && role === null}
         error={error}
         onRetry={() => {
           void load();
@@ -102,11 +114,18 @@ export function RoleDetailPage({ descriptor }: ServicePageProps): ReactElement {
           <ButtonDropdown
             ariaLabel="Role actions"
             items={[
-              { id: 'copy-arn', text: 'Copy ARN' },
+              {
+                id: 'copy-arn',
+                text: 'Copy ARN',
+                disabled: role?.arn === undefined,
+                ...(role?.arn === undefined
+                  ? { disabledReason: 'LocalStack did not report an ARN for this role.' }
+                  : {}),
+              },
               { id: 'delete', text: 'Delete role' },
             ]}
             onItemClick={({ detail }) => {
-              if (detail.id === 'copy-arn' && role !== null) {
+              if (detail.id === 'copy-arn' && role?.arn !== undefined) {
                 void navigator.clipboard?.writeText(role.arn);
               }
               if (detail.id === 'delete') {
@@ -122,12 +141,24 @@ export function RoleDetailPage({ descriptor }: ServicePageProps): ReactElement {
           {
             id: 'permissions',
             label: 'Permissions',
-            content: <AttachedPoliciesPanel entity="role" name={roleName} />,
+            content: (
+              <SpaceBetween size="l">
+                <AttachedPoliciesPanel entity="role" name={roleName} />
+                <PermissionsBoundaryNotice entity="role" name={roleName} />
+              </SpaceBetween>
+            ),
           },
           {
             id: 'trust-relationships',
             label: 'Trust relationships',
             content: <TrustPolicyPanel roleName={roleName} />,
+          },
+          {
+            id: 'inline-policies',
+            label: 'Inline policies',
+            disabled: true,
+            disabledReason: INLINE_POLICIES_REASON,
+            content: null,
           },
           {
             id: 'tags',

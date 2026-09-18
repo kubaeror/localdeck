@@ -3,12 +3,12 @@ import type { Paginated } from '@localdeck/shared';
 import Button from '@cloudscape-design/components/button';
 import ButtonDropdown from '@cloudscape-design/components/button-dropdown';
 import type { TableProps } from '@cloudscape-design/components/table';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useState, type ReactElement } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiClientError } from '../lib/apiClient';
-import { ResourceListPage } from './ResourceListPage';
+import { ResourceListPage, type ResourceListVisibleContentPreference } from './ResourceListPage';
 
 interface Row {
   id: string;
@@ -31,10 +31,25 @@ interface HarnessProps {
   rowActions?: (row: Row) => ReactElement;
   bulkActions?: (selected: readonly Row[]) => ReactElement;
   headerActions?: ReactElement;
+  filterExtras?: ReactElement;
+  reloadToken?: number;
+  preferencesId?: string;
+  pageSizeOptions?: readonly { value: number; label: string }[];
+  visibleContentPreference?: ResourceListVisibleContentPreference;
 }
 
 /** Owns the controlled filter text the way a service module would. */
-function Harness({ fetcher, rowActions, bulkActions, headerActions }: HarnessProps): ReactElement {
+function Harness({
+  fetcher,
+  rowActions,
+  bulkActions,
+  headerActions,
+  filterExtras,
+  reloadToken,
+  preferencesId,
+  pageSizeOptions,
+  visibleContentPreference,
+}: HarnessProps): ReactElement {
   const [text, setText] = useState('');
   return (
     <MemoryRouter>
@@ -49,6 +64,11 @@ function Harness({ fetcher, rowActions, bulkActions, headerActions }: HarnessPro
         {...(rowActions === undefined ? {} : { rowActions })}
         {...(bulkActions === undefined ? {} : { bulkActions })}
         {...(headerActions === undefined ? {} : { headerActions })}
+        {...(filterExtras === undefined ? {} : { filterExtras })}
+        {...(reloadToken === undefined ? {} : { reloadToken })}
+        {...(preferencesId === undefined ? {} : { preferencesId })}
+        {...(pageSizeOptions === undefined ? {} : { pageSizeOptions })}
+        {...(visibleContentPreference === undefined ? {} : { visibleContentPreference })}
       />
     </MemoryRouter>
   );
@@ -56,6 +76,15 @@ function Harness({ fetcher, rowActions, bulkActions, headerActions }: HarnessPro
 
 function singlePage(items: readonly Row[] = ROWS) {
   return vi.fn(async (): Promise<Paginated<Row>> => ({ items }));
+}
+
+/** A promise whose settlement the test controls. */
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve: (value: T) => void = () => undefined;
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
 }
 
 describe('ResourceListPage', () => {
@@ -199,5 +228,149 @@ describe('ResourceListPage', () => {
     unmount();
 
     expect(captured?.aborted).toBe(true);
+  });
+
+  it('renders headerActions once, in the page header', async () => {
+    render(
+      <Harness
+        fetcher={singlePage()}
+        headerActions={<Button variant="primary">Create bucket</Button>}
+      />,
+    );
+    await screen.findByText('bucket-a');
+
+    expect(screen.getAllByRole('button', { name: 'Create bucket' })).toHaveLength(1);
+  });
+
+  it('renders filterExtras next to the filter', async () => {
+    render(<Harness fetcher={singlePage()} filterExtras={<Button>Show deleted</Button>} />);
+    await screen.findByText('bucket-a');
+
+    expect(screen.getByRole('button', { name: 'Show deleted' })).toBeDefined();
+  });
+
+  it('silently refreshes on reloadToken changes and keeps the selection', async () => {
+    const fetcher = vi.fn(async (): Promise<Paginated<Row>> => ({ items: ROWS }));
+    const bulkActions = (selected: readonly Row[]): ReactElement => (
+      <Button>Delete {selected.length}</Button>
+    );
+
+    const { rerender } = render(
+      <Harness fetcher={fetcher} bulkActions={bulkActions} reloadToken={0} />,
+    );
+    await screen.findByText('bucket-a');
+
+    const checkboxes = screen.getAllByRole('checkbox');
+    fireEvent.click(checkboxes[1] as HTMLElement);
+    expect(await screen.findByRole('button', { name: 'Delete 1' })).toBeDefined();
+
+    rerender(<Harness fetcher={fetcher} bulkActions={bulkActions} reloadToken={1} />);
+
+    await waitFor(() => {
+      expect(fetcher).toHaveBeenCalledTimes(2);
+    });
+    // The refresh swapped the rows in place: selection survived and the table
+    // never went back to its full loading state.
+    expect(screen.getByRole('button', { name: 'Delete 1' })).toBeDefined();
+    expect(screen.queryByText('Loading buckets')).toBeNull();
+  });
+
+  it('lets the newest response win when an older one resolves later', async () => {
+    const first = deferred<Paginated<Row>>();
+    const second = deferred<Paginated<Row>>();
+    const fetcher = vi
+      .fn<() => Promise<Paginated<Row>>>()
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+
+    const { rerender } = render(<Harness fetcher={fetcher} reloadToken={0} />);
+    rerender(<Harness fetcher={fetcher} reloadToken={1} />);
+    await waitFor(() => {
+      expect(fetcher).toHaveBeenCalledTimes(2);
+    });
+
+    await act(async () => {
+      second.resolve({ items: [{ id: 'new', name: 'newest', size: 1 }] });
+    });
+    expect(await screen.findByText('newest')).toBeDefined();
+
+    await act(async () => {
+      first.resolve({ items: [{ id: 'old', name: 'stale', size: 2 }] });
+    });
+    await waitFor(() => {
+      expect(screen.queryByText('stale')).toBeNull();
+    });
+    expect(screen.getByText('newest')).toBeDefined();
+  });
+
+  it('renders CollectionPreferences when a preferencesId is provided', async () => {
+    render(
+      <Harness
+        fetcher={singlePage()}
+        preferencesId="test-buckets"
+        pageSizeOptions={[
+          { value: 10, label: '10 buckets' },
+          { value: 25, label: '25 buckets' },
+        ]}
+      />,
+    );
+    await screen.findByText('bucket-a');
+
+    expect(screen.getByRole('button', { name: 'Preferences' })).toBeDefined();
+  });
+
+  it('persists confirmed page-size preferences under the preferences id', async () => {
+    window.localStorage.removeItem('localdeck.list-preferences.test-buckets');
+    render(
+      <Harness
+        fetcher={singlePage()}
+        preferencesId="test-buckets"
+        pageSizeOptions={[
+          { value: 10, label: '10 buckets' },
+          { value: 25, label: '25 buckets' },
+        ]}
+      />,
+    );
+    await screen.findByText('bucket-a');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Preferences' }));
+    fireEvent.click(await screen.findByText('25 buckets'));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+
+    await waitFor(() => {
+      expect(
+        JSON.parse(window.localStorage.getItem('localdeck.list-preferences.test-buckets') ?? '{}'),
+      ).toEqual({ pageSize: 25 });
+    });
+    window.localStorage.removeItem('localdeck.list-preferences.test-buckets');
+  });
+
+  it('accepts the flat visible-content shorthand and hides unselected columns', async () => {
+    window.localStorage.setItem(
+      'localdeck.list-preferences.test-columns',
+      JSON.stringify({ visibleContent: ['name'] }),
+    );
+    render(
+      <Harness
+        fetcher={singlePage()}
+        preferencesId="test-columns"
+        pageSizeOptions={[{ value: 10, label: '10 buckets' }]}
+        visibleContentPreference={{
+          title: 'Visible columns',
+          options: [
+            { id: 'name', label: 'Name' },
+            { id: 'size', label: 'Size' },
+          ],
+        }}
+      />,
+    );
+    await screen.findByText('bucket-a');
+
+    // The stored visible-content preference hides the Size column...
+    expect(screen.queryByRole('columnheader', { name: /Size/ })).toBeNull();
+    expect(screen.getByRole('columnheader', { name: /Name/ })).toBeDefined();
+    // ...and the flat shorthand still renders the preferences dialog.
+    expect(screen.getByRole('button', { name: 'Preferences' })).toBeDefined();
+    window.localStorage.removeItem('localdeck.list-preferences.test-columns');
   });
 });

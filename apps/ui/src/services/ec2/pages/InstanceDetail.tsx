@@ -1,17 +1,15 @@
-import type { ApiError } from '@localdeck/shared';
 import Box from '@cloudscape-design/components/box';
 import ButtonDropdown from '@cloudscape-design/components/button-dropdown';
 import Container from '@cloudscape-design/components/container';
 import Header from '@cloudscape-design/components/header';
 import KeyValuePairs from '@cloudscape-design/components/key-value-pairs';
 import SpaceBetween from '@cloudscape-design/components/space-between';
-import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
+import { useCallback, useState, type ReactElement } from 'react';
 import { useParams } from 'react-router-dom';
 import { ResourceDetailPage } from '../../../components/ResourceDetailPage';
 import { StatusBadge } from '../../../components/StatusBadge';
 import { useFlashbar } from '../../../hooks/useFlashbar';
 import { usePolling } from '../../../hooks/usePolling';
-import { toApiError } from '../../../lib/apiClient';
 import { formatDateTime } from '../../../lib/format';
 import { serviceConsolePath } from '../../paths';
 import type { ServicePageProps } from '../../types';
@@ -23,11 +21,18 @@ import {
   startInstances,
   stopInstances,
   terminateInstances,
-  type Ec2Instance,
 } from '../api';
 import { toFriendlyEc2Error } from '../errors';
+import { useEc2Resource, useTransitionTracking } from '../hooks';
+import {
+  canRunInstanceAction,
+  INSTANCE_ACTION_LABELS,
+  INSTANCE_ACTION_PROGRESS,
+  INSTANCE_ACTIONS,
+  type InstanceAction,
+} from '../instanceActions';
 import { EmulatedBadge } from '../components/EmulatedBadge';
-import { InstanceActionModal, type InstanceAction } from '../components/InstanceActionModal';
+import { InstanceActionModal } from '../components/InstanceActionModal';
 import { InstanceSecurityTab } from '../components/InstanceSecurityTab';
 import { InstanceStorageTab } from '../components/InstanceStorageTab';
 import { ResourceTagsTab } from '../components/ResourceTagsTab';
@@ -35,86 +40,32 @@ import { ResourceTagsTab } from '../components/ResourceTagsTab';
 /** How often the detail page reloads while the instance is still settling. */
 const POLL_INTERVAL_MS = 10_000;
 
-function canRun(action: InstanceAction, instance: Ec2Instance): boolean {
-  switch (action) {
-    case 'start':
-      return instance.state === 'stopped';
-    case 'stop':
-    case 'reboot':
-      return instance.state === 'running';
-    case 'terminate':
-      return instance.state !== 'terminated' && instance.state !== 'shutting-down';
-  }
-}
-
-const ACTION_LABELS: Readonly<Record<InstanceAction, string>> = {
-  start: 'Start instance',
-  stop: 'Stop instance',
-  reboot: 'Reboot instance',
-  terminate: 'Terminate instance',
-};
-
-/** In-flight wording for the flashbar ("Instance stopping"). */
-const ACTION_PROGRESS: Readonly<Record<InstanceAction, string>> = {
-  start: 'starting',
-  stop: 'stopping',
-  reboot: 'rebooting',
-  terminate: 'terminating',
-};
-
 /**
  * One EC2 instance: Details / Security / Storage / Tags, with the instance's
  * lifecycle actions in the header. The page polls every 10 seconds while the
- * instance is pending, stopping or shutting down, so the state transition the
- * launch wizard started shows up without a manual refresh. The Emulated badge
- * in the header stays visible on every tab.
+ * instance is pending, stopping or shutting down, and for a short window after
+ * an action, so the state transition shows up without a manual refresh. The
+ * tabs stay mounted while a background refresh runs: a poll never replaces the
+ * page with a full-page spinner. The Emulated badge in the header stays visible
+ * on every tab.
  */
 export function InstanceDetailPage({ descriptor }: ServicePageProps): ReactElement {
   const { instanceId = '' } = useParams();
   const flashbar = useFlashbar();
 
-  const [instance, setInstance] = useState<Ec2Instance | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<ApiError | null>(null);
+  const loader = useCallback(() => getInstance(instanceId), [instanceId]);
+  const { data: instance, loading, refreshing, error, reload } = useEc2Resource(loader);
+
   const [action, setAction] = useState<InstanceAction | null>(null);
   const [acting, setActing] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const requestId = useRef(0);
 
-  const load = useCallback(async (): Promise<void> => {
-    const id = requestId.current + 1;
-    requestId.current = id;
-    setLoading(true);
-    try {
-      const result = await getInstance(instanceId);
-      if (requestId.current !== id) return;
-      setInstance(result);
-      setError(null);
-    } catch (caught) {
-      if (requestId.current !== id) return;
-      setInstance(null);
-      setError(toApiError(caught));
-    } finally {
-      if (requestId.current === id) setLoading(false);
-    }
-  }, [instanceId]);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- instance lookup for the route
-    void load();
-    return () => {
-      requestId.current += 1;
-    };
-  }, [load]);
-
+  const { forcedTracking, trackTransition } = useTransitionTracking();
   const transitional = instance !== null && isTransitionalInstanceState(instance.state);
-
-  usePolling(transitional, POLL_INTERVAL_MS, () => {
-    void load();
-  });
+  usePolling(transitional || forcedTracking, POLL_INTERVAL_MS, () => reload());
 
   const confirmAction = async (): Promise<void> => {
-    if (action === null || instance === null) return;
+    if (acting || action === null || instance === null) return;
     setActing(true);
     setActionError(null);
     try {
@@ -123,17 +74,20 @@ export function InstanceDetailPage({ descriptor }: ServicePageProps): ReactEleme
       if (action === 'reboot') await rebootInstances([instance.instanceId]);
       if (action === 'terminate') await terminateInstances([instance.instanceId]);
 
+      // The request being accepted is not the transition finishing: report it
+      // as information and let the polling window show the state settle.
       flashbar.notify({
-        type: 'success',
-        header: `Instance ${ACTION_PROGRESS[action]}`,
-        content: instance.instanceId,
+        type: 'info',
+        header: `Instance ${INSTANCE_ACTION_PROGRESS[action]} requested`,
+        content: `${instance.instanceId} — the page refreshes automatically while the state changes.`,
       });
+      trackTransition();
       setAction(null);
     } catch (caught) {
       setActionError(toFriendlyEc2Error(caught).message);
     } finally {
       setActing(false);
-      void load();
+      void reload();
     }
   };
 
@@ -162,10 +116,18 @@ export function InstanceDetailPage({ descriptor }: ServicePageProps): ReactEleme
           { text: 'Instances', href: listingPath },
           { text: instance === null ? instanceId : instanceName(instance) },
         ]}
-        loading={loading}
+        loading={loading || refreshing}
+        keepTabsMounted={instance !== null}
+        notifications={
+          transitional || forcedTracking ? (
+            <Box color="text-body-secondary">
+              Refreshing automatically every 10 seconds while the instance state settles.
+            </Box>
+          ) : undefined
+        }
         error={error}
         onRetry={() => {
-          void load();
+          void reload();
         }}
         status={
           instance === null ? undefined : (
@@ -179,12 +141,13 @@ export function InstanceDetailPage({ descriptor }: ServicePageProps): ReactEleme
           instance === null ? undefined : (
             <ButtonDropdown
               ariaLabel="Instance actions"
-              items={(['start', 'stop', 'reboot', 'terminate'] as const).map((candidate) => ({
+              items={INSTANCE_ACTIONS.map((candidate) => ({
                 id: candidate,
-                text: ACTION_LABELS[candidate],
-                disabled: !canRun(candidate, instance),
+                text: INSTANCE_ACTION_LABELS[candidate],
+                disabled: !canRunInstanceAction(candidate, instance),
               }))}
               onItemClick={({ detail }) => {
+                if (acting) return;
                 setActionError(null);
                 setAction(detail.id as InstanceAction);
               }}
@@ -255,12 +218,18 @@ export function InstanceDetailPage({ descriptor }: ServicePageProps): ReactEleme
                 {
                   id: 'security',
                   label: 'Security',
-                  content: <InstanceSecurityTab instance={instance} />,
+                  content: (
+                    <InstanceSecurityTab
+                      instanceId={instance.instanceId}
+                      securityGroupIds={instance.securityGroups.map((group) => group.id)}
+                      serviceId={descriptor.id}
+                    />
+                  ),
                 },
                 {
                   id: 'storage',
                   label: 'Storage',
-                  content: <InstanceStorageTab instance={instance} />,
+                  content: <InstanceStorageTab instance={instance} serviceId={descriptor.id} />,
                 },
                 {
                   id: 'tags',
@@ -272,7 +241,7 @@ export function InstanceDetailPage({ descriptor }: ServicePageProps): ReactEleme
                       tags={instance.tags}
                       description="Tags applied to the instance. Saving applies only the changed keys through CreateTags and DeleteTags."
                       onSaved={() => {
-                        void load();
+                        void reload();
                       }}
                     />
                   ),

@@ -1,5 +1,28 @@
 import type { LocalStackServiceStatus } from '@localdeck/shared';
 
+/**
+ * Formatters are hoisted: `Intl.DateTimeFormat` construction is expensive and
+ * these are used once per table cell, so a fresh instance per call showed up
+ * while profiling large lists.
+ */
+const DATE_TIME_DAY_FORMAT = new Intl.DateTimeFormat('en-US', {
+  month: 'long',
+  day: 'numeric',
+  year: 'numeric',
+  timeZone: 'UTC',
+});
+const DATE_TIME_TIME_FORMAT = new Intl.DateTimeFormat('en-US', {
+  hour: 'numeric',
+  minute: '2-digit',
+  second: '2-digit',
+  hour12: true,
+  timeZone: 'UTC',
+});
+const DATE_FORMAT = new Intl.DateTimeFormat('en-CA', {
+  dateStyle: 'medium',
+  timeZone: 'UTC',
+});
+
 /** "142 ms" / "1.4 s" */
 export function formatLatency(milliseconds: number): string {
   if (!Number.isFinite(milliseconds) || milliseconds < 0) return 'unknown';
@@ -32,28 +55,15 @@ export function formatDateTime(value: string | Date | undefined): string {
   if (value === undefined) return '—';
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return '—';
-  const day = new Intl.DateTimeFormat('en-US', {
-    month: 'long',
-    day: 'numeric',
-    year: 'numeric',
-    timeZone: 'UTC',
-  }).format(date);
-  const time = new Intl.DateTimeFormat('en-US', {
-    hour: 'numeric',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: true,
-    timeZone: 'UTC',
-  }).format(date);
-  return `${day}, ${time} (UTC)`;
+  return `${DATE_TIME_DAY_FORMAT.format(date)}, ${DATE_TIME_TIME_FORMAT.format(date)} (UTC)`;
 }
 
-/** "2026-01-02" — compact date for narrow table columns. */
+/** "Feb 3, 2026" — compact date for narrow table columns. */
 export function formatDate(value: string | Date | undefined): string {
   if (value === undefined) return '—';
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return '—';
-  return new Intl.DateTimeFormat('en-CA', { dateStyle: 'medium', timeZone: 'UTC' }).format(date);
+  return DATE_FORMAT.format(date);
 }
 
 /** "just now" / "42s ago" / "3m ago" / "2h ago" */

@@ -9,24 +9,28 @@ import Header from '@cloudscape-design/components/header';
 import Input from '@cloudscape-design/components/input';
 import KeyValuePairs from '@cloudscape-design/components/key-value-pairs';
 import Modal from '@cloudscape-design/components/modal';
+import Multiselect from '@cloudscape-design/components/multiselect';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import Toggle from '@cloudscape-design/components/toggle';
-import { useState, type ReactElement } from 'react';
+import { useEffect, useState, type ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { CreateWizard } from '../../../components/CreateWizard';
-import { TagsEditor } from '../../../components/TagsEditor';
+import { TagsEditor, validateTags } from '../../../components/TagsEditor';
 import { useFlashbar } from '../../../hooks/useFlashbar';
+import { toApiError } from '../../../lib/apiClient';
 import { serviceConsolePath } from '../../paths';
 import type { ServicePageProps } from '../../types';
-import { createAccessKey, createUser, type CreatedAccessKey } from '../api';
+import {
+  addUserToGroup,
+  createAccessKey,
+  createUser,
+  listAllGroups,
+  normalizeTags,
+  type CreatedAccessKey,
+} from '../api';
 import { toFriendlyIamError } from '../errors';
 import { IAM_USER_NAME_RULES, validateUserName } from '../naming';
 import { AccessKeySecret } from '../components/AccessKeySecret';
-
-/** Drops tag rows the user added but never filled in. */
-function meaningfulTags(tags: readonly AwsTag[]): readonly AwsTag[] {
-  return tags.filter((tag) => tag.Key.trim().length > 0 || tag.Value.trim().length > 0);
-}
 
 /**
  * The console's create-user wizard: name, programmatic access and tags. When
@@ -39,12 +43,36 @@ export function UserCreatePage({ descriptor }: ServicePageProps): ReactElement {
   const [userName, setUserName] = useState('');
   const [programmaticAccess, setProgrammaticAccess] = useState(true);
   const [tags, setTags] = useState<readonly AwsTag[]>([]);
+  const [groups, setGroups] = useState<readonly string[]>([]);
+  const [groupNames, setGroupNames] = useState<readonly string[]>([]);
+  const [groupsError, setGroupsError] = useState<string | null>(null);
   const [activeStepIndex, setActiveStepIndex] = useState(0);
   const [nameError, setNameError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
   const [credentials, setCredentials] = useState<CreatedAccessKey | null>(null);
   const [createdUserName, setCreatedUserName] = useState('');
+
+  const tagProblems = validateTags(tags);
+  const tagsProblem =
+    tagProblems.length === 0 ? null : tagProblems.map((problem) => problem.message).join(' ');
+  const normalizedTags = normalizeTags(tags);
+
+  useEffect(() => {
+    let cancelled = false;
+    listAllGroups()
+      .then((result) => {
+        if (cancelled) return;
+        setGroupNames(result.map((group) => group.groupName));
+        setGroupsError(null);
+      })
+      .catch((caught: unknown) => {
+        if (!cancelled) setGroupsError(toApiError(caught).message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const userPath = `${serviceConsolePath(descriptor.id)}/users/${encodeURIComponent(createdUserName)}`;
 
@@ -57,7 +85,7 @@ export function UserCreatePage({ descriptor }: ServicePageProps): ReactElement {
     setError(null);
     setNameError(null);
     try {
-      await createUser({ userName, tags: meaningfulTags(tags) });
+      await createUser({ userName, tags: normalizedTags });
     } catch (caught) {
       const friendly = toFriendlyIamError(caught, 'userName');
       if (friendly.field === 'userName') {
@@ -71,6 +99,20 @@ export function UserCreatePage({ descriptor }: ServicePageProps): ReactElement {
     }
 
     flashbar.notify({ type: 'success', header: 'User created', content: userName });
+
+    // Group memberships are best-effort after the user exists: a failed AddUserToGroup
+    // names the group instead of hiding the created user.
+    for (const groupName of groups) {
+      try {
+        await addUserToGroup({ userName, groupName });
+      } catch (caught) {
+        flashbar.notify({
+          type: 'error',
+          header: `User created, but could not join ${groupName}`,
+          content: toFriendlyIamError(caught).message,
+        });
+      }
+    }
 
     if (!programmaticAccess) {
       setSubmitting(false);
@@ -145,6 +187,35 @@ export function UserCreatePage({ descriptor }: ServicePageProps): ReactElement {
     </Container>
   );
 
+  const groupsStep = (
+    <Container header={<Header variant="h2">Groups</Header>}>
+      <SpaceBetween size="m">
+        <Alert type="info">
+          Optional. Group memberships grant the policies attached to those groups. You can change
+          them later from the user&apos;s Groups tab.
+        </Alert>
+        {groupsError === null ? null : <Alert type="warning">{groupsError}</Alert>}
+        <Multiselect
+          selectedOptions={groups.map((groupName) => ({ label: groupName, value: groupName }))}
+          options={groupNames.map((groupName) => ({ label: groupName, value: groupName }))}
+          filteringType="auto"
+          filteringPlaceholder="Find groups"
+          placeholder={groupNames.length === 0 ? 'No groups exist yet' : 'Choose groups'}
+          tokenLimit={8}
+          disabled={submitting}
+          ariaLabel="Groups"
+          onChange={({ detail }) => {
+            setGroups(
+              detail.selectedOptions
+                .map((option) => option.value ?? '')
+                .filter((value) => value.length > 0),
+            );
+          }}
+        />
+      </SpaceBetween>
+    </Container>
+  );
+
   const tagsStep = (
     <Container header={<Header variant="h2">Tags</Header>}>
       <TagsEditor
@@ -169,20 +240,23 @@ export function UserCreatePage({ descriptor }: ServicePageProps): ReactElement {
                 : 'No programmatic access',
             },
             {
+              label: 'Groups',
+              value: groups.length === 0 ? 'None' : groups.join(', '),
+            },
+            {
               label: 'Tags',
               value:
-                meaningfulTags(tags).length === 0
+                normalizedTags.length === 0
                   ? 'No tags'
-                  : meaningfulTags(tags)
-                      .map((tag) => `${tag.Key}=${tag.Value}`)
-                      .join(', '),
+                  : normalizedTags.map((tag) => `${tag.Key}=${tag.Value}`).join(', '),
             },
           ]}
         />
         <Alert type="info" header="What happens next">
           LocalDeck creates the user
-          {programmaticAccess ? ', then creates an access key pair and shows the secret once' : ''}
-          {meaningfulTags(tags).length > 0 ? ', with the tags applied in the same call' : ''}.
+          {groups.length > 0 ? `, adds them to ${groups.length} group(s)` : ''}
+          {programmaticAccess ? ', creates an access key pair and shows the secret once' : ''}
+          {normalizedTags.length > 0 ? ', with the tags applied in the same call' : ''}.
         </Alert>
       </SpaceBetween>
     </Container>
@@ -214,9 +288,17 @@ export function UserCreatePage({ descriptor }: ServicePageProps): ReactElement {
             content: accessStep,
           },
           {
+            id: 'groups',
+            title: 'Groups',
+            description: 'Optional. Add the user to groups.',
+            isOptional: true,
+            content: groupsStep,
+          },
+          {
             id: 'tags',
             title: 'Tags',
             isOptional: true,
+            validate: () => tagsProblem,
             content: tagsStep,
           },
           {
@@ -229,7 +311,8 @@ export function UserCreatePage({ descriptor }: ServicePageProps): ReactElement {
           { label: 'Service', value: descriptor.displayName },
           { label: 'User name', value: userName.length === 0 ? '—' : userName },
           { label: 'Programmatic access', value: programmaticAccess ? 'Yes' : 'No' },
-          { label: 'Tags', value: `${meaningfulTags(tags).length}` },
+          { label: 'Groups', value: `${groups.length}` },
+          { label: 'Tags', value: `${normalizedTags.length}` },
         ]}
         summaryTitle="User summary"
         submitLabel="Create user"

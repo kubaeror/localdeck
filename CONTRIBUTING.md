@@ -7,8 +7,10 @@ clean.
 
 ## Prerequisites
 
-- **Node.js 22** (the CI version) or Node 20.11+ for local work.
-- **pnpm 10** — `corepack enable pnpm`.
+- **Node.js 22** (the CI version) or Node 20.19+ for local work (`.nvmrc`
+  pins 22 for version managers).
+- **pnpm 10** — `corepack enable pnpm`. `.npmrc` sets `engine-strict=true`, so
+  an older Node fails the install instead of failing later in Vite.
 - **A LocalStack instance you manage yourself.** LocalDeck never starts, stops,
   reconfigures or wipes LocalStack; the smoke tests and the live verification
   scripts simply talk to the endpoint you point them at.
@@ -47,9 +49,12 @@ pnpm verify:repo        # disclaimer, MIT license, no secret material
 pnpm gen:parity:check   # README parity table is current
 ```
 
-CI (`.github/workflows/ci.yml`) runs exactly these on Node 22 and then a smoke
-job that spins up a **throwaway LocalStack service container** and drives the
-console with Playwright. That container is the single allowed exception to
+CI (`.github/workflows/ci.yml`) runs exactly these on Node 22, builds both
+Docker images without pushing them, and then runs two browser jobs: a smoke job
+that spins up a **throwaway LocalStack service container** and drives the
+console through `vite preview`, and a container job that runs the shipped
+`docker compose` stack (nginx + api) and uploads an S3 object larger than
+nginx's 1 MiB default. That container is the single allowed exception to
 "LocalDeck never manages LocalStack": it exists only inside the workflow.
 
 ## End-to-end smoke tests
@@ -71,13 +76,28 @@ asserts:
 - `GET /api/health` answers 200 against the emulator and the ui index loads;
 - a bucket is created through the S3 wizard, its detail page opens, and the
   bucket is deleted again;
+- an object uploads and downloads through the S3 proxy routes;
+- an EC2 instance is launched and terminated through the dispatcher;
+- unknown services, non-whitelisted operations, missing SDK packages and an
+  unreachable LocalStack answer the documented 404/400/501/503 contracts;
 - EKS cluster creation starts through the wizard when the emulator reports EKS
   (Ultimate-plan feature). On an emulator without EKS the test asserts the
   console's honest "not enabled" page instead and annotates the run — it never
   fakes a cluster.
 
+The shipped containers have their own minimal project:
+
+```bash
+docker compose up --build            # nginx serves the bundle, api proxies /api
+pnpm test:e2e:container              # uploads >1 MiB through nginx
+```
+
 Useful environment variables: `LOCALSTACK_ENDPOINT`, `E2E_UI_PORT`,
-`E2E_API_PORT`. CI uploads `e2e/playwright-report/` when the smoke job fails.
+`E2E_API_PORT`, `E2E_CONTAINER_UI_PORT`. The specs record every resource they
+create under `e2e/test-results/e2e-cleanup.jsonl`; a global teardown sweeps
+anything left behind (only names with the `localdeck-e2e` prefix and instances
+tagged `localdeck:e2e` are touched). CI uploads `e2e/playwright-report/` and
+`e2e/playwright-report-container/` when a browser job fails.
 
 ### Running the smoke job with licensed LocalStack features
 
@@ -97,9 +117,14 @@ them, run the dev stack or `docker compose up`, then:
 
 ```bash
 LOCALDECK_SCREENSHOT_BASE_URL=http://localhost:5173 pnpm test:e2e:screens
+# or against the containers: LOCALDECK_SCREENSHOT_BASE_URL=http://localhost:8080
 ```
 
-The script creates and removes a demo bucket so the S3 pages show real data.
+The script creates and removes a demo bucket so the S3 pages show real data,
+and waits for each page's own locators (no fixed sleeps). CI runs the same
+script against the container stack and uploads the generated images as the
+`docs-screens` artifact, so a stale committed screenshot is visible in the PR
+without CI touching the working tree.
 
 ## Code rules
 

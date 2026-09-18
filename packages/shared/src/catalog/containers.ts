@@ -21,7 +21,11 @@ export const CONTAINER_SERVICES = [
     parityLevel: 'browser',
     summary: 'Container clusters, services and task definitions.',
     browser: {
-      list: { operation: 'ListClusters', resultPath: 'clusterArns' },
+      list: {
+        operation: 'ListClusters',
+        resultPath: 'clusterArns',
+        pagination: { requestField: 'nextToken', responseField: 'nextToken' },
+      },
       describe: { operation: 'DescribeClusters', idParam: 'clusters', idParamIsArray: true },
       delete: { operation: 'DeleteCluster', idParam: 'cluster' },
     },
@@ -47,6 +51,7 @@ export const CONTAINER_SERVICES = [
         operation: 'DescribeRepositories',
         resultPath: 'repositories',
         idField: 'repositoryName',
+        pagination: { requestField: 'nextToken', responseField: 'nextToken' },
       },
       describe: {
         operation: 'DescribeRepositories',

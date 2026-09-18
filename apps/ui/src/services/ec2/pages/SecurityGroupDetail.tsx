@@ -1,91 +1,71 @@
-import type { ApiError } from '@localdeck/shared';
 import Box from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
 import Container from '@cloudscape-design/components/container';
 import Header from '@cloudscape-design/components/header';
 import KeyValuePairs from '@cloudscape-design/components/key-value-pairs';
 import SpaceBetween from '@cloudscape-design/components/space-between';
-import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
+import { useCallback, useState, type ReactElement } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { DeleteConfirmModal } from '../../../components/DeleteConfirmModal';
 import { InfoTooltip } from '../../../components/InfoTooltip';
 import { ResourceDetailPage } from '../../../components/ResourceDetailPage';
 import { useFlashbar } from '../../../hooks/useFlashbar';
-import { toApiError } from '../../../lib/apiClient';
 import { serviceConsolePath } from '../../paths';
 import type { ServicePageProps } from '../../types';
 import {
   deleteSecurityGroup,
   getSecurityGroup,
   revokeSecurityGroupIngress,
-  type Ec2SecurityGroup,
   type Ec2SecurityGroupRule,
   type SecurityGroupIngressRule,
 } from '../api';
 import { toFriendlyEc2Error } from '../errors';
+import { useEc2Resource } from '../hooks';
 import { AddIngressRuleModal } from '../components/AddIngressRuleModal';
 import { EmulatedBadge } from '../components/EmulatedBadge';
 import { ResourceTagsTab } from '../components/ResourceTagsTab';
 import { SecurityGroupRulesTable } from '../components/SecurityGroupRulesTable';
 
-/** Rebuilds the API input for revoking exactly one stored rule. */
+/**
+ * Rebuilds the API input for revoking exactly one stored rule. Every member is
+ * carried over — security-group references, prefix lists and the description —
+ * so a revoke cannot match a broader rule than the one the user clicked.
+ */
 function toRevokeInput(rule: Ec2SecurityGroupRule): SecurityGroupIngressRule {
   return {
     protocol: rule.protocol,
     ...(rule.fromPort === undefined ? {} : { fromPort: rule.fromPort }),
     ...(rule.toPort === undefined ? {} : { toPort: rule.toPort }),
+    ...(rule.description === undefined ? {} : { description: rule.description }),
     ...(rule.ipv4Ranges.length === 0 ? {} : { cidrIpv4: rule.ipv4Ranges }),
     ...(rule.ipv6Ranges.length === 0 ? {} : { cidrIpv6: rule.ipv6Ranges }),
+    ...(rule.prefixListIds.length === 0 ? {} : { prefixListIds: rule.prefixListIds }),
+    ...(rule.referencedGroups.length === 0 ? {} : { referencedGroups: rule.referencedGroups }),
   };
 }
 
 /**
  * One security group: inbound and outbound rules with add/revoke actions, plus
  * details and tags. The default group of a VPC cannot be deleted, so its delete
- * action is disabled with an explanation.
+ * action is disabled with an explanation. Outbound rules are read-only in this
+ * module, so the add action is rendered disabled with the reason.
  */
 export function SecurityGroupDetailPage({ descriptor }: ServicePageProps): ReactElement {
   const { groupId = '' } = useParams();
   const navigate = useNavigate();
   const flashbar = useFlashbar();
 
-  const [group, setGroup] = useState<Ec2SecurityGroup | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<ApiError | null>(null);
+  const loader = useCallback(() => getSecurityGroup(groupId), [groupId]);
+  const { data: group, loading, error, reload } = useEc2Resource(loader);
+
   const [addVisible, setAddVisible] = useState(false);
   const [revoking, setRevoking] = useState(false);
   const [deleteVisible, setDeleteVisible] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  const requestId = useRef(0);
-
-  const load = useCallback(async (): Promise<void> => {
-    const id = requestId.current + 1;
-    requestId.current = id;
-    setLoading(true);
-    try {
-      const result = await getSecurityGroup(groupId);
-      if (requestId.current !== id) return;
-      setGroup(result);
-      setError(null);
-    } catch (caught) {
-      if (requestId.current !== id) return;
-      setGroup(null);
-      setError(toApiError(caught));
-    } finally {
-      if (requestId.current === id) setLoading(false);
-    }
-  }, [groupId]);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- security group lookup for the route
-    void load();
-    return () => {
-      requestId.current += 1;
-    };
-  }, [load]);
 
   const revoke = async (rule: Ec2SecurityGroupRule): Promise<void> => {
+    if (revoking) return;
     setRevoking(true);
     try {
       await revokeSecurityGroupIngress({ groupId, rule: toRevokeInput(rule) });
@@ -94,7 +74,7 @@ export function SecurityGroupDetailPage({ descriptor }: ServicePageProps): React
         header: 'Inbound rule revoked',
         content: `${rule.protocol} ${rule.fromPort ?? ''}-${rule.toPort ?? ''}`.trim(),
       });
-      await load();
+      await reload();
     } catch (caught) {
       flashbar.notify({
         type: 'error',
@@ -107,6 +87,7 @@ export function SecurityGroupDetailPage({ descriptor }: ServicePageProps): React
   };
 
   const confirmDelete = async (): Promise<void> => {
+    if (deleting) return;
     setDeleting(true);
     setDeleteError(null);
     try {
@@ -166,7 +147,7 @@ export function SecurityGroupDetailPage({ descriptor }: ServicePageProps): React
         loading={loading}
         error={error}
         onRetry={() => {
-          void load();
+          void reload();
         }}
         status={
           group === null ? undefined : (
@@ -226,6 +207,11 @@ export function SecurityGroupDetailPage({ descriptor }: ServicePageProps): React
                         <Header
                           variant="h2"
                           description="Rules that allow traffic from the group's resources to travel out. LocalStack creates an allow-all rule by default."
+                          actions={
+                            <InfoTooltip content="This LocalDeck module manages inbound rules only. Outbound rules are shown read-only; AuthorizeSecurityGroupEgress is not part of the EC2 whitelist.">
+                              <Button disabled>Add outbound rule</Button>
+                            </InfoTooltip>
+                          }
                         >
                           Outbound rules
                         </Header>
@@ -270,7 +256,7 @@ export function SecurityGroupDetailPage({ descriptor }: ServicePageProps): React
                       tags={group.tags}
                       description="Tags applied to the security group. Saving applies only the changed keys through CreateTags and DeleteTags."
                       onSaved={() => {
-                        void load();
+                        void reload();
                       }}
                     />
                   ),
@@ -283,13 +269,14 @@ export function SecurityGroupDetailPage({ descriptor }: ServicePageProps): React
         <AddIngressRuleModal
           groupId={groupId}
           groupName={group?.groupName ?? groupId}
+          {...(group?.vpcId === undefined ? {} : { vpcId: group.vpcId })}
           onDismiss={() => {
             setAddVisible(false);
           }}
           onAdded={() => {
             setAddVisible(false);
             flashbar.notify({ type: 'success', header: 'Inbound rule added', content: groupId });
-            void load();
+            void reload();
           }}
         />
       ) : null}

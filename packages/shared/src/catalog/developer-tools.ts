@@ -22,6 +22,7 @@ export const DEVELOPER_TOOLS_SERVICES = [
         operation: 'ListRepositories',
         resultPath: 'repositories',
         idField: 'repositoryName',
+        pagination: { requestField: 'nextToken', responseField: 'nextToken' },
       },
       describe: { operation: 'GetRepository', idParam: 'repositoryName' },
       delete: { operation: 'DeleteRepository', idParam: 'repositoryName' },
@@ -43,8 +44,19 @@ export const DEVELOPER_TOOLS_SERVICES = [
     parityLevel: 'browser',
     summary: 'Build projects, builds and build logs.',
     browser: {
-      list: { operation: 'ListProjects', resultPath: 'projects' },
-      describe: { operation: 'BatchGetProjects', idParam: 'names', idParamIsArray: true },
+      list: {
+        operation: 'ListProjects',
+        resultPath: 'projects',
+        pagination: { requestField: 'nextToken', responseField: 'nextToken' },
+      },
+      describe: {
+        operation: 'BatchGetProjects',
+        idParam: 'names',
+        idParamIsArray: true,
+        // BatchGetProjects returns { projects, projectsNotFound }; the detail
+        // page renders the single requested project.
+        resultItemField: 'projects',
+      },
       delete: { operation: 'DeleteProject', idParam: 'name' },
     },
   },
@@ -65,7 +77,11 @@ export const DEVELOPER_TOOLS_SERVICES = [
     parityLevel: 'browser',
     summary: 'Deployment applications, groups and revisions.',
     browser: {
-      list: { operation: 'ListApplications', resultPath: 'applications' },
+      list: {
+        operation: 'ListApplications',
+        resultPath: 'applications',
+        pagination: { requestField: 'nextToken', responseField: 'nextToken' },
+      },
       describe: { operation: 'GetApplication', idParam: 'applicationName' },
       delete: { operation: 'DeleteApplication', idParam: 'applicationName' },
     },
@@ -86,7 +102,12 @@ export const DEVELOPER_TOOLS_SERVICES = [
     parityLevel: 'browser',
     summary: 'Delivery pipelines, stages and executions.',
     browser: {
-      list: { operation: 'ListPipelines', resultPath: 'pipelines', idField: 'name' },
+      list: {
+        operation: 'ListPipelines',
+        resultPath: 'pipelines',
+        idField: 'name',
+        pagination: { requestField: 'nextToken', responseField: 'nextToken' },
+      },
       describe: { operation: 'GetPipeline', idParam: 'name' },
       delete: { operation: 'DeletePipeline', idParam: 'name' },
     },
@@ -107,7 +128,13 @@ export const DEVELOPER_TOOLS_SERVICES = [
     parityLevel: 'browser',
     summary: 'Package repositories and upstream connections.',
     browser: {
-      list: { operation: 'ListDomains', resultPath: 'domains', idField: 'arn', nameField: 'name' },
+      list: {
+        operation: 'ListDomains',
+        resultPath: 'domains',
+        idField: 'arn',
+        nameField: 'name',
+        pagination: { requestField: 'nextToken', responseField: 'nextToken' },
+      },
       describe: { operation: 'DescribeDomain', idParam: 'domain' },
       delete: { operation: 'DeleteDomain', idParam: 'domain' },
     },
@@ -168,7 +195,13 @@ export const DEVELOPER_TOOLS_SERVICES = [
     parityLevel: 'browser',
     summary: 'Front-end apps, branches and deployments.',
     browser: {
-      list: { operation: 'ListApps', resultPath: 'apps', idField: 'appId', nameField: 'name' },
+      list: {
+        operation: 'ListApps',
+        resultPath: 'apps',
+        idField: 'appId',
+        nameField: 'name',
+        pagination: { requestField: 'nextToken', responseField: 'nextToken' },
+      },
       describe: { operation: 'GetApp', idParam: 'appId' },
       delete: { operation: 'DeleteApp', idParam: 'appId' },
     },

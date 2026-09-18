@@ -5,10 +5,23 @@ import { getConfig } from '../config.js';
 /**
  * Base configuration shared by every AWS SDK v3 client in LocalDeck.
  *
- * All clients are built here so that endpoint, region and credentials come
- * from exactly one place, and so S3 always uses path-style addressing (the
- * LocalStack S3 implementation does not do virtual-host style routing).
+ * All clients are built here so that endpoint, region, credentials and the
+ * outbound HTTP timeouts come from exactly one place, and so S3 always uses
+ * path-style addressing (the LocalStack S3 implementation does not do
+ * virtual-host style routing).
  */
+export interface AwsHttpHandlerOptions {
+  /** Milliseconds allowed for establishing the TCP connection. */
+  connectionTimeout: number;
+  /** Milliseconds allowed for one request/response exchange. */
+  requestTimeout: number;
+  /**
+   * Turn the requestTimeout into an error instead of a warning: without this
+   * the SDK keeps waiting and a hung LocalStack holds the handler open.
+   */
+  throwOnRequestTimeout: boolean;
+}
+
 export interface AwsClientConfig {
   region: string;
   endpoint: string;
@@ -21,11 +34,25 @@ export interface AwsClientConfig {
    */
   requestChecksumCalculation: 'WHEN_REQUIRED';
   responseChecksumValidation: 'WHEN_REQUIRED';
+  /**
+   * The generated clients accept either a `RequestHandler` instance or the
+   * plain NodeHttpHandler options and construct the handler themselves
+   * (`NodeHttpHandler.create(config.requestHandler)` in the client runtime
+   * config). Passing options keeps `@smithy/node-http-handler` out of the
+   * dependency list while still giving every call a connect/request timeout.
+   */
+  requestHandler: AwsHttpHandlerOptions;
 }
 
-export type AwsClientConfigOverrides = Partial<
-  Pick<AwsClientConfig, 'region' | 'endpoint' | 'maxAttempts'>
->;
+export interface AwsClientConfigOverrides {
+  region?: string;
+  endpoint?: string;
+  maxAttempts?: number;
+  /** Overrides LOCALSTACK_CONNECTION_TIMEOUT_MS for this client. */
+  connectionTimeoutMs?: number;
+  /** Overrides LOCALSTACK_REQUEST_TIMEOUT_MS for this client. */
+  requestTimeoutMs?: number;
+}
 
 /** The slice of an SDK client LocalDeck uses: send a command, then destroy it. */
 export interface AwsSdkClient {
@@ -39,6 +66,18 @@ export interface AwsSdkClient {
  * it needs.
  */
 export type AwsSdkClientConstructor = new (config: AwsClientConfig) => AwsSdkClient;
+
+/**
+ * `maxAttempts: 3` is the SDK default and is safe for reads, but it also
+ * replays non-idempotent mutations (RunInstances, CreateNodegroup, CreateKey,
+ * Invoke, SendMessage) when a request fails after reaching LocalStack. LocalDeck
+ * keeps the default because LocalStack answers those calls locally (no flaky
+ * network) and the retry happens only before a response is read; an operator
+ * managing a remote LocalStack can lower it per deployment by building clients
+ * with `overrides.maxAttempts = 1`. Per-operation retry policy would require a
+ * second client per package and is deliberately not done here.
+ */
+const DEFAULT_MAX_ATTEMPTS = 3;
 
 export function buildAwsClientConfig(overrides: AwsClientConfigOverrides = {}): AwsClientConfig {
   const config = getConfig();
@@ -55,18 +94,15 @@ export function buildAwsClientConfig(overrides: AwsClientConfigOverrides = {}): 
         secretAccessKey !== undefined && secretAccessKey.length > 0 ? secretAccessKey : 'test',
       ...(sessionToken !== undefined && sessionToken.length > 0 ? { sessionToken } : {}),
     },
-    maxAttempts: overrides.maxAttempts ?? 3,
+    maxAttempts: overrides.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
     requestChecksumCalculation: 'WHEN_REQUIRED',
     responseChecksumValidation: 'WHEN_REQUIRED',
+    requestHandler: {
+      connectionTimeout: overrides.connectionTimeoutMs ?? config.localstackConnectionTimeoutMs,
+      requestTimeout: overrides.requestTimeoutMs ?? config.localstackRequestTimeoutMs,
+      throwOnRequestTimeout: true,
+    },
   };
-}
-
-/** Single construction point for SDK clients: pass a factory, get a client. */
-export function createAwsClient<TClient>(
-  factory: (config: AwsClientConfig) => TClient,
-  overrides: AwsClientConfigOverrides = {},
-): TClient {
-  return factory(buildAwsClientConfig(overrides));
 }
 
 /**
@@ -116,7 +152,7 @@ export function createAwsClientInstance<TClient extends AwsSdkClient>(
   return client;
 }
 
-/** Memoized clients, keyed by package + client class. */
+/** Memoized clients, keyed by package + client class + endpoint/region. */
 const clientCache = new Map<string, AwsSdkClient>();
 
 /** Returns the cached client for `cacheKey`, creating it on first use. */
@@ -132,25 +168,11 @@ export function getOrCreateAwsClient<TClient extends AwsSdkClient>(
 }
 
 export function createStsClient(overrides: AwsClientConfigOverrides = {}): STSClient {
-  return createAwsClient((config) => new STSClient(config), overrides);
+  return createAwsClientInstance(STSClient, { overrides });
 }
 
 export function createS3Client(overrides: AwsClientConfigOverrides = {}): S3Client {
-  return createAwsClient((config) => new S3Client({ ...config, forcePathStyle: true }), overrides);
-}
-
-let stsClient: STSClient | undefined;
-let s3Client: S3Client | undefined;
-
-/** Memoized clients for request handlers; call destroyAwsClients() on shutdown. */
-export function getStsClient(): STSClient {
-  stsClient ??= createStsClient();
-  return stsClient;
-}
-
-export function getS3Client(): S3Client {
-  s3Client ??= createS3Client();
-  return s3Client;
+  return createAwsClientInstance(S3Client, { forcePathStyle: true, overrides });
 }
 
 /**
@@ -166,12 +188,17 @@ export function getS3ClientFor(overrides: AwsClientConfigOverrides = {}): S3Clie
   );
 }
 
-export function destroyAwsClients(): void {
-  stsClient?.destroy();
-  s3Client?.destroy();
-  stsClient = undefined;
-  s3Client = undefined;
+/**
+ * Abort signal for one outbound SDK call: the caller's signal (client
+ * disconnect / Fastify handler timeout) combined with a hard request timeout
+ * derived from the same config the client's request handler uses.
+ */
+export function sdkAbortSignal(signal?: AbortSignal, requestTimeoutMs?: number): AbortSignal {
+  const timeout = AbortSignal.timeout(requestTimeoutMs ?? getConfig().localstackRequestTimeoutMs);
+  return signal === undefined ? timeout : AbortSignal.any([signal, timeout]);
+}
 
+export function destroyAwsClients(): void {
   for (const client of createdClients) client.destroy();
   createdClients.clear();
   clientCache.clear();

@@ -14,6 +14,12 @@ import { AttachedPoliciesPanel } from '../components/AttachedPoliciesPanel';
 import { GroupMembersTab } from '../components/GroupMembersTab';
 import { isIamCode, toFriendlyIamError } from '../errors';
 
+/** Group tags and inline policies are not whitelisted/verified yet. */
+const GROUP_TAGS_REASON =
+  'Group tags (TagGroup / UntagGroup / ListGroupTags) are not whitelisted in LocalDeck yet, so tags cannot be read or written here.';
+const INLINE_POLICIES_REASON =
+  'Inline policies (PutGroupPolicy / ListGroupPolicies / GetGroupPolicy / DeleteGroupPolicy) are not whitelisted in LocalDeck yet, so inline policies cannot be read or written here.';
+
 /**
  * One IAM user group: Permissions (managed policy attachments) and Users
  * (membership management). Deleting fails while members or policies remain;
@@ -86,13 +92,19 @@ export function GroupDetailPage({ descriptor }: ServicePageProps): ReactElement 
     <>
       <ResourceDetailPage
         title={groupName}
-        description={group === null ? undefined : <Box variant="code">{group.arn}</Box>}
+        description={
+          group === null ? undefined : group.arn === undefined ? (
+            <Box color="text-body-secondary">ARN not reported</Box>
+          ) : (
+            <Box variant="code">{group.arn}</Box>
+          )
+        }
         breadcrumbs={[
           { text: descriptor.displayName, href: serviceConsolePath(descriptor.id) },
           { text: 'User groups', href: `${serviceConsolePath(descriptor.id)}/groups` },
           { text: groupName },
         ]}
-        loading={loading}
+        loading={loading && group === null}
         error={error}
         onRetry={() => {
           void load();
@@ -101,11 +113,18 @@ export function GroupDetailPage({ descriptor }: ServicePageProps): ReactElement 
           <ButtonDropdown
             ariaLabel="Group actions"
             items={[
-              { id: 'copy-arn', text: 'Copy ARN' },
+              {
+                id: 'copy-arn',
+                text: 'Copy ARN',
+                disabled: group?.arn === undefined,
+                ...(group?.arn === undefined
+                  ? { disabledReason: 'LocalStack did not report an ARN for this group.' }
+                  : {}),
+              },
               { id: 'delete', text: 'Delete group' },
             ]}
             onItemClick={({ detail }) => {
-              if (detail.id === 'copy-arn' && group !== null) {
+              if (detail.id === 'copy-arn' && group?.arn !== undefined) {
                 void navigator.clipboard?.writeText(group.arn);
               }
               if (detail.id === 'delete') {
@@ -128,6 +147,20 @@ export function GroupDetailPage({ descriptor }: ServicePageProps): ReactElement 
             label: 'Users',
             content: <GroupMembersTab groupName={groupName} />,
           },
+          {
+            id: 'inline-policies',
+            label: 'Inline policies',
+            disabled: true,
+            disabledReason: INLINE_POLICIES_REASON,
+            content: null,
+          },
+          {
+            id: 'tags',
+            label: 'Tags',
+            disabled: true,
+            disabledReason: GROUP_TAGS_REASON,
+            content: null,
+          },
         ]}
       />
 
@@ -136,7 +169,7 @@ export function GroupDetailPage({ descriptor }: ServicePageProps): ReactElement 
           visible
           title="Delete group"
           subjects={[groupName]}
-          description="Every member must be removed from the group before it can be deleted. This action cannot be undone."
+          description="Deleting a group is permanent. Remove every member and detach every attached policy first; LocalStack refuses the deletion while either remains."
           submitLabel="Delete group"
           loading={deleting}
           {...(deleteError === null ? {} : { errorText: deleteError })}

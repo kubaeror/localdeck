@@ -27,6 +27,13 @@ screenshots of another cloud console.
 |                   EKS clusters                   |                      Create cluster                      |
 |  ![EKS clusters](docs/screens/eks-clusters.png)  |  ![Create cluster](docs/screens/eks-create-cluster.png)  |
 
+The images are captured by `e2e/scripts/capture-screenshots.ts` against
+whatever stack is running, so a parity count rendered inside a screenshot (for
+example "Registered services" on Service health) can lag the generated table
+below until the next refresh; run `pnpm test:e2e:screens` after registry
+changes. CI regenerates them against the container stack and uploads them as
+the `docs-screens` artifact.
+
 ## Repository layout
 
 ```
@@ -44,12 +51,13 @@ docker-compose.yml local api + ui only (never LocalStack)
   - Current LocalStack releases (2026.03+) require an auth token to start; set
     `LOCALSTACK_AUTH_TOKEN` in _your_ LocalStack environment, never here.
   - **EKS** additionally needs a LocalStack entitlement that includes EKS
-    (Ultimate plan) **and** the Docker socket mounted into _your_ LocalStack
+    (the Ultimate plan) **and** the Docker socket mounted into _your_ LocalStack
     container, because its k3d provider starts real Kubernetes containers:
     `-v /var/run/docker.sock:/var/run/docker.sock`.
-- **Node.js 22** (CI version) or Node 20.11+, and pnpm 10
+- **Node.js 22** (CI version) or Node 20.19+ (see `.nvmrc`), and pnpm 10
   (`corepack enable pnpm`) — for the no-container quick start.
-- **Docker with Compose** — for the container quick start.
+- **Docker with Compose 2.24+** — for the container quick start. The loopback
+  override uses the `!reset` tag introduced in Compose 2.24.
 
 ## Quick start — your LocalStack, Docker Compose (under 5 minutes)
 
@@ -68,9 +76,22 @@ Then open <http://localhost:8080>. The api is on <http://localhost:3001>.
   Docker host) and is only ever an env var — never hardcoded in an image.
 - LocalStack published on the host loopback only (typical WSL2 + local Docker
   engine)? Use
-  `docker compose -f docker-compose.yml -f docker-compose.loopback.yml up`.
+  `docker compose -f docker-compose.yml -f docker-compose.loopback.yml up`
+  (requires Compose 2.24+).
 - Only `api` and `ui` are defined in `docker-compose.yml`. LocalStack is not.
 - Copy `.env.example` to `.env` to override endpoints, ports and credentials.
+- **Uploads above 1 MiB work through the container.** nginx streams request
+  bodies straight to the api (`client_max_body_size 5120m`,
+  `proxy_request_buffering off`), so S3 objects up to 5 GiB do not hit nginx's
+  1 MiB default or a raw HTML 413, and long operations such as EKS cluster
+  creation are allowed up to 600 s before a timeout.
+- The published api port is bound to `127.0.0.1` only; the bundled ui reaches
+  the api over the compose network, so nothing is exposed to the LAN. Set
+  `API_BIND_ADDR=0.0.0.0` to publish it on all interfaces.
+- `VITE_*` values (for example `VITE_API_BASE_URL`) are **build-time only**:
+  Vite compiles them into the bundle when the ui image is built. Runtime
+  routing between the ui and api containers is `API_UPSTREAM`, which the nginx
+  entrypoint substitutes at container start.
 
 ## Quick start — no containers
 
@@ -261,9 +282,9 @@ dynamic dispatcher and the registry whitelist.
   CREATING / ACTIVE / DELETING / FAILED / UPDATING), Kubernetes version and
   creation time, with a row delete gate and automatic refresh every 10 s while
   any cluster is settling. When LocalStack does not report the `eks` service,
-  the page renders an `EmptyState` explaining how to enable it (LocalStack Pro,
-  k3d in Docker) instead of calling the API — LocalDeck never reconfigures
-  LocalStack.
+  the page renders an `EmptyState` explaining how to enable it (a LocalStack
+  entitlement that includes EKS — the Ultimate plan — with k3d and the Docker
+  socket) instead of calling the API — LocalDeck never reconfigures LocalStack.
 - **Create cluster** (`pages/ClusterCreate.tsx`) — a five-step `CreateWizard`:
   name, version (from the live `DescribeClusterVersions`, default preselected),
   cluster IAM role (the IAM module's live roles, with manual ARN entry),
@@ -381,9 +402,13 @@ shared error contract — no crash, no stack trace:
 {
   "error": {
     "code": "LOCALSTACK_UNREACHABLE",
-    "message": "LocalDeck api is running, but LocalStack is unreachable at http://localhost:4566 (connection failed (ECONNREFUSED)). Start LocalStack, or point LOCALSTACK_ENDPOINT at the instance you want this console to manage.",
+    "message": "LocalDeck api is running, but LocalStack is unreachable at http://localhost:4566 (ECONNREFUSED). Start LocalStack, or point LOCALSTACK_ENDPOINT at the instance you want this console to manage.",
     "statusCode": 503,
-    "details": { "endpoint": "http://localhost:4566", "reason": "ECONNREFUSED" }
+    "details": {
+      "endpoint": "http://localhost:4566",
+      "reason": "ECONNREFUSED",
+      "hint": "When the api runs in Docker and LocalStack runs on the Docker host, set LOCALSTACK_ENDPOINT=http://host.docker.internal:4566 (or use docker-compose.loopback.yml if LocalStack is published on the host loopback)."
+    }
   }
 }
 ```
@@ -442,146 +467,163 @@ pnpm gen:parity:check  # verify it is current (CI runs this)
 
 <!-- BEGIN PARITY TABLE (generated by `pnpm gen:parity` — do not edit by hand) -->
 
-114 services across the eleven console categories: **4 dedicated**, **84 generic browser**, **26 planned**.
+114 services across the 11 console categories: **4 dedicated**, **84 generic browser**, **26 planned**.
 
-| Category                       | Service                              | Console id                 | LocalDeck support |
-| ------------------------------ | ------------------------------------ | -------------------------- | ----------------- |
-| Compute                        | Application Auto Scaling             | `application-autoscaling`  | planned           |
-| Compute                        | Batch                                | `batch`                    | generic browser   |
-| Compute                        | EC2                                  | `ec2`                      | dedicated         |
-| Compute                        | EC2 Auto Scaling                     | `autoscaling`              | generic browser   |
-| Compute                        | Elastic Beanstalk                    | `elasticbeanstalk`         | generic browser   |
-| Compute                        | Lambda                               | `lambda`                   | generic browser   |
-| Compute                        | Lightsail                            | `lightsail`                | planned           |
-| Containers                     | ECR                                  | `ecr`                      | generic browser   |
-| Containers                     | ECS                                  | `ecs`                      | generic browser   |
-| Containers                     | EKS                                  | `eks`                      | dedicated         |
-| Containers                     | Managed Blockchain                   | `managedblockchain`        | generic browser   |
-| Storage                        | Backup                               | `backup`                   | generic browser   |
-| Storage                        | DataSync                             | `datasync`                 | generic browser   |
-| Storage                        | EFS                                  | `efs`                      | generic browser   |
-| Storage                        | FSx                                  | `fsx`                      | planned           |
-| Storage                        | S3                                   | `s3`                       | dedicated         |
-| Storage                        | S3 Control                           | `s3control`                | planned           |
-| Storage                        | S3 Glacier                           | `glacier`                  | generic browser   |
-| Storage                        | S3 Tables                            | `s3tables`                 | generic browser   |
-| Storage                        | Storage Gateway                      | `storagegateway`           | planned           |
-| Storage                        | Transfer Family                      | `transfer`                 | generic browser   |
-| Database                       | Aurora DSQL                          | `dsql`                     | generic browser   |
-| Database                       | Database Migration Service           | `dms`                      | generic browser   |
-| Database                       | DocumentDB                           | `docdb`                    | generic browser   |
-| Database                       | DynamoDB                             | `dynamodb`                 | generic browser   |
-| Database                       | DynamoDB Streams                     | `dynamodbstreams`          | generic browser   |
-| Database                       | ElastiCache                          | `elasticache`              | generic browser   |
-| Database                       | Keyspaces                            | `keyspaces`                | planned           |
-| Database                       | MemoryDB                             | `memorydb`                 | generic browser   |
-| Database                       | Neptune                              | `neptune`                  | generic browser   |
-| Database                       | RDS                                  | `rds`                      | generic browser   |
-| Database                       | Redshift                             | `redshift`                 | generic browser   |
-| Database                       | Timestream                           | `timestream`               | generic browser   |
-| Networking & CDN               | API Gateway                          | `apigateway`               | generic browser   |
-| Networking & CDN               | Cloud Map                            | `servicediscovery`         | generic browser   |
-| Networking & CDN               | CloudFront                           | `cloudfront`               | generic browser   |
-| Networking & CDN               | Elastic Load Balancing               | `elbv2`                    | generic browser   |
-| Networking & CDN               | Global Accelerator                   | `globalaccelerator`        | generic browser   |
-| Networking & CDN               | Route 53                             | `route53`                  | generic browser   |
-| Networking & CDN               | Route 53 Resolver                    | `route53resolver`          | generic browser   |
-| Security Identity & Compliance | Account Management                   | `account`                  | planned           |
-| Security Identity & Compliance | Certificate Manager                  | `acm`                      | generic browser   |
-| Security Identity & Compliance | Cognito                              | `cognito-idp`              | generic browser   |
-| Security Identity & Compliance | GuardDuty                            | `guardduty`                | planned           |
-| Security Identity & Compliance | IAM                                  | `iam`                      | dedicated         |
-| Security Identity & Compliance | IAM Identity Center                  | `sso-admin`                | generic browser   |
-| Security Identity & Compliance | Identity Store                       | `identitystore`            | planned           |
-| Security Identity & Compliance | Inspector                            | `inspector`                | planned           |
-| Security Identity & Compliance | KMS                                  | `kms`                      | generic browser   |
-| Security Identity & Compliance | Private CA                           | `acm-pca`                  | generic browser   |
-| Security Identity & Compliance | Resource Access Manager              | `ram`                      | planned           |
-| Security Identity & Compliance | Secrets Manager                      | `secretsmanager`           | generic browser   |
-| Security Identity & Compliance | Shield                               | `shield`                   | planned           |
-| Security Identity & Compliance | STS                                  | `sts`                      | planned           |
-| Security Identity & Compliance | Verified Permissions                 | `verifiedpermissions`      | generic browser   |
-| Security Identity & Compliance | WAF                                  | `wafv2`                    | generic browser   |
-| Application Integration        | Amazon MQ                            | `mq`                       | generic browser   |
-| Application Integration        | AppConfig                            | `appconfig`                | generic browser   |
-| Application Integration        | AppSync                              | `appsync`                  | generic browser   |
-| Application Integration        | EventBridge                          | `events`                   | generic browser   |
-| Application Integration        | EventBridge Pipes                    | `pipes`                    | generic browser   |
-| Application Integration        | EventBridge Scheduler                | `scheduler`                | generic browser   |
-| Application Integration        | IoT Core                             | `iot`                      | generic browser   |
-| Application Integration        | IoT Data                             | `iot-data`                 | planned           |
-| Application Integration        | IoT Wireless                         | `iotwireless`              | generic browser   |
-| Application Integration        | Pinpoint                             | `pinpoint`                 | generic browser   |
-| Application Integration        | Serverless Application Repository    | `serverlessrepo`           | generic browser   |
-| Application Integration        | SES                                  | `ses`                      | generic browser   |
-| Application Integration        | SNS                                  | `sns`                      | generic browser   |
-| Application Integration        | SQS                                  | `sqs`                      | generic browser   |
-| Application Integration        | Step Functions                       | `stepfunctions`            | generic browser   |
-| Application Integration        | SWF                                  | `swf`                      | generic browser   |
-| Analytics                      | Athena                               | `athena`                   | generic browser   |
-| Analytics                      | Data Firehose                        | `firehose`                 | generic browser   |
-| Analytics                      | Elemental MediaConvert               | `mediaconvert`             | generic browser   |
-| Analytics                      | EMR                                  | `emr`                      | generic browser   |
-| Analytics                      | Glue                                 | `glue`                     | generic browser   |
-| Analytics                      | Kinesis                              | `kinesis`                  | generic browser   |
-| Analytics                      | Lake Formation                       | `lakeformation`            | planned           |
-| Analytics                      | Managed Service for Apache Flink     | `kinesisanalyticsv2`       | generic browser   |
-| Analytics                      | Managed Streaming for Kafka          | `kafka`                    | generic browser   |
-| Analytics                      | Managed Workflows for Apache Airflow | `mwaa`                     | generic browser   |
-| Analytics                      | OpenSearch Service                   | `opensearch`               | generic browser   |
-| Analytics                      | QuickSight                           | `quicksight`               | planned           |
-| Management & Governance        | Cloud Control API                    | `cloudcontrol`             | planned           |
-| Management & Governance        | CloudFormation                       | `cloudformation`           | generic browser   |
-| Management & Governance        | CloudTrail                           | `cloudtrail`               | generic browser   |
-| Management & Governance        | CloudWatch                           | `cloudwatch`               | generic browser   |
-| Management & Governance        | CloudWatch Logs                      | `logs`                     | generic browser   |
-| Management & Governance        | Config                               | `config`                   | generic browser   |
-| Management & Governance        | Cost Explorer                        | `ce`                       | planned           |
-| Management & Governance        | Fault Injection Simulator            | `fis`                      | generic browser   |
-| Management & Governance        | Organizations                        | `organizations`            | generic browser   |
-| Management & Governance        | Resource Groups                      | `resource-groups`          | generic browser   |
-| Management & Governance        | Resource Groups & Tag Editor         | `resourcegroupstaggingapi` | generic browser   |
-| Management & Governance        | Service Catalog                      | `servicecatalog`           | planned           |
-| Management & Governance        | Support                              | `support`                  | planned           |
-| Management & Governance        | Systems Manager                      | `ssm`                      | generic browser   |
-| Developer Tools                | Amplify                              | `amplify`                  | generic browser   |
-| Developer Tools                | Cloud9                               | `cloud9`                   | planned           |
-| Developer Tools                | CodeArtifact                         | `codeartifact`             | generic browser   |
-| Developer Tools                | CodeBuild                            | `codebuild`                | generic browser   |
-| Developer Tools                | CodeCommit                           | `codecommit`               | generic browser   |
-| Developer Tools                | CodeConnections                      | `codeconnections`          | generic browser   |
-| Developer Tools                | CodeDeploy                           | `codedeploy`               | generic browser   |
-| Developer Tools                | CodePipeline                         | `codepipeline`             | generic browser   |
-| Developer Tools                | X-Ray                                | `xray`                     | planned           |
-| Machine Learning               | Bedrock                              | `bedrock`                  | generic browser   |
-| Machine Learning               | Comprehend                           | `comprehend`               | planned           |
-| Machine Learning               | Rekognition                          | `rekognition`              | planned           |
-| Machine Learning               | SageMaker                            | `sagemaker`                | generic browser   |
-| Machine Learning               | Textract                             | `textract`                 | planned           |
-| Machine Learning               | Transcribe                           | `transcribe`               | generic browser   |
-| Machine Learning               | Translate                            | `translate`                | planned           |
+| Category                       | Service                              | Console id                 | LocalDeck support                   |
+| ------------------------------ | ------------------------------------ | -------------------------- | ----------------------------------- |
+| Compute                        | Application Auto Scaling             | `application-autoscaling`  | planned                             |
+| Compute                        | Batch                                | `batch`                    | generic browser (SDK not installed) |
+| Compute                        | EC2                                  | `ec2`                      | dedicated                           |
+| Compute                        | EC2 Auto Scaling                     | `autoscaling`              | generic browser                     |
+| Compute                        | Elastic Beanstalk                    | `elasticbeanstalk`         | generic browser (SDK not installed) |
+| Compute                        | Lambda                               | `lambda`                   | generic browser                     |
+| Compute                        | Lightsail                            | `lightsail`                | planned                             |
+| Containers                     | ECR                                  | `ecr`                      | generic browser                     |
+| Containers                     | ECS                                  | `ecs`                      | generic browser                     |
+| Containers                     | EKS                                  | `eks`                      | dedicated                           |
+| Containers                     | Managed Blockchain                   | `managedblockchain`        | generic browser (SDK not installed) |
+| Storage                        | Backup                               | `backup`                   | generic browser (SDK not installed) |
+| Storage                        | DataSync                             | `datasync`                 | generic browser (SDK not installed) |
+| Storage                        | EFS                                  | `efs`                      | generic browser (SDK not installed) |
+| Storage                        | FSx                                  | `fsx`                      | planned                             |
+| Storage                        | S3                                   | `s3`                       | dedicated                           |
+| Storage                        | S3 Control                           | `s3control`                | planned                             |
+| Storage                        | S3 Glacier                           | `glacier`                  | generic browser (SDK not installed) |
+| Storage                        | S3 Tables                            | `s3tables`                 | generic browser (SDK not installed) |
+| Storage                        | Storage Gateway                      | `storagegateway`           | planned                             |
+| Storage                        | Transfer Family                      | `transfer`                 | generic browser (SDK not installed) |
+| Database                       | Aurora DSQL                          | `dsql`                     | generic browser (SDK not installed) |
+| Database                       | Database Migration Service           | `dms`                      | generic browser (SDK not installed) |
+| Database                       | DocumentDB                           | `docdb`                    | generic browser (SDK not installed) |
+| Database                       | DynamoDB                             | `dynamodb`                 | generic browser                     |
+| Database                       | DynamoDB Streams                     | `dynamodbstreams`          | generic browser (SDK not installed) |
+| Database                       | ElastiCache                          | `elasticache`              | generic browser                     |
+| Database                       | Keyspaces                            | `keyspaces`                | planned                             |
+| Database                       | MemoryDB                             | `memorydb`                 | generic browser (SDK not installed) |
+| Database                       | Neptune                              | `neptune`                  | generic browser (SDK not installed) |
+| Database                       | RDS                                  | `rds`                      | generic browser                     |
+| Database                       | Redshift                             | `redshift`                 | generic browser (SDK not installed) |
+| Database                       | Timestream                           | `timestream`               | generic browser (SDK not installed) |
+| Networking & CDN               | API Gateway                          | `apigateway`               | generic browser (SDK not installed) |
+| Networking & CDN               | Cloud Map                            | `servicediscovery`         | generic browser (SDK not installed) |
+| Networking & CDN               | CloudFront                           | `cloudfront`               | generic browser                     |
+| Networking & CDN               | Elastic Load Balancing               | `elbv2`                    | generic browser (SDK not installed) |
+| Networking & CDN               | Global Accelerator                   | `globalaccelerator`        | generic browser (SDK not installed) |
+| Networking & CDN               | Route 53                             | `route53`                  | generic browser                     |
+| Networking & CDN               | Route 53 Resolver                    | `route53resolver`          | generic browser (SDK not installed) |
+| Security Identity & Compliance | Account Management                   | `account`                  | planned                             |
+| Security Identity & Compliance | Certificate Manager                  | `acm`                      | generic browser (SDK not installed) |
+| Security Identity & Compliance | Cognito                              | `cognito-idp`              | generic browser (SDK not installed) |
+| Security Identity & Compliance | GuardDuty                            | `guardduty`                | planned                             |
+| Security Identity & Compliance | IAM                                  | `iam`                      | dedicated                           |
+| Security Identity & Compliance | IAM Identity Center                  | `sso-admin`                | generic browser (SDK not installed) |
+| Security Identity & Compliance | Identity Store                       | `identitystore`            | planned                             |
+| Security Identity & Compliance | Inspector                            | `inspector`                | planned                             |
+| Security Identity & Compliance | KMS                                  | `kms`                      | generic browser                     |
+| Security Identity & Compliance | Private CA                           | `acm-pca`                  | generic browser (SDK not installed) |
+| Security Identity & Compliance | Resource Access Manager              | `ram`                      | planned                             |
+| Security Identity & Compliance | Secrets Manager                      | `secretsmanager`           | generic browser                     |
+| Security Identity & Compliance | Shield                               | `shield`                   | planned                             |
+| Security Identity & Compliance | STS                                  | `sts`                      | planned                             |
+| Security Identity & Compliance | Verified Permissions                 | `verifiedpermissions`      | generic browser (SDK not installed) |
+| Security Identity & Compliance | WAF                                  | `wafv2`                    | generic browser (SDK not installed) |
+| Application Integration        | Amazon MQ                            | `mq`                       | generic browser (SDK not installed) |
+| Application Integration        | AppConfig                            | `appconfig`                | generic browser (SDK not installed) |
+| Application Integration        | AppSync                              | `appsync`                  | generic browser (SDK not installed) |
+| Application Integration        | EventBridge                          | `events`                   | generic browser                     |
+| Application Integration        | EventBridge Pipes                    | `pipes`                    | generic browser (SDK not installed) |
+| Application Integration        | EventBridge Scheduler                | `scheduler`                | generic browser (SDK not installed) |
+| Application Integration        | IoT Core                             | `iot`                      | generic browser (SDK not installed) |
+| Application Integration        | IoT Data                             | `iot-data`                 | planned                             |
+| Application Integration        | IoT Wireless                         | `iotwireless`              | generic browser (SDK not installed) |
+| Application Integration        | Pinpoint                             | `pinpoint`                 | generic browser (SDK not installed) |
+| Application Integration        | Serverless Application Repository    | `serverlessrepo`           | generic browser (SDK not installed) |
+| Application Integration        | SES                                  | `ses`                      | generic browser (SDK not installed) |
+| Application Integration        | SNS                                  | `sns`                      | generic browser                     |
+| Application Integration        | SQS                                  | `sqs`                      | generic browser                     |
+| Application Integration        | Step Functions                       | `stepfunctions`            | generic browser                     |
+| Application Integration        | SWF                                  | `swf`                      | generic browser (SDK not installed) |
+| Analytics                      | Athena                               | `athena`                   | generic browser                     |
+| Analytics                      | Data Firehose                        | `firehose`                 | generic browser (SDK not installed) |
+| Analytics                      | Elemental MediaConvert               | `mediaconvert`             | generic browser (SDK not installed) |
+| Analytics                      | EMR                                  | `emr`                      | generic browser (SDK not installed) |
+| Analytics                      | Glue                                 | `glue`                     | generic browser (SDK not installed) |
+| Analytics                      | Kinesis                              | `kinesis`                  | generic browser                     |
+| Analytics                      | Lake Formation                       | `lakeformation`            | planned                             |
+| Analytics                      | Managed Service for Apache Flink     | `kinesisanalyticsv2`       | generic browser (SDK not installed) |
+| Analytics                      | Managed Streaming for Kafka          | `kafka`                    | generic browser (SDK not installed) |
+| Analytics                      | Managed Workflows for Apache Airflow | `mwaa`                     | generic browser (SDK not installed) |
+| Analytics                      | OpenSearch Service                   | `opensearch`               | generic browser (SDK not installed) |
+| Analytics                      | QuickSight                           | `quicksight`               | planned                             |
+| Management & Governance        | Cloud Control API                    | `cloudcontrol`             | planned                             |
+| Management & Governance        | CloudFormation                       | `cloudformation`           | generic browser                     |
+| Management & Governance        | CloudTrail                           | `cloudtrail`               | generic browser (SDK not installed) |
+| Management & Governance        | CloudWatch                           | `cloudwatch`               | generic browser                     |
+| Management & Governance        | CloudWatch Logs                      | `logs`                     | generic browser                     |
+| Management & Governance        | Config                               | `config`                   | generic browser (SDK not installed) |
+| Management & Governance        | Cost Explorer                        | `ce`                       | planned                             |
+| Management & Governance        | Fault Injection Simulator            | `fis`                      | generic browser (SDK not installed) |
+| Management & Governance        | Organizations                        | `organizations`            | generic browser (SDK not installed) |
+| Management & Governance        | Resource Groups                      | `resource-groups`          | generic browser (SDK not installed) |
+| Management & Governance        | Resource Groups & Tag Editor         | `resourcegroupstaggingapi` | generic browser (SDK not installed) |
+| Management & Governance        | Service Catalog                      | `servicecatalog`           | planned                             |
+| Management & Governance        | Support                              | `support`                  | planned                             |
+| Management & Governance        | Systems Manager                      | `ssm`                      | generic browser                     |
+| Developer Tools                | Amplify                              | `amplify`                  | generic browser (SDK not installed) |
+| Developer Tools                | Cloud9                               | `cloud9`                   | planned                             |
+| Developer Tools                | CodeArtifact                         | `codeartifact`             | generic browser (SDK not installed) |
+| Developer Tools                | CodeBuild                            | `codebuild`                | generic browser (SDK not installed) |
+| Developer Tools                | CodeCommit                           | `codecommit`               | generic browser (SDK not installed) |
+| Developer Tools                | CodeConnections                      | `codeconnections`          | generic browser (SDK not installed) |
+| Developer Tools                | CodeDeploy                           | `codedeploy`               | generic browser (SDK not installed) |
+| Developer Tools                | CodePipeline                         | `codepipeline`             | generic browser (SDK not installed) |
+| Developer Tools                | X-Ray                                | `xray`                     | planned                             |
+| Machine Learning               | Bedrock                              | `bedrock`                  | generic browser (SDK not installed) |
+| Machine Learning               | Comprehend                           | `comprehend`               | planned                             |
+| Machine Learning               | Rekognition                          | `rekognition`              | planned                             |
+| Machine Learning               | SageMaker                            | `sagemaker`                | generic browser (SDK not installed) |
+| Machine Learning               | Textract                             | `textract`                 | planned                             |
+| Machine Learning               | Transcribe                           | `transcribe`               | generic browser (SDK not installed) |
+| Machine Learning               | Translate                            | `translate`                | planned                             |
 
 <!-- END PARITY TABLE -->
 
 ## Continuous integration and releases
 
-`.github/workflows/ci.yml` runs on Node 22 for every push and pull request:
+`.github/workflows/ci.yml` runs on Node 22 for every push to `main`, every pull
+request and manual dispatches:
 
 1. **Typecheck, lint, test, build** — `pnpm typecheck`, ESLint + Prettier,
    `pnpm test`, `pnpm build`, repository invariants (`pnpm verify:repo`) and the
    generated parity-table check.
-2. **Smoke** — a throwaway LocalStack **service container** (the one allowed
+2. **Docker build gate** — both images are built (without pushing) on every
+   change, so a broken Dockerfile or nginx template fails the pull request
+   instead of the next release tag.
+3. **Smoke** — a throwaway LocalStack **service container** (the one allowed
    exception to "LocalDeck never manages LocalStack": it exists only inside the
    workflow) and Playwright. The suite asserts `GET /api/health` is 200 and the
-   ui index serves and renders, creates a real S3 bucket through the wizard, and
+   ui index serves and renders, creates a real S3 bucket through the wizard,
+   uploads and downloads an object, launches and terminates an EC2 instance, and
    starts EKS cluster creation when the emulator reports EKS. See
    `e2e/playwright.config.ts`.
+4. **Container smoke** — `docker compose` builds and starts the shipped
+   `api` + `ui` images, nginx serves the production bundle and proxies `/api`,
+   and a minimal Playwright project uploads an object **larger than nginx's
+   1 MiB default** through the proxy (`e2e/playwright.container.config.ts`).
+   The same job regenerates the README screenshots from the container stack and
+   uploads `docs/screens/` as a build artifact (refreshing the committed images
+   stays a developer decision).
 
-The smoke job's default image is the last release published before LocalStack's
+The smoke jobs' default image is the last release published before LocalStack's
 unified-image licensing change, so a fresh clone's pipeline is green without any
-secret. To smoke-test a current LocalStack image (and licensed services such as
-EKS), set the repository variable `LOCALSTACK_IMAGE` and the secret
+secret. To smoke-test a current LocalStack image (and licensed services), set
+the repository variable `LOCALSTACK_IMAGE` and the secret
 `LOCALSTACK_AUTH_TOKEN`; `.github/workflows/ci.yml` documents the exact values.
+Pull requests from forks always run on the free default image: repository
+variables are visible to fork builds while secrets are not. `eks` is
+intentionally absent from the workflow's `SERVICES` list, so the licensed EKS
+path is exercised only in a maintainer run that adds it (the EKS spec asserts
+the console's honest "not enabled" page otherwise).
 
 Releases are cut from semantic version tags. `.github/workflows/release.yml`
 verifies the tagged revision, then publishes both images to GHCR:
@@ -604,21 +646,22 @@ docker run --rm -p 8080:80 \
 
 ## Scripts
 
-| Command                  | Description                                           |
-| ------------------------ | ----------------------------------------------------- |
-| `pnpm dev`               | Watch mode for every workspace (`turbo run dev`).     |
-| `pnpm build`             | Build `shared`, `api` and `ui`.                       |
-| `pnpm typecheck`         | TypeScript strict check in every workspace.           |
-| `pnpm lint`              | ESLint (flat config); `pnpm lint:format` is Prettier. |
-| `pnpm test`              | Vitest in every workspace.                            |
-| `pnpm test:e2e`          | Playwright smoke tests against your LocalStack.       |
-| `pnpm test:e2e:screens`  | Refresh the README screenshots from a running ui.     |
-| `pnpm gen:parity`        | Regenerate the parity table in this README.           |
-| `pnpm verify:repo`       | License, disclaimer, secret and image invariants.     |
-| `pnpm verify:localstack` | Live checks against the external LocalStack.          |
-| `pnpm verify:console`    | Console smoke test against a running api + stack.     |
-| `pnpm turbo gen service` | Scaffold a new service module.                        |
-| `pnpm format`            | Prettier write.                                       |
+| Command                   | Description                                                                 |
+| ------------------------- | --------------------------------------------------------------------------- |
+| `pnpm dev`                | Watch mode for every workspace (`turbo run dev`).                           |
+| `pnpm build`              | Build `shared`, `api` and `ui`.                                             |
+| `pnpm typecheck`          | TypeScript strict check in every workspace.                                 |
+| `pnpm lint`               | ESLint (flat config); `pnpm lint:format` is Prettier.                       |
+| `pnpm test`               | Vitest in every workspace.                                                  |
+| `pnpm test:e2e`           | Playwright smoke tests against your LocalStack.                             |
+| `pnpm test:e2e:container` | Playwright container spec against `docker compose` (start the stack first). |
+| `pnpm test:e2e:screens`   | Refresh the README screenshots from a running ui.                           |
+| `pnpm gen:parity`         | Regenerate the parity table in this README.                                 |
+| `pnpm verify:repo`        | License, disclaimer, secret and image invariants.                           |
+| `pnpm verify:localstack`  | Live checks against the external LocalStack.                                |
+| `pnpm verify:console`     | Console smoke test against a running api + stack.                           |
+| `pnpm turbo gen service`  | Scaffold a new service module.                                              |
+| `pnpm format`             | Prettier write.                                                             |
 
 `packages/shared` is a real dependency of both apps, so it is compiled before
 them. While developing, run `pnpm --filter @localdeck/shared dev` in a second
@@ -626,18 +669,28 @@ terminal if you are changing shared types.
 
 ## Environment variables (api)
 
-| Variable                     | Default                 | Meaning                                                         |
-| ---------------------------- | ----------------------- | --------------------------------------------------------------- |
-| `LOCALSTACK_ENDPOINT`        | `http://localhost:4566` | External LocalStack base URL (compose: `host.docker.internal`). |
-| `AWS_REGION`                 | `us-east-1`             | Region used by every SDK client.                                |
-| `AWS_ACCESS_KEY_ID`          | `test`                  | LocalStack accepts any non-empty key.                           |
-| `AWS_SECRET_ACCESS_KEY`      | `test`                  | Same as above.                                                  |
-| `HOST` / `PORT`              | `0.0.0.0` / `3001`      | api listener.                                                   |
-| `CORS_ORIGIN`                | `*`                     | Comma-separated allow-list, or `*`.                             |
-| `LOG_LEVEL`                  | `info`                  | pino level.                                                     |
-| `LOG_PRETTY`                 | dev only                | `pino-pretty` is a dev dependency, absent in images.            |
-| `LOCALSTACK_TIMEOUT_MS`      | `5000`                  | Health probe timeout.                                           |
-| `UI_STATUS_POLL_INTERVAL_MS` | `15000`                 | Status refresh interval reported to the ui.                     |
+| Variable                           | Default                 | Meaning                                                         |
+| ---------------------------------- | ----------------------- | --------------------------------------------------------------- |
+| `LOCALSTACK_ENDPOINT`              | `http://localhost:4566` | External LocalStack base URL (compose: `host.docker.internal`). |
+| `AWS_REGION`                       | `us-east-1`             | Region used by every SDK client.                                |
+| `AWS_ACCESS_KEY_ID`                | `test`                  | LocalStack accepts any non-empty key.                           |
+| `AWS_SECRET_ACCESS_KEY`            | `test`                  | Same as above.                                                  |
+| `AWS_SESSION_TOKEN`                | empty                   | Session token for temporary credentials; empty sends none.      |
+| `HOST` / `PORT`                    | `0.0.0.0` / `3001`      | api listener.                                                   |
+| `CORS_ORIGIN`                      | `*`                     | Comma-separated allow-list, or `*`.                             |
+| `LOG_LEVEL`                        | `info`                  | pino level.                                                     |
+| `LOG_PRETTY`                       | dev only                | `pino-pretty` is a dev dependency, absent in images.            |
+| `LOCALSTACK_TIMEOUT_MS`            | `5000`                  | Health probe timeout.                                           |
+| `LOCALSTACK_CONNECTION_TIMEOUT_MS` | `3000`                  | Outbound SDK connection timeout.                                |
+| `LOCALSTACK_REQUEST_TIMEOUT_MS`    | `30000`                 | Outbound SDK request timeout; slower calls answer 504.          |
+| `LOCALSTACK_HEALTH_CACHE_MS`       | `2000`                  | Health-probe cache/single-flight window (`0` disables).         |
+| `LOCALSTACK_PUBLIC_ENDPOINT`       | = `LOCALSTACK_ENDPOINT` | Endpoint written into generated kubeconfigs (host-reachable).   |
+| `SHUTDOWN_TIMEOUT_MS`              | `10000`                 | Graceful-shutdown deadline before a forced exit.                |
+| `UI_STATUS_POLL_INTERVAL_MS`       | `15000`                 | Status refresh interval reported to the ui.                     |
+
+The ui has one build-time value: `VITE_API_BASE_URL` is compiled into the
+bundle by Vite (empty means same-origin `/api`). It is not read at runtime — in
+the container, `API_UPSTREAM` is what routes `/api` to the api at startup.
 
 ## Legal
 

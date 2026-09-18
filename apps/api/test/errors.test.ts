@@ -58,6 +58,93 @@ describe('toApiError', () => {
     expect(apiError.service).toBe('Lambda');
   });
 
+  it('fills ApiError.service from the registry context for real Smithy errors', () => {
+    // Real Smithy errors have `$fault` + `$metadata` but never `$service`.
+    const real = new Error('the bucket does not exist');
+    real.name = 'NoSuchBucket';
+    Object.assign(real, {
+      $fault: 'client',
+      $metadata: { httpStatusCode: 404, requestId: 'req-real' },
+    });
+
+    const apiError = toApiError(real, { service: 's3' });
+    expect(apiError.code).toBe('NoSuchBucket');
+    expect(apiError.service).toBe('s3');
+    expect(apiError.requestId).toBe('req-real');
+  });
+
+  it('maps request timeouts to 504 before the network mapping', () => {
+    const timeout = Object.assign(
+      new Error(
+        '@smithy/node-http-handler - [ERROR] a request has exceeded the configured 400 ms requestTimeout.',
+      ),
+      { name: 'TimeoutError', code: 'ETIMEDOUT' },
+    );
+
+    const apiError = toApiError(timeout, { endpoint: 'http://localhost:4566' });
+    expect(apiError.code).toBe('LOCALSTACK_TIMEOUT');
+    expect(apiError.statusCode).toBe(504);
+    expect(apiError.message).toContain('did not finish');
+  });
+
+  it('keeps a connection timeout classified as unreachable', () => {
+    const connectTimeout = Object.assign(
+      new Error('the request socket did not establish a connection with the server within 500 ms'),
+      { name: 'TimeoutError' },
+    );
+
+    const apiError = toApiError(connectTimeout, { endpoint: 'http://localhost:4566' });
+    expect(apiError.code).toBe('LOCALSTACK_UNREACHABLE');
+    expect(apiError.statusCode).toBe(503);
+  });
+
+  it('maps AbortError to 408 REQUEST_ABORTED, not unreachable', () => {
+    const aborted = Object.assign(new Error('Request aborted'), { name: 'AbortError' });
+
+    const apiError = toApiError(aborted, { endpoint: 'http://localhost:4566' });
+    expect(apiError.code).toBe('REQUEST_ABORTED');
+    expect(apiError.statusCode).toBe(408);
+  });
+
+  it('treats AbortSignal.timeout aborts as timeouts', () => {
+    const timeoutReason = Object.assign(new Error('The operation was aborted due to timeout'), {
+      name: 'TimeoutError',
+    });
+    const aborted = Object.assign(new Error('Request aborted'), {
+      name: 'AbortError',
+      cause: timeoutReason,
+    });
+
+    const apiError = toApiError(aborted);
+    expect(apiError.code).toBe('LOCALSTACK_TIMEOUT');
+    expect(apiError.statusCode).toBe(504);
+  });
+
+  it('maps SDK serializer TypeErrors to 400 VALIDATION_FAILED', () => {
+    const apiError = toApiError(
+      new TypeError('The first argument must be of type string or an instance of Buffer.'),
+      { service: 'lambda' },
+    );
+
+    expect(apiError.code).toBe('VALIDATION_FAILED');
+    expect(apiError.statusCode).toBe(400);
+    expect(apiError.details?.['reason']).toBe('sdk-input-serialization');
+  });
+
+  it('maps Fastify handler timeouts to 504 LOCALSTACK_TIMEOUT', () => {
+    const handlerTimeout = Object.assign(
+      new Error("Request timed out after 30000 ms on route '/'"),
+      {
+        code: 'FST_ERR_HANDLER_TIMEOUT',
+        statusCode: 503,
+      },
+    );
+
+    const apiError = toApiError(handlerTimeout, { endpoint: 'http://localhost:4566' });
+    expect(apiError.code).toBe('LOCALSTACK_TIMEOUT');
+    expect(apiError.statusCode).toBe(504);
+  });
+
   it('maps connection failures to 503 LOCALSTACK_UNREACHABLE with the endpoint', () => {
     const refused = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:4566'), {
       code: 'ECONNREFUSED',

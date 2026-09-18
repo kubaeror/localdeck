@@ -56,6 +56,8 @@ export const SECURITY_SERVICES = [
       'DeletePolicy',
       'GetPolicyVersion',
       'CreatePolicyVersion',
+      'ListPolicyVersions',
+      'DeletePolicyVersion',
       'ListEntitiesForPolicy',
       // Attached policies
       'ListAttachedUserPolicies',
@@ -71,7 +73,12 @@ export const SECURITY_SERVICES = [
     parityLevel: 'dedicated',
     summary: 'Users, groups, roles, policies and access keys.',
     browser: {
-      list: { operation: 'ListUsers', resultPath: 'Users', idField: 'UserName' },
+      list: {
+        operation: 'ListUsers',
+        resultPath: 'Users',
+        idField: 'UserName',
+        pagination: { requestField: 'Marker', responseField: 'Marker' },
+      },
       describe: { operation: 'GetUser', idParam: 'UserName' },
       delete: { operation: 'DeleteUser', idParam: 'UserName' },
       tags: { operation: 'ListUserTags', idParam: 'UserName', resultPath: 'Tags' },
@@ -87,7 +94,12 @@ export const SECURITY_SERVICES = [
     parityLevel: 'browser',
     summary: 'Customer managed keys, aliases and rotation.',
     browser: {
-      list: { operation: 'ListKeys', resultPath: 'Keys', idField: 'KeyId' },
+      list: {
+        operation: 'ListKeys',
+        resultPath: 'Keys',
+        idField: 'KeyId',
+        pagination: { requestField: 'Marker', responseField: 'NextMarker' },
+      },
       describe: { operation: 'DescribeKey', idParam: 'KeyId' },
     },
   },
@@ -213,6 +225,8 @@ export const SECURITY_SERVICES = [
         resultPath: 'WebACLs',
         idField: 'Id',
         nameField: 'Name',
+        // WAFv2 paginates with `NextMarker` in both directions.
+        pagination: { requestField: 'NextMarker', responseField: 'NextMarker' },
       },
     },
   },
@@ -247,6 +261,7 @@ export const SECURITY_SERVICES = [
         operation: 'ListPolicyStores',
         resultPath: 'policyStores',
         idField: 'policyStoreId',
+        pagination: { requestField: 'nextToken', responseField: 'nextToken' },
       },
       describe: { operation: 'GetPolicyStore', idParam: 'policyStoreId' },
       delete: { operation: 'DeletePolicyStore', idParam: 'policyStoreId' },

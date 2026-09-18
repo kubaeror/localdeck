@@ -1,4 +1,3 @@
-import type { ApiError } from '@localdeck/shared';
 import Box from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
 import Container from '@cloudscape-design/components/container';
@@ -8,41 +7,33 @@ import Link from '@cloudscape-design/components/link';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import Table from '@cloudscape-design/components/table';
 import type { TableProps } from '@cloudscape-design/components/table';
-import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
+import { useCallback, useMemo, useState, type ReactElement } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { DeleteConfirmModal } from '../../../components/DeleteConfirmModal';
 import { InfoTooltip } from '../../../components/InfoTooltip';
 import { ResourceDetailPage } from '../../../components/ResourceDetailPage';
 import { StatusBadge } from '../../../components/StatusBadge';
 import { useFlashbar } from '../../../hooks/useFlashbar';
-import { toApiError } from '../../../lib/apiClient';
-import { formatDateTime, type StatusName } from '../../../lib/format';
+import { usePolling } from '../../../hooks/usePolling';
+import { formatDateTime } from '../../../lib/format';
 import { serviceConsolePath } from '../../paths';
 import type { ServicePageProps } from '../../types';
 import {
   deleteVolume,
   getVolume,
+  isTransitionalVolumeState,
   isVolumeAttached,
-  type Ec2Volume,
   type Ec2VolumeAttachment,
 } from '../api';
 import { toFriendlyEc2Error } from '../errors';
+import { useEc2Resource } from '../hooks';
+import { volumeStatusName } from '../status';
 import { AttachVolumeModal } from '../components/AttachVolumeModal';
 import { EmulatedBadge } from '../components/EmulatedBadge';
 import { ResourceTagsTab } from '../components/ResourceTagsTab';
 
-/** Maps an EBS volume state onto the console's status vocabulary. */
-function volumeStatusName(state: string): StatusName {
-  switch (state) {
-    case 'in-use':
-    case 'creating':
-    case 'deleting':
-    case 'deleted':
-      return state;
-    default:
-      return 'available';
-  }
-}
+/** How often the detail page reloads while the volume is still settling. */
+const POLL_INTERVAL_MS = 10_000;
 
 /**
  * One EBS volume: details, attachments and tags. Attaching is available while
@@ -55,44 +46,21 @@ export function VolumeDetailPage({ descriptor }: ServicePageProps): ReactElement
   const navigate = useNavigate();
   const flashbar = useFlashbar();
 
-  const [volume, setVolume] = useState<Ec2Volume | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<ApiError | null>(null);
+  const loader = useCallback(() => getVolume(volumeId), [volumeId]);
+  const { data: volume, loading, error, reload } = useEc2Resource(loader);
+
   const [attachVisible, setAttachVisible] = useState(false);
   const [deleteVisible, setDeleteVisible] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  const requestId = useRef(0);
 
-  const load = useCallback(async (): Promise<void> => {
-    const id = requestId.current + 1;
-    requestId.current = id;
-    setLoading(true);
-    try {
-      const result = await getVolume(volumeId);
-      if (requestId.current !== id) return;
-      setVolume(result);
-      setError(null);
-    } catch (caught) {
-      if (requestId.current !== id) return;
-      setVolume(null);
-      setError(toApiError(caught));
-    } finally {
-      if (requestId.current === id) setLoading(false);
-    }
-  }, [volumeId]);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- volume lookup for the route
-    void load();
-    return () => {
-      requestId.current += 1;
-    };
-  }, [load]);
+  const transitional = volume !== null && isTransitionalVolumeState(volume.state);
+  usePolling(transitional, POLL_INTERVAL_MS, () => reload());
 
   const attached = volume !== null && isVolumeAttached(volume);
 
   const confirmDelete = async (): Promise<void> => {
+    if (deleting) return;
     setDeleting(true);
     setDeleteError(null);
     try {
@@ -107,46 +75,52 @@ export function VolumeDetailPage({ descriptor }: ServicePageProps): ReactElement
     }
   };
 
-  const instancePath = (instanceId: string): string =>
-    `${serviceConsolePath(descriptor.id)}/instances/${encodeURIComponent(instanceId)}`;
+  const instancePath = useCallback(
+    (instanceId: string): string =>
+      `${serviceConsolePath(descriptor.id)}/instances/${encodeURIComponent(instanceId)}`,
+    [descriptor.id],
+  );
 
-  const attachmentColumns: readonly TableProps.ColumnDefinition<Ec2VolumeAttachment>[] = [
-    {
-      id: 'instanceId',
-      header: 'Instance',
-      isRowHeader: true,
-      cell: (attachment) => (
-        <Link
-          href={instancePath(attachment.instanceId)}
-          onFollow={(event) => {
-            event.preventDefault();
-            navigate(instancePath(attachment.instanceId));
-          }}
-        >
-          <Box variant="code" display="inline">
-            {attachment.instanceId}
-          </Box>
-        </Link>
-      ),
-    },
-    { id: 'device', header: 'Device name', cell: (attachment) => attachment.device ?? '—' },
-    { id: 'state', header: 'Attachment state', cell: (attachment) => attachment.state ?? '—' },
-    {
-      id: 'attachTime',
-      header: 'Attached since',
-      cell: (attachment) => formatDateTime(attachment.attachTime),
-    },
-    {
-      id: 'deleteOnTermination',
-      header: 'Delete on termination',
-      cell: (attachment) =>
-        attachment.deleteOnTermination === undefined
-          ? '—'
-          : attachment.deleteOnTermination
-            ? 'Yes'
-            : 'No',
-    },
-  ];
+  const attachmentColumns = useMemo<readonly TableProps.ColumnDefinition<Ec2VolumeAttachment>[]>(
+    () => [
+      {
+        id: 'instanceId',
+        header: 'Instance',
+        isRowHeader: true,
+        cell: (attachment) => (
+          <Link
+            href={instancePath(attachment.instanceId)}
+            onFollow={(event) => {
+              event.preventDefault();
+              navigate(instancePath(attachment.instanceId));
+            }}
+          >
+            <Box variant="code" display="inline">
+              {attachment.instanceId}
+            </Box>
+          </Link>
+        ),
+      },
+      { id: 'device', header: 'Device name', cell: (attachment) => attachment.device ?? '—' },
+      { id: 'state', header: 'Attachment state', cell: (attachment) => attachment.state ?? '—' },
+      {
+        id: 'attachTime',
+        header: 'Attached since',
+        cell: (attachment) => formatDateTime(attachment.attachTime),
+      },
+      {
+        id: 'deleteOnTermination',
+        header: 'Delete on termination',
+        cell: (attachment) =>
+          attachment.deleteOnTermination === undefined
+            ? '—'
+            : attachment.deleteOnTermination
+              ? 'Yes'
+              : 'No',
+      },
+    ],
+    [instancePath, navigate],
+  );
 
   const listingPath = `${serviceConsolePath(descriptor.id)}/volumes`;
 
@@ -163,8 +137,15 @@ export function VolumeDetailPage({ descriptor }: ServicePageProps): ReactElement
         loading={loading}
         error={error}
         onRetry={() => {
-          void load();
+          void reload();
         }}
+        notifications={
+          transitional ? (
+            <Box color="text-body-secondary">
+              Refreshing automatically every 10 seconds while the volume is {volume?.state}.
+            </Box>
+          ) : undefined
+        }
         status={
           volume === null ? undefined : (
             <SpaceBetween direction="horizontal" size="xs">
@@ -290,7 +271,7 @@ export function VolumeDetailPage({ descriptor }: ServicePageProps): ReactElement
                       tags={volume.tags}
                       description="Tags applied to the volume. Saving applies only the changed keys through CreateTags and DeleteTags."
                       onSaved={() => {
-                        void load();
+                        void reload();
                       }}
                     />
                   ),
@@ -308,7 +289,7 @@ export function VolumeDetailPage({ descriptor }: ServicePageProps): ReactElement
           onAttached={() => {
             setAttachVisible(false);
             flashbar.notify({ type: 'success', header: 'Volume attached', content: volumeId });
-            void load();
+            void reload();
           }}
         />
       ) : null}

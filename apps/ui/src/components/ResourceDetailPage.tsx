@@ -35,6 +35,13 @@ export interface ResourceDetailPageProps {
   /** Controlled tab selection; otherwise the first tab is active. */
   activeTabId?: string;
   onTabChange?: (tabId: string) => void;
+  /**
+   * Keeps the tabs mounted while `loading` is true, so a background refresh
+   * (polling on a detail page) does not tear down tab content, scroll position
+   * or focus. The initial load still shows the spinner alone unless the caller
+   * opts in. Defaults to `false` (previous behavior).
+   */
+  keepTabsMounted?: boolean;
   /** Optional content rendered between the header and the tabs. */
   children?: ReactNode;
 }
@@ -57,10 +64,16 @@ export function ResourceDetailPage({
   onRetry,
   activeTabId,
   onTabChange,
+  keepTabsMounted = false,
   children,
 }: ResourceDetailPageProps): ReactElement {
   const [internalTabId, setInternalTabId] = useState<string | undefined>(tabs[0]?.id);
-  const selectedTabId = activeTabId ?? internalTabId ?? tabs[0]?.id;
+  // Reconcile when the tabs array changes: a selected tab that no longer
+  // exists falls back to the first tab instead of rendering no content at all.
+  const internalTabExists =
+    internalTabId !== undefined && tabs.some((tab) => tab.id === internalTabId);
+  const selectedTabId = activeTabId ?? (internalTabExists ? internalTabId : tabs[0]?.id);
+  const showTabs = !loading || keepTabsMounted;
 
   return (
     <ContentLayout
@@ -87,25 +100,32 @@ export function ResourceDetailPage({
 
         {children}
 
-        {loading ? (
+        {showTabs ? (
+          <SpaceBetween size="s">
+            {loading ? (
+              <Box variant="small" color="text-body-secondary">
+                <Spinner size="normal" /> Refreshing…
+              </Box>
+            ) : null}
+            <Tabs
+              tabs={tabs.map((tab) => ({
+                id: tab.id,
+                label: tab.label,
+                content: tab.content,
+                ...(tab.disabled === true ? { disabled: true } : {}),
+                ...(tab.disabledReason === undefined ? {} : { disabledReason: tab.disabledReason }),
+              }))}
+              activeTabId={selectedTabId}
+              onChange={({ detail }) => {
+                if (activeTabId === undefined) setInternalTabId(detail.activeTabId);
+                onTabChange?.(detail.activeTabId);
+              }}
+            />
+          </SpaceBetween>
+        ) : (
           <Box textAlign="center" padding="l">
             <Spinner size="large" />
           </Box>
-        ) : (
-          <Tabs
-            tabs={tabs.map((tab) => ({
-              id: tab.id,
-              label: tab.label,
-              content: tab.content,
-              ...(tab.disabled === true ? { disabled: true } : {}),
-              ...(tab.disabledReason === undefined ? {} : { disabledReason: tab.disabledReason }),
-            }))}
-            activeTabId={selectedTabId}
-            onChange={({ detail }) => {
-              if (activeTabId === undefined) setInternalTabId(detail.activeTabId);
-              onTabChange?.(detail.activeTabId);
-            }}
-          />
         )}
       </SpaceBetween>
     </ContentLayout>

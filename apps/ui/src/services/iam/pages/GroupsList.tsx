@@ -1,17 +1,19 @@
+import type { ApiError } from '@localdeck/shared';
 import type { TableProps } from '@cloudscape-design/components/table';
+import Alert from '@cloudscape-design/components/alert';
 import Button from '@cloudscape-design/components/button';
 import ButtonDropdown from '@cloudscape-design/components/button-dropdown';
 import Link from '@cloudscape-design/components/link';
-import { useCallback, useMemo, useState, type ReactElement } from 'react';
+import { useCallback, useMemo, useRef, useState, type ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { DeleteConfirmModal } from '../../../components/DeleteConfirmModal';
 import { ResourceListPage } from '../../../components/ResourceListPage';
-import { useFlashbar } from '../../../hooks/useFlashbar';
 import { formatDateTime } from '../../../lib/format';
 import { serviceConsolePath } from '../../paths';
 import type { ServicePageProps } from '../../types';
 import { deleteGroup, getGroup, listGroups, type IamGroup } from '../api';
-import { toFriendlyIamError } from '../errors';
+import { toApiError } from '../../../lib/apiClient';
+import { useBulkDelete } from '../components/useBulkDelete';
 
 /** A group row plus the member count the table shows. */
 interface GroupRow extends IamGroup {
@@ -22,17 +24,30 @@ interface GroupRow extends IamGroup {
  * The IAM user groups list: group name, member count and creation date.
  *
  * IAM's `ListGroups` does not include member counts, so each page is enriched
- * with one `GetGroup` call per group (LocalStack accounts hold few groups). A
- * group whose member list cannot be read shows "—" instead of failing the page.
+ * with one `GetGroup` call per group. Counts are cached for the session and a
+ * group whose member list cannot be read shows "—"; when every enrichment on a
+ * page fails, a non-blocking warning explains that against an error state
+ * instead of silently rendering a page of "—" values.
  */
 export function GroupsListPage({ descriptor }: ServicePageProps): ReactElement {
   const navigate = useNavigate();
-  const flashbar = useFlashbar();
   const [filteringText, setFilteringText] = useState('');
-  const [deleteTargets, setDeleteTargets] = useState<readonly GroupRow[] | null>(null);
-  const [deleting, setDeleting] = useState(false);
-  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
+  const [enrichmentError, setEnrichmentError] = useState<ApiError | null>(null);
+  /** Member counts keyed by group name, filled lazily while paging. */
+  const userCounts = useRef(new Map<string, number>());
+
+  const bulkDelete = useBulkDelete<GroupRow>({
+    noun: 'group',
+    label: (group) => group.groupName,
+    remove: async (group) => {
+      await deleteGroup(group.groupName);
+      userCounts.current.delete(group.groupName);
+    },
+    onCompleted: () => {
+      setReloadToken((token) => token + 1);
+    },
+  });
 
   const groupPath = useCallback(
     (groupName: string): string =>
@@ -82,29 +97,6 @@ export function GroupsListPage({ descriptor }: ServicePageProps): ReactElement {
     [groupPath, openGroup],
   );
 
-  const confirmDelete = async (): Promise<void> => {
-    const targets = deleteTargets ?? [];
-    if (targets.length === 0) return;
-
-    setDeleting(true);
-    setDeleteError(null);
-    for (const group of targets) {
-      try {
-        await deleteGroup(group.groupName);
-        flashbar.notify({ type: 'success', header: 'Group deleted', content: group.groupName });
-      } catch (caught) {
-        flashbar.notify({
-          type: 'error',
-          header: `Could not delete ${group.groupName}`,
-          content: toFriendlyIamError(caught).message,
-        });
-      }
-    }
-    setDeleting(false);
-    setDeleteTargets(null);
-    setReloadToken((token) => token + 1);
-  };
-
   return (
     <>
       <ResourceListPage<GroupRow>
@@ -122,15 +114,28 @@ export function GroupsListPage({ descriptor }: ServicePageProps): ReactElement {
             ...(nextToken === undefined ? {} : { nextToken }),
             ...(signal === undefined ? {} : { signal }),
           });
+          let failures = 0;
+          let firstError: ApiError | null = null;
           const enriched = await Promise.all(
             page.items.map(async (group): Promise<GroupRow> => {
+              const cached = userCounts.current.get(group.groupName);
+              if (cached !== undefined) return { ...group, userCount: cached };
               try {
                 const detail = await getGroup(group.groupName);
+                userCounts.current.set(group.groupName, detail.users.length);
                 return { ...group, userCount: detail.users.length };
-              } catch {
-                return { ...group };
+              } catch (caught) {
+                failures += 1;
+                firstError ??= toApiError(caught);
+                // Show the cached value when there is one; otherwise "—".
+                const fallback = userCounts.current.get(group.groupName);
+                return fallback === undefined ? { ...group } : { ...group, userCount: fallback };
               }
             }),
+          );
+          // An enrichment outage must not look like a page of empty groups.
+          setEnrichmentError(
+            page.items.length > 0 && failures === page.items.length ? firstError : null,
           );
           return {
             items: enriched,
@@ -153,6 +158,26 @@ export function GroupsListPage({ descriptor }: ServicePageProps): ReactElement {
             Create group
           </Button>
         }
+        notifications={
+          enrichmentError === null ? undefined : (
+            <Alert
+              type="warning"
+              header="Group member counts are unavailable"
+              action={
+                <Button
+                  onClick={() => {
+                    setReloadToken((token) => token + 1);
+                  }}
+                >
+                  Retry
+                </Button>
+              }
+            >
+              LocalStack did not answer GetGroup for this page, so member counts show “—”. The group
+              list itself is current. {enrichmentError.message}
+            </Alert>
+          )
+        }
         rowActions={(group) => (
           <ButtonDropdown
             variant="icon"
@@ -164,12 +189,11 @@ export function GroupsListPage({ descriptor }: ServicePageProps): ReactElement {
             ]}
             onItemClick={({ detail }) => {
               if (detail.id === 'view') openGroup(group.groupName);
-              if (detail.id === 'copy-arn') {
+              if (detail.id === 'copy-arn' && group.arn !== undefined) {
                 void navigator.clipboard?.writeText(group.arn);
               }
               if (detail.id === 'delete') {
-                setDeleteError(null);
-                setDeleteTargets([group]);
+                bulkDelete.requestDelete([group]);
               }
             }}
           />
@@ -180,8 +204,7 @@ export function GroupsListPage({ descriptor }: ServicePageProps): ReactElement {
             items={[{ id: 'delete', text: 'Delete' }]}
             onItemClick={({ detail }) => {
               if (detail.id === 'delete') {
-                setDeleteError(null);
-                setDeleteTargets(selected);
+                bulkDelete.requestDelete(selected);
               }
             }}
           >
@@ -192,23 +215,24 @@ export function GroupsListPage({ descriptor }: ServicePageProps): ReactElement {
         emptyDescription="Groups are collections of users that share permissions. Attach a policy to a group once instead of to every user."
       />
 
-      {deleteTargets === null ? null : (
+      {bulkDelete.targets === null ? null : (
         <DeleteConfirmModal
           visible
-          title={deleteTargets.length === 1 ? 'Delete group' : 'Delete groups'}
-          subjects={deleteTargets.map((group) => group.groupName)}
-          description="Deleting a group removes its attached policies permanently. Every member must be removed from the group first, and this action cannot be undone."
-          confirmationText={deleteTargets.length === 1 ? undefined : 'delete'}
-          submitLabel={deleteTargets.length === 1 ? 'Delete group' : 'Delete groups'}
-          loading={deleting}
-          {...(deleteError === null ? {} : { errorText: deleteError })}
+          title={bulkDelete.targets.length === 1 ? 'Delete group' : 'Delete groups'}
+          subjects={bulkDelete.targets.map((group) => group.groupName)}
+          description="Deleting a group is permanent. Remove every member and detach the policies attached to the group first; LocalStack refuses the deletion while either remains."
+          confirmationText={bulkDelete.targets.length === 1 ? undefined : 'delete'}
+          submitLabel={bulkDelete.targets.length === 1 ? 'Delete group' : 'Delete groups'}
+          loading={bulkDelete.deleting}
+          {...(bulkDelete.failures.length === 0
+            ? {}
+            : { errorText: bulkDelete.failures.join(' ') })}
           onDismiss={() => {
-            if (deleting) return;
-            setDeleteTargets(null);
-            setDeleteError(null);
+            if (bulkDelete.deleting) return;
+            bulkDelete.dismiss();
           }}
           onConfirm={() => {
-            void confirmDelete();
+            void bulkDelete.confirm();
           }}
         />
       )}

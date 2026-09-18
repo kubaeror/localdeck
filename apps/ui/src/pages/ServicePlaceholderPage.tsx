@@ -19,7 +19,9 @@ import { ConsoleBreadcrumbs } from '../components/ConsoleBreadcrumbs';
 import { EmptyState } from '../components/EmptyState';
 import { StatusBadge } from '../components/StatusBadge';
 import { useLocalStackStatus } from '../hooks/useLocalStackStatus';
+import { NOT_EMULATED_LABEL } from '../lib/copy';
 import { describeServiceStatus, formatRelativeTime } from '../lib/format';
+import { PARITY_LABELS } from '../lib/parity';
 import {
   ALL_SERVICES_PATH,
   CONSOLE_HOME_PATH,
@@ -107,6 +109,15 @@ export function ServicePlaceholderPage({
           </Alert>
         )}
 
+        {descriptor.available === false ? (
+          <Alert type="info" header="The LocalDeck api cannot proxy this service yet">
+            The running api does not have the AWS SDK package for{' '}
+            <Box variant="code">{descriptor.id}</Box> installed, so every operation would answer
+            501. Install the package in <Box variant="code">apps/api</Box> and rebuild the api to
+            browse it.
+          </Alert>
+        ) : null}
+
         <EmptyState
           iconKey={descriptor.iconKey}
           iconCategory={descriptor.category}
@@ -142,13 +153,13 @@ export function ServicePlaceholderPage({
             columns={2}
             items={[
               { label: 'Category', value: <Box>{descriptor.category}</Box> },
-              { label: 'Parity level', value: <Box>{descriptor.parityLevel}</Box> },
+              { label: 'Parity level', value: <Box>{PARITY_LABELS[descriptor.parityLevel]}</Box> },
               {
                 label: 'LocalStack status',
                 value: emulated ? (
                   <StatusBadge status={serviceStatus} />
                 ) : (
-                  <Box color="text-status-inactive">Not emulated locally</Box>
+                  <Box color="text-status-inactive">{NOT_EMULATED_LABEL}</Box>
                 ),
               },
               {

@@ -25,7 +25,15 @@ export interface BuildKubeconfigInput {
   cluster: KubeconfigCluster;
   /** Region the token plugin signs for. */
   region: string;
-  /** LocalStack endpoint the token plugin should call. */
+  /**
+   * LocalStack endpoint the token plugin should call. Use the *public*
+   * endpoint (`LOCALSTACK_PUBLIC_ENDPOINT`) when the file is executed outside
+   * the api container: `host.docker.internal` does not resolve on Linux hosts.
+   *
+   * The exec plugin relies on `AWS_ENDPOINT_URL`, which only AWS CLI v2 honors.
+   * AWS CLI v1 ignores it and would sign against real AWS with the caller's
+   * credentials, so the console documents CLI v2 as a requirement.
+   */
   localstackEndpoint: string;
   /**
    * The CLI profile the token plugin should use, when the caller has one.

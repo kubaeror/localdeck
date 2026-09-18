@@ -86,8 +86,8 @@ export function DeleteConfirmModal({
               </Box>
             ) : null}
             <SpaceBetween size="xxs">
-              {subjects.slice(0, 20).map((subject) => (
-                <Box key={subject} variant="code">
+              {subjects.slice(0, 20).map((subject, index) => (
+                <Box key={`${subject}-${index}`} variant="code">
                   {subject}
                 </Box>
               ))}

@@ -8,10 +8,11 @@
     "smoke": "playwright test",
     "smoke:headed": "playwright test --headed",
     "smoke:report": "playwright show-report",
+    "test:container": "playwright test --config playwright.container.config.ts",
     "screens": "tsx scripts/capture-screenshots.ts",
-    "lint": "eslint tests scripts playwright.config.ts",
+    "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "clean": "rm -rf playwright-report test-results .turbo"
+    "clean": "rm -rf playwright-report playwright-report-container test-results test-results-container .turbo"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0"

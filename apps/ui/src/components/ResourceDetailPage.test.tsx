@@ -101,6 +101,54 @@ describe('ResourceDetailPage', () => {
     expect(screen.queryByText('Overview content')).toBeNull();
   });
 
+  it('keeps the tabs mounted while refreshing when asked', () => {
+    renderPage(
+      <ResourceDetailPage
+        title="my-bucket"
+        breadcrumbs={[{ text: 'my-bucket' }]}
+        loading
+        keepTabsMounted
+        tabs={[
+          { id: 'overview', label: 'Overview', content: <div>Overview content</div> },
+          { id: 'tags', label: 'Tags', content: <div>Tags content</div> },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText('Overview content')).toBeDefined();
+    expect(screen.getByText('Refreshing…')).toBeDefined();
+  });
+
+  it('falls back to the first tab when the selected tab disappears', () => {
+    const { rerender } = render(
+      <MemoryRouter>
+        <ResourceDetailPage
+          title="my-bucket"
+          breadcrumbs={[{ text: 'my-bucket' }]}
+          tabs={[
+            { id: 'overview', label: 'Overview', content: <div>Overview content</div> },
+            { id: 'tags', label: 'Tags', content: <div>Tags content</div> },
+          ]}
+        />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Tags' }));
+    expect(screen.getByText('Tags content')).toBeDefined();
+
+    rerender(
+      <MemoryRouter>
+        <ResourceDetailPage
+          title="my-bucket"
+          breadcrumbs={[{ text: 'my-bucket' }]}
+          tabs={[{ id: 'overview', label: 'Overview', content: <div>Overview content</div> }]}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText('Overview content')).toBeDefined();
+  });
+
   it('renders notifications above the tabs', () => {
     renderPage(
       <ResourceDetailPage

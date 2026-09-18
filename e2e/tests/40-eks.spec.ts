@@ -1,16 +1,29 @@
 import { expect, test } from '@playwright/test';
-import { deleteClusterIfExists, fetchHealth, isEmulated, uniqueName } from './helpers';
+import {
+  E2E_RESOURCE_PREFIX,
+  deleteClusterIfExists,
+  fetchAccountId,
+  fetchConfig,
+  fetchHealth,
+  isEmulated,
+  trackResource,
+  uniqueName,
+} from './helpers';
 
 /**
  * P7 smoke: start EKS cluster creation through the console wizard.
  *
- * LocalStack's EKS provider starts a real k3d cluster in Docker and is an
- * Ultimate-plan feature. The test therefore runs the full wizard whenever the
- * emulator reports EKS (a licensed LocalStack, e.g. the one a developer runs
- * locally), and otherwise asserts the console's honest "not enabled" page —
- * the suite never pretends the emulator supports something it does not.
+ * LocalStack's EKS provider starts a real k3d cluster in Docker and requires an
+ * entitlement that includes EKS (the Ultimate plan). The test therefore runs
+ * the full wizard whenever the emulator reports EKS (a licensed LocalStack,
+ * e.g. the one a developer runs locally), and otherwise asserts the console's
+ * honest "not enabled" page — the suite never pretends the emulator supports
+ * something it does not.
  */
 test.describe('eks cluster creation', () => {
+  // Mutating spec: a retry could start a second k3d cluster.
+  test.describe.configure({ retries: 0 });
+
   test('starts cluster creation through the wizard (or reports it is not enabled)', async ({
     page,
     request,
@@ -24,13 +37,18 @@ test.describe('eks cluster creation', () => {
       test.info().annotations.push({
         type: 'localstack-eks',
         description:
-          'This LocalStack does not report EKS (Ultimate-plan feature); the honest not-enabled page was asserted instead of a fake creation flow.',
+          'This LocalStack does not report EKS (an entitlement that includes EKS is required); the honest not-enabled page was asserted instead of a fake creation flow.',
       });
       await expect(page.getByText('EKS is not enabled in this LocalStack instance')).toBeVisible();
       return;
     }
 
-    const cluster = uniqueName('localdeck-e2e');
+    // Fixtures follow the running api instead of hardcoding us-east-1 and the
+    // LocalStack account id.
+    const config = await fetchConfig(request);
+    const region = config.localstack.region;
+    const accountId = await fetchAccountId(request);
+    const cluster = uniqueName(`${E2E_RESOURCE_PREFIX}-cluster`);
     let submitted = false;
 
     try {
@@ -52,7 +70,7 @@ test.describe('eks cluster creation', () => {
         await page.getByRole('button', { name: 'Cluster IAM role' }).click();
         await page.getByRole('option', { name: 'Enter an ARN manually' }).click();
       }
-      await manualArn.fill(`arn:aws:iam::000000000000:role/${cluster}-role`);
+      await manualArn.fill(`arn:aws:iam::${accountId}:role/${cluster}-role`);
 
       // Networking: the wizard fetches the VPC and preselects the first two
       // subnets (EKS wants at least two AZs). Wait for that selection before
@@ -63,7 +81,9 @@ test.describe('eks cluster creation', () => {
       ).toBeVisible();
       // Cloudscape renders the selected subnet tokens below the trigger, so
       // wait for the first preselected token to appear before moving on.
-      await expect(page.getByText(/subnet-[0-9a-f]+ · us-east-1/).first()).toBeVisible({
+      await expect(
+        page.getByText(new RegExp(`subnet-[0-9a-f]+ · ${escapeRegExp(region)}`)).first(),
+      ).toBeVisible({
         timeout: 30_000,
       });
       await page.getByRole('button', { name: 'Next' }).click();
@@ -77,6 +97,7 @@ test.describe('eks cluster creation', () => {
 
       await page.getByRole('button', { name: 'Create cluster' }).first().click();
       submitted = true;
+      trackResource('eks-cluster', cluster);
 
       // CreateCluster is genuinely long-running: LocalStack starts a k3d
       // control plane before answering. The console navigates to the detail
@@ -93,3 +114,7 @@ test.describe('eks cluster creation', () => {
     }
   });
 });
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}

@@ -10,6 +10,21 @@ interface ImportMetaEnv {
   readonly VITE_DEV_PORT?: string;
   readonly VITE_PREVIEW_PORT?: string;
   /**
+   * Subpath the console is served from (for example `/localdeck/`). Vite uses
+   * it as `base` and the router as `basename`. Default `/`.
+   */
+  readonly VITE_BASE_PATH?: string;
+  /**
+   * Set to `true` to emit served source maps in production builds (they are
+   * hidden by default).
+   */
+  readonly VITE_DEBUG_SOURCEMAPS?: string;
+  /**
+   * Feature flag for the (not yet implemented) browser terminal entry in the
+   * top navigation. Hidden unless set to `true`.
+   */
+  readonly VITE_TERMINAL_ENABLED?: string;
+  /**
    * Base URL of a running LocalDeck api. Only the live console smoke test
    * (src/live-localstack.test.tsx) and the service module live tests read it;
    * the app always uses same-origin.

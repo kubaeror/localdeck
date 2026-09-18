@@ -1,4 +1,3 @@
-import type { ApiError } from '@localdeck/shared';
 import Box from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
 import Container from '@cloudscape-design/components/container';
@@ -7,15 +6,17 @@ import KeyValuePairs from '@cloudscape-design/components/key-value-pairs';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import Table from '@cloudscape-design/components/table';
 import type { TableProps } from '@cloudscape-design/components/table';
-import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
+import { useCallback, useMemo, type ReactElement } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { ResourceDetailPage } from '../../../components/ResourceDetailPage';
+import { StatusBadge } from '../../../components/StatusBadge';
 import { TagsEditor } from '../../../components/TagsEditor';
-import { toApiError } from '../../../lib/apiClient';
 import { formatDateTime } from '../../../lib/format';
 import { serviceConsolePath } from '../../paths';
 import type { ServicePageProps } from '../../types';
 import { getImage, type Ec2Image } from '../api';
+import { useEc2Resource } from '../hooks';
+import { imageStatusName } from '../status';
 import { EmulatedBadge } from '../components/EmulatedBadge';
 
 interface ImageBlockDevice {
@@ -61,67 +62,47 @@ export function AmiDetailPage({ descriptor }: ServicePageProps): ReactElement {
   const { imageId = '' } = useParams();
   const navigate = useNavigate();
 
-  const [image, setImage] = useState<Ec2Image | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<ApiError | null>(null);
-  const requestId = useRef(0);
-
-  const load = useCallback(async (): Promise<void> => {
-    const id = requestId.current + 1;
-    requestId.current = id;
-    setLoading(true);
-    try {
-      const result = await getImage(imageId);
-      if (requestId.current !== id) return;
-      setImage(result);
-      setError(null);
-    } catch (caught) {
-      if (requestId.current !== id) return;
-      setImage(null);
-      setError(toApiError(caught));
-    } finally {
-      if (requestId.current === id) setLoading(false);
-    }
-  }, [imageId]);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- image lookup for the route
-    void load();
-    return () => {
-      requestId.current += 1;
-    };
-  }, [load]);
+  const loader = useCallback(() => getImage(imageId), [imageId]);
+  const { data: image, loading, error, reload } = useEc2Resource(loader);
 
   const launchPath = `${serviceConsolePath(descriptor.id)}/instances/launch?imageId=${encodeURIComponent(imageId)}`;
 
-  const blockDevices = image === null ? [] : toBlockDevices(image);
+  const blockDevices = useMemo(() => (image === null ? [] : toBlockDevices(image)), [image]);
 
-  const blockDeviceColumns: readonly TableProps.ColumnDefinition<ImageBlockDevice>[] = [
-    {
-      id: 'deviceName',
-      header: 'Device name',
-      isRowHeader: true,
-      cell: (device) => <Box variant="code">{device.deviceName}</Box>,
-    },
-    { id: 'snapshot', header: 'Snapshot', cell: (device) => device.snapshotId ?? '—' },
-    {
-      id: 'size',
-      header: 'Size',
-      cell: (device) => (device.volumeSizeGiB === undefined ? '—' : `${device.volumeSizeGiB} GiB`),
-    },
-    { id: 'type', header: 'Volume type', cell: (device) => device.volumeType ?? '—' },
-    {
-      id: 'deleteOnTermination',
-      header: 'Delete on termination',
-      cell: (device) =>
-        device.deleteOnTermination === undefined ? '—' : device.deleteOnTermination ? 'Yes' : 'No',
-    },
-    {
-      id: 'encrypted',
-      header: 'Encrypted',
-      cell: (device) => (device.encrypted === undefined ? '—' : device.encrypted ? 'Yes' : 'No'),
-    },
-  ];
+  const blockDeviceColumns = useMemo<readonly TableProps.ColumnDefinition<ImageBlockDevice>[]>(
+    () => [
+      {
+        id: 'deviceName',
+        header: 'Device name',
+        isRowHeader: true,
+        cell: (device) => <Box variant="code">{device.deviceName}</Box>,
+      },
+      { id: 'snapshot', header: 'Snapshot', cell: (device) => device.snapshotId ?? '—' },
+      {
+        id: 'size',
+        header: 'Size',
+        cell: (device) =>
+          device.volumeSizeGiB === undefined ? '—' : `${device.volumeSizeGiB} GiB`,
+      },
+      { id: 'type', header: 'Volume type', cell: (device) => device.volumeType ?? '—' },
+      {
+        id: 'deleteOnTermination',
+        header: 'Delete on termination',
+        cell: (device) =>
+          device.deleteOnTermination === undefined
+            ? '—'
+            : device.deleteOnTermination
+              ? 'Yes'
+              : 'No',
+      },
+      {
+        id: 'encrypted',
+        header: 'Encrypted',
+        cell: (device) => (device.encrypted === undefined ? '—' : device.encrypted ? 'Yes' : 'No'),
+      },
+    ],
+    [],
+  );
 
   return (
     <ResourceDetailPage
@@ -135,7 +116,7 @@ export function AmiDetailPage({ descriptor }: ServicePageProps): ReactElement {
       loading={loading}
       error={error}
       onRetry={() => {
-        void load();
+        void reload();
       }}
       status={
         image === null ? undefined : (
@@ -170,7 +151,10 @@ export function AmiDetailPage({ descriptor }: ServicePageProps): ReactElement {
                             value: <Box variant="code">{image.imageId}</Box>,
                           },
                           { label: 'Name', value: image.name ?? '—' },
-                          { label: 'State', value: image.state ?? '—' },
+                          {
+                            label: 'State',
+                            value: <StatusBadge status={imageStatusName(image.state)} />,
+                          },
                           { label: 'Owner', value: image.ownerAlias ?? image.ownerId ?? '—' },
                           { label: 'Owner ID', value: image.ownerId ?? '—' },
                           { label: 'Architecture', value: image.architecture ?? '—' },
@@ -192,7 +176,7 @@ export function AmiDetailPage({ descriptor }: ServicePageProps): ReactElement {
                       />
                       {image.description === undefined ? null : (
                         <Box>
-                          <Box variant="awsui-key-label" display="inline">
+                          <Box variant="strong" display="inline">
                             Description:{' '}
                           </Box>
                           {image.description}
@@ -218,7 +202,7 @@ export function AmiDetailPage({ descriptor }: ServicePageProps): ReactElement {
                   >
                     <Table<ImageBlockDevice>
                       variant="embedded"
-                      items={blockDevices}
+                      items={[...blockDevices]}
                       columnDefinitions={blockDeviceColumns}
                       trackBy={(device) => device.deviceName}
                       ariaLabels={{ tableLabel: 'AMI block devices' }}

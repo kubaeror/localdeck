@@ -5,7 +5,6 @@ import Button from '@cloudscape-design/components/button';
 import Container from '@cloudscape-design/components/container';
 import ContentLayout from '@cloudscape-design/components/content-layout';
 import Header from '@cloudscape-design/components/header';
-import KeyValuePairs from '@cloudscape-design/components/key-value-pairs';
 import Link from '@cloudscape-design/components/link';
 import List from '@cloudscape-design/components/list';
 import SpaceBetween from '@cloudscape-design/components/space-between';
@@ -13,9 +12,15 @@ import type { ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ConsoleBreadcrumbs } from '../components/ConsoleBreadcrumbs';
 import { LocalStackStatusCard } from '../components/LocalStackStatusCard';
+import { RegistryCoverage } from '../components/RegistryCoverage';
 import { ServiceAvailabilityTable } from '../components/ServiceAvailabilityTable';
 import { useLocalStackStatus } from '../hooks/useLocalStackStatus';
 import { useServiceCatalog } from '../hooks/useServiceCatalog';
+import {
+  LOCALDECK_API_ERROR_TITLE,
+  LOCALSTACK_UNREACHABLE_TITLE,
+  STATUS_UNAVAILABLE_COPY,
+} from '../lib/copy';
 import { formatServiceName } from '../lib/format';
 import { ALL_SERVICES_PATH, serviceConsolePath } from '../services/paths';
 
@@ -61,8 +66,8 @@ export function ServiceHealthPage(): ReactElement {
             type="error"
             header={
               status.phase === 'unreachable'
-                ? 'LocalStack is not reachable'
-                : 'The LocalDeck api returned an error'
+                ? LOCALSTACK_UNREACHABLE_TITLE
+                : LOCALDECK_API_ERROR_TITLE
             }
             action={
               <Button
@@ -74,7 +79,7 @@ export function ServiceHealthPage(): ReactElement {
               </Button>
             }
           >
-            {status.error?.message ?? 'The status could not be loaded.'}
+            {status.error?.message ?? STATUS_UNAVAILABLE_COPY}
           </Alert>
         ) : null}
 
@@ -90,32 +95,7 @@ export function ServiceHealthPage(): ReactElement {
             </Header>
           }
         >
-          <KeyValuePairs
-            columns={3}
-            items={[
-              {
-                label: 'Registered services',
-                value:
-                  catalog.source === 'api' ? (
-                    <Box>{coverage.registered} (served by GET /api/services)</Box>
-                  ) : (
-                    <Box>{coverage.registered} (bundled with the ui)</Box>
-                  ),
-              },
-              {
-                label: 'Emulated locally',
-                value: <Box>{coverage.emulated}</Box>,
-              },
-              {
-                label: 'Not emulated locally',
-                value: <Box>{coverage.notEmulated.length}</Box>,
-              },
-              {
-                label: 'Stack services without a console entry',
-                value: <Box>{coverage.unregistered.length}</Box>,
-              },
-            ]}
-          />
+          <RegistryCoverage coverage={coverage} source={catalog.source} />
         </Container>
 
         <ServiceAvailabilityTable

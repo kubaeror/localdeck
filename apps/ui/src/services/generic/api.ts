@@ -34,6 +34,42 @@ export interface GenericTag {
 /** Response properties that never hold the resource collection. */
 const IGNORED_KEYS = new Set(['ResponseMetadata', '$metadata', 'NextToken', 'nextToken']);
 
+/** Metadata records that never carry a pagination token. */
+const IGNORED_TOKEN_CONTAINERS = new Set(['ResponseMetadata', '$metadata']);
+
+/**
+ * Response fields AWS uses for a continuation token, in detection order.
+ * `NextMarker` intentionally precedes `Marker`: services that echo the request
+ * marker and also return the next one (CloudFront, EFS) need the "next" field.
+ */
+const PAGINATION_FIELDS = [
+  'NextToken',
+  'nextToken',
+  'nextPageToken',
+  'NextContinuationToken',
+  'ContinuationToken',
+  'continuationToken',
+  'NextMarker',
+  'Marker',
+  'LastEvaluatedTableName',
+] as const;
+
+/**
+ * The request field that consumes each response token. Most services reuse the
+ * same name; DynamoDB is the notable exception.
+ */
+const TOKEN_REQUEST_FIELDS: Readonly<Record<string, string>> = {
+  NextToken: 'NextToken',
+  nextToken: 'nextToken',
+  nextPageToken: 'nextPageToken',
+  NextContinuationToken: 'ContinuationToken',
+  ContinuationToken: 'ContinuationToken',
+  continuationToken: 'continuationToken',
+  NextMarker: 'Marker',
+  Marker: 'Marker',
+  LastEvaluatedTableName: 'ExclusiveStartTableName',
+};
+
 /** Fields AWS uses for a resource name, in the order we prefer them. */
 const ID_FALLBACKS = [
   'Name',
@@ -57,8 +93,6 @@ const ID_FALLBACKS = [
   'StreamName',
   'VaultName',
 ];
-
-const PAGINATION_FIELDS = ['NextToken', 'nextToken', 'ContinuationToken', 'Marker', 'NextMarker'];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -151,20 +185,68 @@ export function mapListResult(
   };
 }
 
+/** One resolved continuation token plus the request field that consumes it. */
+export interface NextPageToken {
+  token: string;
+  requestField: string;
+}
+
+/**
+ * All dotted paths in a response that hold a known pagination token, including
+ * nested containers (CloudFront nests `NextMarker` inside `DistributionList`).
+ */
+function paginationPaths(result: unknown): string[] {
+  const paths: string[] = [];
+  const visit = (record: Record<string, unknown>, prefix: string, depth: number): void => {
+    if (depth > 3 || paths.length >= 50) return;
+    for (const field of PAGINATION_FIELDS) {
+      const value = record[field];
+      if (typeof value === 'string' && value.length > 0) {
+        paths.push(prefix.length === 0 ? field : `${prefix}.${field}`);
+      }
+    }
+    for (const [key, value] of Object.entries(record)) {
+      if (IGNORED_TOKEN_CONTAINERS.has(key)) continue;
+      if (isRecord(value)) visit(value, prefix.length === 0 ? key : `${prefix}.${key}`, depth + 1);
+    }
+  };
+  if (isRecord(result)) visit(result, '', 1);
+  return paths;
+}
+
+/**
+ * Resolves the next page contract for a list response. The registry's explicit
+ * `pagination` wins; otherwise the response field that produced the token
+ * decides the request field (`Marker` → `Marker`, `LastEvaluatedTableName` →
+ * `ExclusiveStartTableName`, …).
+ */
+export function nextPageFromResult(
+  result: unknown,
+  list: ServiceBrowserListOperation,
+): NextPageToken | undefined {
+  if (list.pagination !== undefined) {
+    const token = stringValue(readPath(result, list.pagination.responseField));
+    return token === undefined ? undefined : { token, requestField: list.pagination.requestField };
+  }
+  if (list.nextTokenParam !== undefined) {
+    const token = stringValue(readPath(result, list.nextTokenParam));
+    return token === undefined ? undefined : { token, requestField: list.nextTokenParam };
+  }
+  for (const path of paginationPaths(result)) {
+    const field = path.split('.').pop() ?? '';
+    const requestField = TOKEN_REQUEST_FIELDS[field];
+    const token = stringValue(readPath(result, path));
+    if (requestField !== undefined && token !== undefined) return { token, requestField };
+  }
+  return undefined;
+}
+
 /** Reads a continuation token from whichever field the service used. */
 export function nextTokenFromResult(
   result: unknown,
   list: ServiceBrowserListOperation,
 ): string | undefined {
-  if (list.nextTokenParam !== undefined) {
-    const direct = stringValue(readPath(result, list.nextTokenParam));
-    if (direct !== undefined) return direct;
-  }
-  for (const field of PAGINATION_FIELDS) {
-    const value = stringValue(readPath(result, field));
-    if (value !== undefined) return value;
-  }
-  return undefined;
+  return nextPageFromResult(result, list)?.token;
 }
 
 /** Builds the input for one mapped operation, merging required params and id. */
@@ -179,6 +261,18 @@ export function browserOperationInput(
   return input;
 }
 
+/**
+ * The request field a pagination token belongs to, remembered per binding.
+ * A page response determines it (from the registry contract or the response
+ * field) and the next "load more" call reuses it; without this an inferred
+ * `Marker` token would be sent as `NextToken` and the same page would repeat.
+ */
+const tokenRequestFields = new Map<string, string>();
+
+function bindingKey(descriptor: ServiceDescriptor, list: ServiceBrowserListOperation): string {
+  return `${descriptor.id}/${list.operation}`;
+}
+
 /** Fetches one page of resources through the service's listOp. */
 export async function listGenericResources(
   descriptor: ServiceDescriptor,
@@ -188,14 +282,23 @@ export async function listGenericResources(
   if (browser === undefined) return toPaginated([]);
 
   const list = browser.list;
-  const tokenParam = list.nextTokenParam ?? 'NextToken';
+  const key = bindingKey(descriptor, list);
+  const tokenParam =
+    list.pagination?.requestField ??
+    list.nextTokenParam ??
+    (options.nextToken === undefined ? 'NextToken' : (tokenRequestFields.get(key) ?? 'NextToken'));
   const input: Record<string, unknown> = {
     ...browserOperationInput(list),
     ...(options.nextToken === undefined ? {} : { [tokenParam]: options.nextToken }),
   };
   const result = await callServiceOperation(descriptor.id, list.operation, input, options.signal);
-  const { rows, nextToken } = mapListResult(result, list);
-  return toPaginated(rows, nextToken);
+  const { rows } = mapListResult(result, list);
+  const nextPage = nextPageFromResult(result, list);
+  // Remember the field for this binding. It never changes for a given list
+  // operation, so a page without a token leaves the entry in place: a
+  // concurrent detail-page walk may still need it.
+  if (nextPage !== undefined) tokenRequestFields.set(key, nextPage.requestField);
+  return toPaginated(rows, nextPage?.token);
 }
 
 /**
@@ -217,6 +320,16 @@ export async function describeGenericResource(
       browserOperationInput(browser.describe, resourceId),
       signal,
     );
+    const itemField = browser.describe.resultItemField;
+    if (itemField !== undefined) {
+      const value = readPath(result, itemField);
+      // Batch describes (CodeBuild BatchGetProjects) return a list; unwrap the
+      // requested resource so the detail page shows its fields, not the batch.
+      if (Array.isArray(value)) {
+        const item = value.find(isRecord);
+        if (item !== undefined) return item;
+      }
+    }
     return isRecord(result) ? result : { value: result };
   }
 
@@ -289,9 +402,12 @@ export async function loadGenericResourceTags(
       signal,
     );
     const path = browser.tags.resultPath ?? 'Tags';
-    return tagsFromArray(readPath(result, path));
+    const value = readPath(result, path);
+    // A missing or non-array path is "unavailable", not "no tags": the detail
+    // page must not claim a resource is untagged when the read was misconfigured.
+    return Array.isArray(value) ? tagsFromArray(value) : undefined;
   }
 
-  const embedded = tagsFromArray(described.Tags ?? described.tags);
-  return Array.isArray(described.Tags ?? described.tags) ? embedded : undefined;
+  const embedded = described.Tags ?? described.tags;
+  return Array.isArray(embedded) ? tagsFromArray(embedded) : undefined;
 }

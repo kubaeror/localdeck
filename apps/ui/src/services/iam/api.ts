@@ -1,4 +1,5 @@
 import type { AwsTag, Paginated } from '@localdeck/shared';
+import { ApiClientError, toApiError } from '../../lib/apiClient';
 import { callServiceOperation } from '../../lib/serviceOperations';
 import { SERVICE_ID } from './spec';
 
@@ -19,6 +20,9 @@ import { SERVICE_ID } from './spec';
 /** Page size the console asks IAM for; LocalStack honors `MaxItems`. */
 const PAGE_SIZE = 100;
 
+/** Page size for "must not truncate" reads (user groups, entities, attached policies). */
+const COMPLETE_PAGE_SIZE = 1000;
+
 /** Cap for the dashboard's `listAll…` helpers, so a huge account stays usable. */
 const COLLECT_LIMIT = 1000;
 
@@ -26,11 +30,29 @@ export interface IamListOptions {
   /** `Marker` from the previous page, when one was returned. */
   nextToken?: string;
   signal?: AbortSignal;
+  /** Override `MaxItems`; the dashboard asks for the whole account in one page. */
+  pageSize?: number;
+}
+
+/** Options for the `listAll…` helpers used by the dashboard and pickers. */
+export interface IamCollectOptions {
+  signal?: AbortSignal;
+  /** `MaxItems` for every page; defaults to {@link PAGE_SIZE}. */
+  pageSize?: number;
 }
 
 function toIso(value: unknown): string | undefined {
   if (value instanceof Date) return value.toISOString();
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/**
+ * The api answered 2xx with a payload the module cannot map. Reporting this as
+ * a plain `Error` would surface as "could not reach the api", which is wrong:
+ * the request succeeded, the contract did not.
+ */
+function unexpectedResponse(message: string): ApiClientError {
+  return new ApiClientError({ code: 'UNEXPECTED_RESPONSE', statusCode: 200, message });
 }
 
 /**
@@ -59,13 +81,18 @@ interface MarkerPage {
   Marker?: string;
 }
 
+/** The continuation marker of one `Marker` page, when the service sent one. */
+function nextMarker(result: MarkerPage): string | undefined {
+  return result.IsTruncated === true && result.Marker !== undefined && result.Marker.length > 0
+    ? result.Marker
+    : undefined;
+}
+
 function toPage<T>(items: readonly T[], result: MarkerPage): Paginated<T> {
-  const marker = result.Marker;
+  const marker = nextMarker(result);
   return {
     items,
-    ...(result.IsTruncated === true && marker !== undefined && marker.length > 0
-      ? { nextToken: marker }
-      : {}),
+    ...(marker === undefined ? {} : { nextToken: marker }),
   };
 }
 
@@ -84,12 +111,80 @@ async function collectAll<T>(
   return items;
 }
 
+/**
+ * Normalizes a tag set before it is sent to IAM: trims keys, drops rows without
+ * a key and keeps the last value for a repeated key. The editor validates with
+ * `validateTags` first; this is the defensive boundary so a value-only row can
+ * never reach `TagUser`/`TagRole`/`CreateUser`/`CreateRole`.
+ */
+export function normalizeTags(tags: readonly AwsTag[]): readonly AwsTag[] {
+  const byKey = new Map<string, string>();
+  for (const tag of tags) {
+    const key = tag.Key.trim();
+    if (key.length === 0) continue;
+    byKey.set(key, tag.Value);
+  }
+  return [...byKey].map(([Key, Value]) => ({ Key, Value }));
+}
+
+/**
+ * Applies tag upserts and removals one phase at a time. A failure in the first
+ * phase still allows the second, and the thrown error names what was already
+ * applied so the page can tell the user which keys changed.
+ */
+async function writeTagDiff(input: {
+  current: readonly AwsTag[];
+  next: readonly AwsTag[];
+  tag: (tags: readonly AwsTag[]) => Promise<void>;
+  untag: (keys: readonly string[]) => Promise<void>;
+  label: string;
+}): Promise<void> {
+  const normalizedCurrent = normalizeTags(input.current);
+  const normalizedNext = normalizeTags(input.next);
+  const currentByKey = new Map(normalizedCurrent.map((tag) => [tag.Key, tag.Value]));
+  const nextByKey = new Map(normalizedNext.map((tag) => [tag.Key, tag.Value]));
+
+  const upserts = normalizedNext.filter((tag) => currentByKey.get(tag.Key) !== tag.Value);
+  const removedKeys = normalizedCurrent
+    .filter((tag) => !nextByKey.has(tag.Key))
+    .map((tag) => tag.Key);
+
+  const applied: string[] = [];
+  const failures: string[] = [];
+  if (upserts.length > 0) {
+    try {
+      await input.tag(upserts);
+      applied.push(...upserts.map((tag) => tag.Key));
+    } catch (caught) {
+      failures.push(toApiError(caught).message);
+    }
+  }
+  if (removedKeys.length > 0) {
+    try {
+      await input.untag(removedKeys);
+      applied.push(...removedKeys.map((key) => `removed ${key}`));
+    } catch (caught) {
+      failures.push(toApiError(caught).message);
+    }
+  }
+  if (failures.length > 0) {
+    throw new ApiClientError({
+      code: 'TAG_WRITE_PARTIAL',
+      statusCode: 500,
+      message: `${input.label}: ${failures.join(' ')}${
+        applied.length === 0 ? '' : ` Already applied: ${applied.join(', ')}.`
+      }`,
+    });
+  }
+}
+
 // ----------------------------------------------------------------- users
 
 export interface IamUser {
   userName: string;
   userId?: string;
-  arn: string;
+  /** Absent when LocalStack does not report an ARN; never fabricated. */
+  arn?: string;
   path?: string;
   createDate?: string;
   passwordLastUsed?: string;
@@ -112,10 +207,11 @@ function toIamUser(raw: RawUser): IamUser | null {
   if (typeof raw.UserName !== 'string' || raw.UserName.length === 0) return null;
   const createDate = toIso(raw.CreateDate);
   const passwordLastUsed = toIso(raw.PasswordLastUsed);
+  const arn = typeof raw.Arn === 'string' && raw.Arn.length > 0 ? raw.Arn : undefined;
   return {
     userName: raw.UserName,
     ...(raw.UserId === undefined ? {} : { userId: raw.UserId }),
-    arn: raw.Arn ?? `arn:aws:iam::000000000000:user/${raw.UserName}`,
+    ...(arn === undefined ? {} : { arn }),
     ...(raw.Path === undefined ? {} : { path: raw.Path }),
     ...(createDate === undefined ? {} : { createDate }),
     ...(passwordLastUsed === undefined ? {} : { passwordLastUsed }),
@@ -130,7 +226,7 @@ export async function listUsers(options: IamListOptions = {}): Promise<Paginated
     SERVICE_ID,
     'ListUsers',
     {
-      MaxItems: PAGE_SIZE,
+      MaxItems: options.pageSize ?? PAGE_SIZE,
       ...(options.nextToken === undefined ? {} : { Marker: options.nextToken }),
     },
     options.signal,
@@ -143,8 +239,13 @@ export async function listUsers(options: IamListOptions = {}): Promise<Paginated
 }
 
 /** Every user, paging until LocalStack is done (the dashboard's count). */
-export async function listAllUsers(): Promise<readonly IamUser[]> {
-  return collectAll((nextToken) => listUsers(nextToken === undefined ? {} : { nextToken }));
+export async function listAllUsers(options: IamCollectOptions = {}): Promise<readonly IamUser[]> {
+  return collectAll((nextToken) =>
+    listUsers({
+      ...options,
+      ...(nextToken === undefined ? {} : { nextToken }),
+    }),
+  );
 }
 
 /** `GetUser`; the only read that carries the user's tags. */
@@ -154,7 +255,7 @@ export async function getUser(userName: string): Promise<IamUser> {
   });
   const user = result.User === undefined ? null : toIamUser(result.User);
   if (user === null) {
-    throw new Error(`LocalStack returned no user for "${userName}".`);
+    throw unexpectedResponse(`LocalStack returned no user for "${userName}".`);
   }
   return user;
 }
@@ -166,13 +267,14 @@ export interface CreateUserInput {
 
 /** `CreateUser`, with tags applied in the same call. */
 export async function createUser(input: CreateUserInput): Promise<IamUser> {
+  const tags = normalizeTags(input.tags);
   const result = await callServiceOperation<{ User?: RawUser }>(SERVICE_ID, 'CreateUser', {
     UserName: input.userName,
-    ...(input.tags.length === 0 ? {} : { Tags: [...input.tags] }),
+    ...(tags.length === 0 ? {} : { Tags: [...tags] }),
   });
   const user = result.User === undefined ? null : toIamUser(result.User);
   if (user === null) {
-    throw new Error(`LocalStack returned no user for "${input.userName}".`);
+    throw unexpectedResponse(`LocalStack returned no user for "${input.userName}".`);
   }
   return user;
 }
@@ -191,31 +293,26 @@ export async function listUserTags(userName: string): Promise<readonly AwsTag[]>
 
 /**
  * Replaces a user's tag set. IAM tags are individual (`TagUser`/`UntagUser`),
- * so this reads the current set and applies the difference only.
+ * so this reads the current set and applies the difference only. A failure in
+ * one phase still reports which keys were applied.
  */
 export async function putUserTags(input: {
   userName: string;
   tags: readonly AwsTag[];
 }): Promise<void> {
   const current = await listUserTags(input.userName);
-  const currentByKey = new Map(current.map((tag) => [tag.Key, tag.Value]));
-  const nextByKey = new Map(input.tags.map((tag) => [tag.Key, tag.Value]));
-
-  const upserts = input.tags.filter((tag) => currentByKey.get(tag.Key) !== tag.Value);
-  const removedKeys = current.filter((tag) => !nextByKey.has(tag.Key)).map((tag) => tag.Key);
-
-  if (upserts.length > 0) {
-    await callServiceOperation(SERVICE_ID, 'TagUser', {
-      UserName: input.userName,
-      Tags: upserts,
-    });
-  }
-  if (removedKeys.length > 0) {
-    await callServiceOperation(SERVICE_ID, 'UntagUser', {
-      UserName: input.userName,
-      TagKeys: removedKeys,
-    });
-  }
+  await writeTagDiff({
+    current,
+    next: input.tags,
+    label: `Could not save tags for ${input.userName}`,
+    tag: (tags) =>
+      callServiceOperation(SERVICE_ID, 'TagUser', { UserName: input.userName, Tags: tags }),
+    untag: (keys) =>
+      callServiceOperation(SERVICE_ID, 'UntagUser', {
+        UserName: input.userName,
+        TagKeys: keys,
+      }),
+  });
 }
 
 // ------------------------------------------------------------ access keys
@@ -281,7 +378,7 @@ export async function createAccessKey(userName: string): Promise<CreatedAccessKe
     typeof key.AccessKeyId !== 'string' ||
     typeof key.SecretAccessKey !== 'string'
   ) {
-    throw new Error(`LocalStack returned no access key for "${userName}".`);
+    throw unexpectedResponse(`LocalStack returned no access key for "${userName}".`);
   }
   const createDate = toIso(key.CreateDate);
   return {
@@ -321,7 +418,8 @@ export async function deleteAccessKey(input: {
 export interface IamGroup {
   groupName: string;
   groupId?: string;
-  arn: string;
+  /** Absent when LocalStack does not report an ARN; never fabricated. */
+  arn?: string;
   path?: string;
   createDate?: string;
   raw: Record<string, unknown>;
@@ -338,10 +436,11 @@ interface RawGroup {
 function toIamGroup(raw: RawGroup): IamGroup | null {
   if (typeof raw.GroupName !== 'string' || raw.GroupName.length === 0) return null;
   const createDate = toIso(raw.CreateDate);
+  const arn = typeof raw.Arn === 'string' && raw.Arn.length > 0 ? raw.Arn : undefined;
   return {
     groupName: raw.GroupName,
     ...(raw.GroupId === undefined ? {} : { groupId: raw.GroupId }),
-    arn: raw.Arn ?? `arn:aws:iam::000000000000:group/${raw.GroupName}`,
+    ...(arn === undefined ? {} : { arn }),
     ...(raw.Path === undefined ? {} : { path: raw.Path }),
     ...(createDate === undefined ? {} : { createDate }),
     raw: raw as Record<string, unknown>,
@@ -354,7 +453,7 @@ export async function listGroups(options: IamListOptions = {}): Promise<Paginate
     SERVICE_ID,
     'ListGroups',
     {
-      MaxItems: PAGE_SIZE,
+      MaxItems: options.pageSize ?? PAGE_SIZE,
       ...(options.nextToken === undefined ? {} : { Marker: options.nextToken }),
     },
     options.signal,
@@ -367,8 +466,13 @@ export async function listGroups(options: IamListOptions = {}): Promise<Paginate
 }
 
 /** Every group, paging until LocalStack is done. */
-export async function listAllGroups(): Promise<readonly IamGroup[]> {
-  return collectAll((nextToken) => listGroups(nextToken === undefined ? {} : { nextToken }));
+export async function listAllGroups(options: IamCollectOptions = {}): Promise<readonly IamGroup[]> {
+  return collectAll((nextToken) =>
+    listGroups({
+      ...options,
+      ...(nextToken === undefined ? {} : { nextToken }),
+    }),
+  );
 }
 
 /** `GetGroup`; also returns the members, which the console's Users tab shows. */
@@ -382,7 +486,7 @@ export async function getGroup(
   );
   const group = result.Group === undefined ? null : toIamGroup(result.Group);
   if (group === null) {
-    throw new Error(`LocalStack returned no group for "${groupName}".`);
+    throw unexpectedResponse(`LocalStack returned no group for "${groupName}".`);
   }
   const users = (result.Users ?? []).flatMap((raw): IamUser[] => {
     const user = toIamUser(raw);
@@ -397,7 +501,7 @@ export async function createGroup(groupName: string): Promise<IamGroup> {
   });
   const group = result.Group === undefined ? null : toIamGroup(result.Group);
   if (group === null) {
-    throw new Error(`LocalStack returned no group for "${groupName}".`);
+    throw unexpectedResponse(`LocalStack returned no group for "${groupName}".`);
   }
   return group;
 }
@@ -406,14 +510,33 @@ export async function deleteGroup(groupName: string): Promise<void> {
   await callServiceOperation(SERVICE_ID, 'DeleteGroup', { GroupName: groupName });
 }
 
-/** `ListGroupsForUser`; the console's user detail Groups tab. */
-export async function listGroupsForUser(userName: string): Promise<readonly IamGroup[]> {
-  const result = await callServiceOperation<{ Groups?: RawGroup[] }>(
-    SERVICE_ID,
-    'ListGroupsForUser',
-    { UserName: userName },
-  );
-  return (result.Groups ?? []).flatMap((raw): IamGroup[] => {
+/**
+ * `ListGroupsForUser`; the console's user detail Groups tab. IAM truncates at
+ * `MaxItems` (100 by default), so this walks every `Marker` page: a user in
+ * more groups than one page must not silently lose memberships.
+ */
+export async function listGroupsForUser(
+  userName: string,
+  signal?: AbortSignal,
+): Promise<readonly IamGroup[]> {
+  const raws: RawGroup[] = [];
+  let nextToken: string | undefined;
+  do {
+    const result = await callServiceOperation<{ Groups?: RawGroup[] } & MarkerPage>(
+      SERVICE_ID,
+      'ListGroupsForUser',
+      {
+        UserName: userName,
+        MaxItems: COMPLETE_PAGE_SIZE,
+        ...(nextToken === undefined ? {} : { Marker: nextToken }),
+      },
+      signal,
+    );
+    raws.push(...(result.Groups ?? []));
+    nextToken = nextMarker(result);
+  } while (nextToken !== undefined);
+
+  return raws.flatMap((raw): IamGroup[] => {
     const group = toIamGroup(raw);
     return group === null ? [] : [group];
   });
@@ -444,7 +567,8 @@ export async function removeUserFromGroup(input: {
 export interface IamRole {
   roleName: string;
   roleId?: string;
-  arn: string;
+  /** Absent when LocalStack does not report an ARN; never fabricated. */
+  arn?: string;
   path?: string;
   createDate?: string;
   description?: string;
@@ -471,10 +595,11 @@ function toIamRole(raw: RawRole): IamRole | null {
   if (typeof raw.RoleName !== 'string' || raw.RoleName.length === 0) return null;
   const createDate = toIso(raw.CreateDate);
   const assumeRolePolicyDocument = decodePolicyDocument(raw.AssumeRolePolicyDocument);
+  const arn = typeof raw.Arn === 'string' && raw.Arn.length > 0 ? raw.Arn : undefined;
   return {
     roleName: raw.RoleName,
     ...(raw.RoleId === undefined ? {} : { roleId: raw.RoleId }),
-    arn: raw.Arn ?? `arn:aws:iam::000000000000:role/${raw.RoleName}`,
+    ...(arn === undefined ? {} : { arn }),
     ...(raw.Path === undefined ? {} : { path: raw.Path }),
     ...(createDate === undefined ? {} : { createDate }),
     ...(raw.Description === undefined ? {} : { description: raw.Description }),
@@ -491,7 +616,7 @@ export async function listRoles(options: IamListOptions = {}): Promise<Paginated
     SERVICE_ID,
     'ListRoles',
     {
-      MaxItems: PAGE_SIZE,
+      MaxItems: options.pageSize ?? PAGE_SIZE,
       ...(options.nextToken === undefined ? {} : { Marker: options.nextToken }),
     },
     options.signal,
@@ -504,8 +629,13 @@ export async function listRoles(options: IamListOptions = {}): Promise<Paginated
 }
 
 /** Every role, paging until LocalStack is done. */
-export async function listAllRoles(): Promise<readonly IamRole[]> {
-  return collectAll((nextToken) => listRoles(nextToken === undefined ? {} : { nextToken }));
+export async function listAllRoles(options: IamCollectOptions = {}): Promise<readonly IamRole[]> {
+  return collectAll((nextToken) =>
+    listRoles({
+      ...options,
+      ...(nextToken === undefined ? {} : { nextToken }),
+    }),
+  );
 }
 
 export async function getRole(roleName: string): Promise<IamRole> {
@@ -514,7 +644,7 @@ export async function getRole(roleName: string): Promise<IamRole> {
   });
   const role = result.Role === undefined ? null : toIamRole(result.Role);
   if (role === null) {
-    throw new Error(`LocalStack returned no role for "${roleName}".`);
+    throw unexpectedResponse(`LocalStack returned no role for "${roleName}".`);
   }
   return role;
 }
@@ -529,17 +659,18 @@ export interface CreateRoleInput {
 
 /** `CreateRole` with the trust policy, description and tags in one call. */
 export async function createRole(input: CreateRoleInput): Promise<IamRole> {
+  const tags = normalizeTags(input.tags);
   const result = await callServiceOperation<{ Role?: RawRole }>(SERVICE_ID, 'CreateRole', {
     RoleName: input.roleName,
     AssumeRolePolicyDocument: input.trustPolicy,
     ...(input.description === undefined || input.description.length === 0
       ? {}
       : { Description: input.description }),
-    ...(input.tags.length === 0 ? {} : { Tags: [...input.tags] }),
+    ...(tags.length === 0 ? {} : { Tags: [...tags] }),
   });
   const role = result.Role === undefined ? null : toIamRole(result.Role);
   if (role === null) {
-    throw new Error(`LocalStack returned no role for "${input.roleName}".`);
+    throw unexpectedResponse(`LocalStack returned no role for "${input.roleName}".`);
   }
   return role;
 }
@@ -573,24 +704,18 @@ export async function putRoleTags(input: {
   tags: readonly AwsTag[];
 }): Promise<void> {
   const current = await listRoleTags(input.roleName);
-  const currentByKey = new Map(current.map((tag) => [tag.Key, tag.Value]));
-  const nextByKey = new Map(input.tags.map((tag) => [tag.Key, tag.Value]));
-
-  const upserts = input.tags.filter((tag) => currentByKey.get(tag.Key) !== tag.Value);
-  const removedKeys = current.filter((tag) => !nextByKey.has(tag.Key)).map((tag) => tag.Key);
-
-  if (upserts.length > 0) {
-    await callServiceOperation(SERVICE_ID, 'TagRole', {
-      RoleName: input.roleName,
-      Tags: upserts,
-    });
-  }
-  if (removedKeys.length > 0) {
-    await callServiceOperation(SERVICE_ID, 'UntagRole', {
-      RoleName: input.roleName,
-      TagKeys: removedKeys,
-    });
-  }
+  await writeTagDiff({
+    current,
+    next: input.tags,
+    label: `Could not save tags for ${input.roleName}`,
+    tag: (tags) =>
+      callServiceOperation(SERVICE_ID, 'TagRole', { RoleName: input.roleName, Tags: tags }),
+    untag: (keys) =>
+      callServiceOperation(SERVICE_ID, 'UntagRole', {
+        RoleName: input.roleName,
+        TagKeys: keys,
+      }),
+  });
 }
 
 // -------------------------------------------------------------- policies
@@ -620,7 +745,6 @@ interface RawPolicy {
   Path?: string;
   DefaultVersionId?: string;
   AttachmentCount?: number;
-  PermissionsBoundaryUsageCount?: number;
   IsAttachable?: boolean;
   CreateDate?: Date | string;
   UpdateDate?: Date | string;
@@ -658,7 +782,7 @@ export async function listPolicies(
     'ListPolicies',
     {
       Scope: input.scope,
-      MaxItems: PAGE_SIZE,
+      MaxItems: input.pageSize ?? PAGE_SIZE,
       ...(input.nextToken === undefined ? {} : { Marker: input.nextToken }),
     },
     input.signal,
@@ -675,9 +799,16 @@ export async function listPolicies(
  * collection has more than a thousand entries, so the dashboard only collects
  * the customer-managed scope and the policies list pages lazily.
  */
-export async function listAllPolicies(scope: IamPolicyScope): Promise<readonly IamPolicy[]> {
+export async function listAllPolicies(
+  scope: IamPolicyScope,
+  options: IamCollectOptions = {},
+): Promise<readonly IamPolicy[]> {
   return collectAll((nextToken) =>
-    listPolicies(nextToken === undefined ? { scope } : { scope, nextToken }),
+    listPolicies({
+      scope,
+      ...options,
+      ...(nextToken === undefined ? {} : { nextToken }),
+    }),
   );
 }
 
@@ -687,7 +818,7 @@ export async function getPolicy(policyArn: string): Promise<IamPolicy> {
   });
   const policy = result.Policy === undefined ? null : toIamPolicy(result.Policy);
   if (policy === null) {
-    throw new Error(`LocalStack returned no policy for "${policyArn}".`);
+    throw unexpectedResponse(`LocalStack returned no policy for "${policyArn}".`);
   }
   return policy;
 }
@@ -710,7 +841,7 @@ export async function createPolicy(input: CreatePolicyInput): Promise<IamPolicy>
   });
   const policy = result.Policy === undefined ? null : toIamPolicy(result.Policy);
   if (policy === null) {
-    throw new Error(`LocalStack returned no policy for "${input.policyName}".`);
+    throw unexpectedResponse(`LocalStack returned no policy for "${input.policyName}".`);
   }
   return policy;
 }
@@ -732,7 +863,9 @@ export async function getPolicyDocument(input: {
 }): Promise<string> {
   const versionId = input.versionId ?? (await getPolicy(input.policyArn)).defaultVersionId;
   if (versionId === undefined) {
-    throw new Error(`LocalStack did not report a default version for "${input.policyArn}".`);
+    throw unexpectedResponse(
+      `LocalStack did not report a default version for "${input.policyArn}".`,
+    );
   }
   const result = await callServiceOperation<{ PolicyVersion?: { Document?: unknown } }>(
     SERVICE_ID,
@@ -757,37 +890,117 @@ export async function createPolicyVersion(input: {
   });
 }
 
+export interface IamPolicyVersion {
+  versionId: string;
+  isDefault: boolean;
+  createDate?: string;
+}
+
+/**
+ * `ListPolicyVersions` — every version of a customer managed policy. IAM keeps
+ * at most five versions, so the detail page uses this to explain the limit and
+ * to free a slot by deleting an old, non-default version.
+ */
+export async function listPolicyVersions(
+  policyArn: string,
+  signal?: AbortSignal,
+): Promise<readonly IamPolicyVersion[]> {
+  const result = await callServiceOperation<{
+    Versions?: readonly {
+      VersionId?: string;
+      IsDefaultVersion?: boolean;
+      CreateDate?: Date | string;
+    }[];
+  }>(SERVICE_ID, 'ListPolicyVersions', { PolicyArn: policyArn }, signal);
+
+  return (result.Versions ?? []).flatMap((raw): IamPolicyVersion[] => {
+    const versionId = raw.VersionId;
+    if (typeof versionId !== 'string' || versionId.length === 0) return [];
+    return [
+      {
+        versionId,
+        isDefault: raw.IsDefaultVersion === true,
+        ...(toIso(raw.CreateDate) === undefined ? {} : { createDate: toIso(raw.CreateDate) }),
+      },
+    ];
+  });
+}
+
+/**
+ * `DeletePolicyVersion` — removes one non-default version. The default version
+ * cannot be deleted (LocalStack answers `DeleteConflict`), which is why the
+ * page only offers the action on non-default rows.
+ */
+export async function deletePolicyVersion(input: {
+  policyArn: string;
+  versionId: string;
+}): Promise<void> {
+  await callServiceOperation(SERVICE_ID, 'DeletePolicyVersion', {
+    PolicyArn: input.policyArn,
+    VersionId: input.versionId,
+  });
+}
+
 export interface IamPolicyEntities {
   users: readonly { name: string; id?: string }[];
   groups: readonly { name: string; id?: string }[];
   roles: readonly { name: string; id?: string }[];
 }
 
-/** `ListEntitiesForPolicy` — who the policy is attached to. */
-export async function listEntitiesForPolicy(policyArn: string): Promise<IamPolicyEntities> {
-  const result = await callServiceOperation<{
-    PolicyUsers?: { UserName?: string; UserId?: string }[];
-    PolicyGroups?: { GroupName?: string; GroupId?: string }[];
-    PolicyRoles?: { RoleName?: string; RoleId?: string }[];
-  }>(SERVICE_ID, 'ListEntitiesForPolicy', { PolicyArn: policyArn });
+/**
+ * `ListEntitiesForPolicy` — who the policy is attached to. IAM pages this at
+ * `MaxItems` (100 by default), so every `Marker` page is collected; a partly
+ * attached policy must not look unattached.
+ */
+export async function listEntitiesForPolicy(
+  policyArn: string,
+  signal?: AbortSignal,
+): Promise<IamPolicyEntities> {
+  const users: { UserName?: string; UserId?: string }[] = [];
+  const groups: { GroupName?: string; GroupId?: string }[] = [];
+  const roles: { RoleName?: string; RoleId?: string }[] = [];
+  let nextToken: string | undefined;
+
+  do {
+    const result = await callServiceOperation<
+      {
+        PolicyUsers?: { UserName?: string; UserId?: string }[];
+        PolicyGroups?: { GroupName?: string; GroupId?: string }[];
+        PolicyRoles?: { RoleName?: string; RoleId?: string }[];
+      } & MarkerPage
+    >(
+      SERVICE_ID,
+      'ListEntitiesForPolicy',
+      {
+        PolicyArn: policyArn,
+        MaxItems: COMPLETE_PAGE_SIZE,
+        ...(nextToken === undefined ? {} : { Marker: nextToken }),
+      },
+      signal,
+    );
+    users.push(...(result.PolicyUsers ?? []));
+    groups.push(...(result.PolicyGroups ?? []));
+    roles.push(...(result.PolicyRoles ?? []));
+    nextToken = nextMarker(result);
+  } while (nextToken !== undefined);
 
   const nameOf = (value: string | undefined): string | null =>
     typeof value === 'string' && value.length > 0 ? value : null;
 
   return {
-    users: (result.PolicyUsers ?? []).flatMap((entry) => {
+    users: users.flatMap((entry) => {
       const name = nameOf(entry.UserName);
       return name === null
         ? []
         : [{ name, ...(entry.UserId === undefined ? {} : { id: entry.UserId }) }];
     }),
-    groups: (result.PolicyGroups ?? []).flatMap((entry) => {
+    groups: groups.flatMap((entry) => {
       const name = nameOf(entry.GroupName);
       return name === null
         ? []
         : [{ name, ...(entry.GroupId === undefined ? {} : { id: entry.GroupId }) }];
     }),
-    roles: (result.PolicyRoles ?? []).flatMap((entry) => {
+    roles: roles.flatMap((entry) => {
       const name = nameOf(entry.RoleName);
       return name === null
         ? []
@@ -843,18 +1056,36 @@ interface RawAttachedPolicy {
   PolicyArn?: string;
 }
 
-/** `ListAttached*Policies` for a user, group or role. */
+/**
+ * `ListAttached*Policies` for a user, group or role, walking every `Marker`
+ * page. An entity with more attachments than one page must show all of them.
+ */
 export async function listAttachedPolicies(
   entity: AttachedEntityKind,
   name: string,
+  signal?: AbortSignal,
 ): Promise<readonly IamAttachedPolicy[]> {
   const target = ATTACHED_OPERATIONS[entity];
-  const result = await callServiceOperation<{ AttachedPolicies?: RawAttachedPolicy[] }>(
-    SERVICE_ID,
-    target.list,
-    { [target.field]: name },
-  );
-  return (result.AttachedPolicies ?? []).flatMap((raw): IamAttachedPolicy[] => {
+  const raws: RawAttachedPolicy[] = [];
+  let nextToken: string | undefined;
+  do {
+    const result = await callServiceOperation<
+      { AttachedPolicies?: RawAttachedPolicy[] } & MarkerPage
+    >(
+      SERVICE_ID,
+      target.list,
+      {
+        [target.field]: name,
+        MaxItems: COMPLETE_PAGE_SIZE,
+        ...(nextToken === undefined ? {} : { Marker: nextToken }),
+      },
+      signal,
+    );
+    raws.push(...(result.AttachedPolicies ?? []));
+    nextToken = nextMarker(result);
+  } while (nextToken !== undefined);
+
+  return raws.flatMap((raw): IamAttachedPolicy[] => {
     if (typeof raw.PolicyName !== 'string' || typeof raw.PolicyArn !== 'string') return [];
     return [
       {

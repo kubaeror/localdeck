@@ -3,8 +3,12 @@ import {
   buildIdentityPolicyText,
   buildTrustPolicyForAccount,
   buildTrustPolicyForService,
+  isFullAdminPolicy,
+  MANAGED_POLICY_MAX_CHARS,
+  policyWarnings,
   readPolicyStatement,
   summarizeTrustedEntities,
+  TRUST_POLICY_MAX_CHARS,
   validateIdentityPolicy,
   validateTrustPolicy,
 } from './policy';
@@ -24,7 +28,17 @@ describe('validateIdentityPolicy', () => {
   it('accepts a well-formed document', () => {
     const result = validateIdentityPolicy(VALID_IDENTITY_POLICY);
 
-    expect(result).toEqual({ jsonError: null, structureErrors: [], valid: true });
+    expect(result).toMatchObject({ jsonError: null, structureErrors: [], valid: true });
+    expect(result.size).toBe(VALID_IDENTITY_POLICY.length);
+    expect(result.sizeLimit).toBe(MANAGED_POLICY_MAX_CHARS);
+  });
+
+  it('rejects a document over the managed-policy size limit', () => {
+    const oversized = `{"Version":"2012-10-17","Statement":[],"pad":"${'x'.repeat(MANAGED_POLICY_MAX_CHARS)}"}`;
+    const result = validateIdentityPolicy(oversized);
+
+    expect(result.valid).toBe(false);
+    expect(result.structureErrors.join(' ')).toContain(`at most ${MANAGED_POLICY_MAX_CHARS}`);
   });
 
   it('reports malformed JSON with the parse error', () => {
@@ -124,6 +138,57 @@ describe('validateTrustPolicy', () => {
 
   it('still requires Version and Statement', () => {
     expect(validateTrustPolicy('{}').structureErrors.length).toBeGreaterThan(0);
+  });
+
+  it('enforces the trust-policy size limit', () => {
+    const oversized = `{"Version":"2012-10-17","Statement":[],"pad":"${'x'.repeat(TRUST_POLICY_MAX_CHARS)}"}`;
+    const result = validateTrustPolicy(oversized);
+
+    expect(result.valid).toBe(false);
+    expect(result.structureErrors.join(' ')).toContain(`at most ${TRUST_POLICY_MAX_CHARS}`);
+  });
+});
+
+describe('full administrative access warnings', () => {
+  it('flags Allow with Action "*" and Resource "*"', () => {
+    const text = JSON.stringify({
+      Version: '2012-10-17',
+      Statement: [{ Effect: 'Allow', Action: '*', Resource: '*' }],
+    });
+
+    const warnings = policyWarnings(text);
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('full administrative access');
+    expect(isFullAdminPolicy(text)).toBe(true);
+  });
+
+  it('also flags array forms and leaves scoped or Deny statements alone', () => {
+    expect(
+      isFullAdminPolicy(
+        JSON.stringify({
+          Version: '2012-10-17',
+          Statement: [{ Effect: 'Allow', Action: ['*'], Resource: ['*'] }],
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      isFullAdminPolicy(
+        JSON.stringify({
+          Version: '2012-10-17',
+          Statement: [{ Effect: 'Deny', Action: '*', Resource: '*' }],
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      isFullAdminPolicy(
+        JSON.stringify({
+          Version: '2012-10-17',
+          Statement: [{ Effect: 'Allow', Action: '*', Resource: 'arn:aws:s3:::bucket/*' }],
+        }),
+      ),
+    ).toBe(false);
+    expect(policyWarnings('not json')).toEqual([]);
   });
 });
 

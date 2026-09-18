@@ -38,7 +38,8 @@ describe('EKS error mapping', () => {
       statusCode: 409,
     });
     expect(friendly.message).toContain('ACTIVE');
-    expect(friendly.message).not.toContain('stack');
+    expect(friendly.apiError.code).toBe('CLUSTER_NOT_READY');
+    expect(friendly.field).toBeNull();
   });
 
   it('matches dotted and suffixed spellings through canonicalisation', () => {

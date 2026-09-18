@@ -33,11 +33,7 @@ function renderSearchApp(): void {
 }
 
 function searchBox(): HTMLElement {
-  return screen.getByRole('searchbox', { name: 'Search services' });
-}
-
-function resultRows(): readonly HTMLElement[] {
-  return Array.from(document.querySelectorAll<HTMLElement>('.console-search__result'));
+  return screen.getByRole('combobox', { name: 'Search services' });
 }
 
 describe('GlobalSearchPalette', () => {
@@ -104,14 +100,52 @@ describe('GlobalSearchPalette', () => {
     fireEvent.keyDown(window, { key: '/', ctrlKey: true });
     fireEvent.change(searchBox(), { target: { value: 's' } });
 
-    expect(resultRows()[0]?.style.background).not.toBe('');
+    const listbox = screen.getByRole('listbox', { name: 'Search results' });
+    const options = within(listbox).getAllByRole('option');
+    expect(options[0]?.getAttribute('aria-selected')).toBe('true');
 
     fireEvent.keyDown(searchBox(), { key: 'ArrowDown' });
-    expect(resultRows()[1]?.style.background).not.toBe('');
+    expect(options[1]?.getAttribute('aria-selected')).toBe('true');
+    expect(options[0]?.getAttribute('aria-selected')).toBe('false');
 
     fireEvent.keyDown(searchBox(), { key: 'ArrowUp' });
-    expect(resultRows()[0]?.style.background).not.toBe('');
-    expect(resultRows()[1]?.style.background).toBe('');
+    expect(options[0]?.getAttribute('aria-selected')).toBe('true');
+    expect(options[1]?.getAttribute('aria-selected')).toBe('false');
+  });
+
+  it('exposes combobox/listbox semantics and scrolls the active option into view', async () => {
+    const scrollIntoView = vi.fn();
+    const original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = scrollIntoView;
+    try {
+      renderSearchApp();
+      fireEvent.keyDown(window, { key: '/', ctrlKey: true });
+      fireEvent.change(searchBox(), { target: { value: 's3' } });
+
+      const combo = searchBox();
+      expect(combo.getAttribute('role')).toBe('combobox');
+      expect(combo.getAttribute('aria-expanded')).toBe('true');
+      expect(combo.getAttribute('aria-autocomplete')).toBe('list');
+
+      const listboxId = combo.getAttribute('aria-controls');
+      expect(listboxId).toBeTruthy();
+      const listbox = document.getElementById(listboxId ?? '');
+      expect(listbox?.getAttribute('role')).toBe('listbox');
+      if (listbox === null) throw new Error('the listbox is not rendered');
+
+      const options = within(listbox).getAllByRole('option');
+      expect(options.length).toBeGreaterThan(0);
+      expect(options[0]?.id).toBe(combo.getAttribute('aria-activedescendant'));
+      expect(options[0]?.getAttribute('aria-selected')).toBe('true');
+      expect(scrollIntoView).toHaveBeenCalled();
+
+      fireEvent.keyDown(combo, { key: 'ArrowDown' });
+      expect(options[1]?.id).toBe(combo.getAttribute('aria-activedescendant'));
+      expect(options[1]?.getAttribute('aria-selected')).toBe('true');
+      expect(options[0]?.getAttribute('aria-selected')).toBe('false');
+    } finally {
+      Element.prototype.scrollIntoView = original;
+    }
   });
 
   it('closes when the modal close button is used', async () => {

@@ -2,7 +2,7 @@ import Box from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
 import Table from '@cloudscape-design/components/table';
 import type { TableProps } from '@cloudscape-design/components/table';
-import type { ReactElement } from 'react';
+import { useMemo, type ReactElement } from 'react';
 import type { Ec2SecurityGroupRule } from '../api';
 
 /** One rendered rule: the source columns plus the raw rule for revoking. */
@@ -16,9 +16,7 @@ interface RuleRow {
 }
 
 function protocolLabel(protocol: string): string {
-  if (protocol === '-1') return 'All traffic';
-  if (protocol === 'icmp' || protocol === 'icmpv6') return protocol.toUpperCase();
-  return protocol.toUpperCase();
+  return protocol === '-1' ? 'All traffic' : protocol.toUpperCase();
 }
 
 function portLabel(rule: Ec2SecurityGroupRule): string {
@@ -39,15 +37,35 @@ function sourceLabel(rule: Ec2SecurityGroupRule): string {
   return parts.length === 0 ? '—' : parts.join(', ');
 }
 
+/**
+ * The row key comes from the rule's content, not its position: revoking a rule
+ * must not re-identify the rows below it. Two genuinely identical rules share
+ * content, so an occurrence suffix keeps their keys unique.
+ */
 function toRows(rules: readonly Ec2SecurityGroupRule[]): readonly RuleRow[] {
-  return rules.map((rule, index) => ({
-    rowId: `${rule.protocol}-${String(rule.fromPort ?? 'all')}-${String(index)}`,
-    rule,
-    protocol: protocolLabel(rule.protocol),
-    ports: portLabel(rule),
-    source: sourceLabel(rule),
-    description: rule.description ?? '—',
-  }));
+  const occurrences = new Map<string, number>();
+  return rules.map((rule) => {
+    const base = [
+      rule.protocol,
+      String(rule.fromPort ?? 'all'),
+      String(rule.toPort ?? 'all'),
+      rule.ipv4Ranges.join('+'),
+      rule.ipv6Ranges.join('+'),
+      rule.prefixListIds.join('+'),
+      rule.referencedGroups.join('+'),
+      rule.description ?? '',
+    ].join('|');
+    const occurrence = occurrences.get(base) ?? 0;
+    occurrences.set(base, occurrence + 1);
+    return {
+      rowId: occurrence === 0 ? base : `${base}#${occurrence}`,
+      rule,
+      protocol: protocolLabel(rule.protocol),
+      ports: portLabel(rule),
+      source: sourceLabel(rule),
+      description: rule.description ?? '—',
+    };
+  });
 }
 
 export interface SecurityGroupRulesTableProps {
@@ -72,52 +90,53 @@ export function SecurityGroupRulesTable({
   onRevoke,
   revoking = false,
 }: SecurityGroupRulesTableProps): ReactElement {
-  const rows = toRows(rules);
+  const rows = useMemo(() => toRows(rules), [rules]);
   const sourceHeader = direction === 'inbound' ? 'Source' : 'Destination';
 
-  const columns: readonly TableProps.ColumnDefinition<RuleRow>[] = [
-    {
-      id: 'type',
-      header: 'Type',
-      isRowHeader: true,
-      cell: (row) => row.protocol,
-    },
-    {
-      id: 'ports',
-      header: 'Port range',
-      cell: (row) => row.ports,
-    },
-    {
-      id: 'source',
-      header: sourceHeader,
-      cell: (row) => <Box variant="code">{row.source}</Box>,
-    },
-    {
-      id: 'description',
-      header: 'Description',
-      cell: (row) => row.description,
-    },
-    ...(onRevoke === undefined
-      ? []
-      : [
-          {
-            id: 'actions',
-            header: 'Actions',
-            minWidth: '110px',
-            cell: (row: RuleRow) => (
-              <Button
-                variant="inline-link"
-                loading={revoking}
-                onClick={() => {
-                  onRevoke(row.rule);
-                }}
-              >
-                Revoke
-              </Button>
-            ),
-          },
-        ]),
-  ];
+  const columns = useMemo<readonly TableProps.ColumnDefinition<RuleRow>[]>(() => {
+    const base: TableProps.ColumnDefinition<RuleRow>[] = [
+      {
+        id: 'type',
+        header: 'Type',
+        isRowHeader: true,
+        cell: (row) => row.protocol,
+      },
+      {
+        id: 'ports',
+        header: 'Port range',
+        cell: (row) => row.ports,
+      },
+      {
+        id: 'source',
+        header: sourceHeader,
+        cell: (row) => <Box variant="code">{row.source}</Box>,
+      },
+      {
+        id: 'description',
+        header: 'Description',
+        cell: (row) => row.description,
+      },
+    ];
+    if (onRevoke !== undefined) {
+      base.push({
+        id: 'actions',
+        header: 'Actions',
+        minWidth: '110px',
+        cell: (row) => (
+          <Button
+            variant="inline-link"
+            loading={revoking}
+            onClick={() => {
+              onRevoke(row.rule);
+            }}
+          >
+            Revoke
+          </Button>
+        ),
+      });
+    }
+    return base;
+  }, [onRevoke, revoking, sourceHeader]);
 
   return (
     <Table<RuleRow>

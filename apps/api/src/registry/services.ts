@@ -9,6 +9,7 @@ import {
   type ServiceRegistryResponse,
 } from '@localdeck/shared';
 import { ApiProblem } from '../lib/errors.js';
+import { withAvailability } from './sdkAvailability.js';
 
 /**
  * LocalDeck's service registry for the api side.
@@ -19,12 +20,21 @@ import { ApiProblem } from '../lib/errors.js';
  * single place a route resolves a service id.
  */
 
-/** The full registry: every known service plus the category index. */
+/**
+ * The full registry: every known service plus the category index. Each entry
+ * carries `available`, computed from whether its SDK package resolves here, so
+ * the ui can grey out services that would otherwise guarantee a 501.
+ */
 export function getServiceRegistry(): ServiceRegistryResponse {
   return {
-    services: SERVICE_CATALOG,
+    services: SERVICE_CATALOG.map(withAvailability),
     categories: serviceCategories(),
   };
+}
+
+/** One registry entry with the runtime availability signal applied. */
+export function getService(id: string): ServiceDescriptor {
+  return withAvailability(requireServiceById(id));
 }
 
 /**
@@ -35,7 +45,7 @@ export function requireServiceById(id: string): ServiceDescriptor {
   const service = findService(id);
   if (service === undefined) {
     throw new ApiProblem({
-      code: ApiErrorCodes.notFound,
+      code: ApiErrorCodes.serviceNotRegistered,
       statusCode: 404,
       message: `No LocalDeck service is registered with the id "${id}".`,
       details: { serviceId: id },

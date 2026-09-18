@@ -25,7 +25,41 @@ export const S3_PROXY_PATHS = {
   download: '/api/services/s3/objects/download',
 } as const;
 
-export type S3ProxyPath = (typeof S3_PROXY_PATHS)[keyof typeof S3_PROXY_PATHS];
+/**
+ * Bucket naming rules, shared by the api routes (JSON schema + runtime checks)
+ * and the ui forms so a name that passes client-side validation is never
+ * rejected by the proxy for a different reason.
+ */
+export const S3_BUCKET_NAME_PATTERN = '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$';
+export const S3_BUCKET_NAME_MIN_LENGTH = 3;
+export const S3_BUCKET_NAME_MAX_LENGTH = 63;
+
+/** S3 object keys are limited to 1024 UTF-8 bytes (not UTF-16 code units). */
+export const S3_KEY_MAX_BYTES = 1024;
+/**
+ * Upper bound for a JSON-schema `maxLength`. UTF-8 is never shorter than the
+ * UTF-16 code-unit count, so anything above `S3_KEY_MAX_BYTES` code units is
+ * rejected by the schema and the exact byte check runs in route handlers too.
+ */
+export const S3_KEY_MAX_LENGTH = S3_KEY_MAX_BYTES;
+
+/** UTF-8 byte length of a string, without TextEncoder/Buffer (browser-safe). */
+export function utf8ByteLength(value: string): number {
+  let bytes = 0;
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    if (codePoint <= 0x7f) bytes += 1;
+    else if (codePoint <= 0x7ff) bytes += 2;
+    else if (codePoint <= 0xffff) bytes += 3;
+    else bytes += 4;
+  }
+  return bytes;
+}
+
+/** True when `key` fits S3's 1024 UTF-8 byte key limit. */
+export function isS3KeyWithinLimit(key: string): boolean {
+  return key.length > 0 && utf8ByteLength(key) <= S3_KEY_MAX_BYTES;
+}
 
 /** Builds an `?a=1&b=2` query string, skipping unset values. */
 function toQueryString(params: Readonly<Record<string, string | undefined>>): string {

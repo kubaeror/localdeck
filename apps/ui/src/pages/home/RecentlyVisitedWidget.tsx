@@ -8,6 +8,7 @@ import { useMemo, type ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { EmptyState } from '../../components/EmptyState';
 import { ServiceIcon } from '../../components/ServiceIcon';
+import { GLOBAL_SEARCH_SHORTCUT_LABEL } from '../../contexts/global-search-context';
 import { useRecentlyVisited } from '../../hooks/useRecentlyVisited';
 import { useServiceCatalog } from '../../hooks/useServiceCatalog';
 import { formatRelativeTime } from '../../lib/format';
@@ -42,7 +43,7 @@ export function RecentlyVisitedWidget({ onRemove }: ConsoleWidgetProps): ReactEl
       {entries.length === 0 ? (
         <EmptyState
           title="Nothing visited yet"
-          description="Open a service from the sidebar, or search with Ctrl+/ and it will show up here."
+          description={`Open a service from the sidebar, or search with ${GLOBAL_SEARCH_SHORTCUT_LABEL} and it will show up here.`}
           action={
             <Button
               variant="primary"

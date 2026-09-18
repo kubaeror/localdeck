@@ -27,7 +27,15 @@ function describeFetchFailure(error: unknown, timeoutMs: number): string {
   return 'unknown network error';
 }
 
-function toSnapshot(payload: unknown, endpoint: string): LocalStackHealthSnapshot {
+/**
+ * Parses one LocalStack health document into the shared snapshot shape.
+ * Exported so the parsing edges (missing `services`, unknown statuses,
+ * non-object `features`) are unit-testable without an HTTP stub.
+ */
+export function parseLocalStackHealthSnapshot(
+  payload: unknown,
+  endpoint: string,
+): LocalStackHealthSnapshot {
   if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
     throw new LocalStackInvalidResponseProblem({ endpoint, reason: 'body is not a JSON object' });
   }
@@ -62,15 +70,22 @@ function toSnapshot(payload: unknown, endpoint: string): LocalStackHealthSnapsho
   };
 }
 
-/**
- * Probes the externally managed LocalStack instance.
- *
- * LocalStack's health document is not an AWS API, so this deliberately uses
- * plain HTTP instead of an AWS SDK client. Never throws a raw error: every
- * failure is turned into an ApiProblem that the Fastify error handler renders
- * as a clean ApiErrorResponse.
- */
-export async function probeLocalStackHealth(config: AppConfig): Promise<LocalStackProbeResult> {
+/** Cached probe result: in-flight promise + the instant it stops being reused. */
+interface CachedProbe {
+  /** Endpoint + timeout the probe was made with. */
+  key: string;
+  promise: Promise<LocalStackProbeResult>;
+  expiresAt: number;
+}
+
+let cachedProbe: CachedProbe | undefined;
+
+/** Test hook: forget the cached/single-flight probe. */
+export function resetLocalStackHealthCache(): void {
+  cachedProbe = undefined;
+}
+
+async function probeLocalStackHealthOnce(config: AppConfig): Promise<LocalStackProbeResult> {
   const startedAt = Date.now();
   const checkedAt = new Date(startedAt).toISOString();
 
@@ -112,8 +127,47 @@ export async function probeLocalStackHealth(config: AppConfig): Promise<LocalSta
   }
 
   return {
-    snapshot: toSnapshot(payload, config.localstackEndpoint),
+    snapshot: parseLocalStackHealthSnapshot(payload, config.localstackEndpoint),
     latencyMs: Date.now() - startedAt,
     checkedAt,
   };
+}
+
+/**
+ * Probes the externally managed LocalStack instance, reusing a successful
+ * result for `LOCALSTACK_HEALTH_CACHE_MS` (default 2s) and collapsing
+ * concurrent probes into one upstream request (single-flight). This keeps the
+ * unauthenticated `/api/health` route from hammering LocalStack when the ui
+ * polls from several components.
+ *
+ * LocalStack's health document is not an AWS API, so this deliberately uses
+ * plain HTTP instead of an AWS SDK client. Never throws a raw error: every
+ * failure is turned into an ApiProblem that the Fastify error handler renders
+ * as a clean ApiErrorResponse.
+ */
+export async function probeLocalStackHealth(config: AppConfig): Promise<LocalStackProbeResult> {
+  const ttl = config.localstackHealthCacheMs;
+  // The cache is keyed by endpoint+timeout: a process can host more than one
+  // app (tests, verification scripts), and a probe for one LocalStack must
+  // never answer for another.
+  const key = `${config.localstackEndpoint}|${config.localstackTimeoutMs}`;
+  if (ttl > 0) {
+    const now = Date.now();
+    if (cachedProbe !== undefined && cachedProbe.key === key && cachedProbe.expiresAt > now) {
+      return cachedProbe.promise;
+    }
+  } else {
+    cachedProbe = undefined;
+  }
+
+  const promise = probeLocalStackHealthOnce(config);
+  if (ttl > 0) {
+    const entry: CachedProbe = { key, promise, expiresAt: Date.now() + ttl };
+    cachedProbe = entry;
+    // A failed probe must never be reused.
+    promise.catch(() => {
+      if (cachedProbe === entry) cachedProbe = undefined;
+    });
+  }
+  return promise;
 }

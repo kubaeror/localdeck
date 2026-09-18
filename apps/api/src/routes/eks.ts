@@ -1,7 +1,8 @@
-import { API_PATHS } from '@localdeck/shared';
+import { API_PATHS, ApiErrorCodes } from '@localdeck/shared';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { AwsClientConfigOverrides } from '../lib/awsClients.js';
 import { ApiProblem } from '../lib/errors.js';
+import { clientDisconnectSignal } from '../lib/http.js';
 import { buildKubeconfig, kubeconfigFileName } from '../lib/kubeconfig.js';
 import { dispatchServiceOperation } from '../registry/dispatcher.js';
 
@@ -28,6 +29,17 @@ interface KubeconfigParams {
   cluster: string;
 }
 
+export interface EksRouteOptions extends AwsClientConfigOverrides {
+  /**
+   * Endpoint the generated kubeconfig points the `aws eks get-token` plugin at.
+   * Defaults to the api's configured endpoint. Set
+   * `LOCALSTACK_PUBLIC_ENDPOINT` when the api runs in Docker
+   * (`host.docker.internal`) but kubectl runs on the Docker host, where that
+   * hostname does not resolve.
+   */
+  publicEndpoint?: string;
+}
+
 const KUBECONFIG_QUERY_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -37,7 +49,7 @@ const KUBECONFIG_QUERY_SCHEMA = {
 function requireString(value: unknown, label: string, cluster: string): string {
   if (typeof value !== 'string' || value.length === 0) {
     throw new ApiProblem({
-      code: 'CLUSTER_NOT_READY',
+      code: ApiErrorCodes.clusterNotReady,
       statusCode: 409,
       message:
         `LocalStack did not report the ${label} for the EKS cluster "${cluster}", so a ` +
@@ -50,14 +62,24 @@ function requireString(value: unknown, label: string, cluster: string): string {
 }
 
 /**
- * Registers the EKS kubeconfig route. `clientOverrides` carries the endpoint
- * and region the running app was configured with, so the DescribeCluster call
- * and the credential plugin agree with `/api/health`.
+ * Registers the EKS kubeconfig route. `options` carries the endpoint and
+ * region the running app was configured with, so the DescribeCluster call and
+ * the credential plugin agree with `/api/health`, plus the public endpoint that
+ * is safe to embed in a file used outside the container network.
  */
-export function registerEksRoutes(
-  app: FastifyInstance,
-  clientOverrides: AwsClientConfigOverrides = {},
-): void {
+export function registerEksRoutes(app: FastifyInstance, options: EksRouteOptions = {}): void {
+  const clientOverrides: AwsClientConfigOverrides = {
+    ...(options.endpoint === undefined ? {} : { endpoint: options.endpoint }),
+    ...(options.region === undefined ? {} : { region: options.region }),
+    ...(options.connectionTimeoutMs === undefined
+      ? {}
+      : { connectionTimeoutMs: options.connectionTimeoutMs }),
+    ...(options.requestTimeoutMs === undefined
+      ? {}
+      : { requestTimeoutMs: options.requestTimeoutMs }),
+  };
+  const publicEndpoint = options.publicEndpoint ?? options.endpoint ?? '';
+
   app.get<{ Params: KubeconfigParams }>(
     API_PATHS.eksKubeconfig,
     {
@@ -65,6 +87,7 @@ export function registerEksRoutes(
         params: {
           type: 'object',
           required: ['cluster'],
+          additionalProperties: false,
           properties: {
             // EKS cluster names: alphanumerics, hyphens and underscores.
             cluster: { type: 'string', minLength: 1, maxLength: 100, pattern: '^[0-9A-Za-z_-]+$' },
@@ -80,11 +103,12 @@ export function registerEksRoutes(
         'DescribeCluster',
         { name: clusterName },
         clientOverrides,
+        { signal: clientDisconnectSignal(reply) },
       );
       const described = (response.result as { cluster?: DescribedCluster }).cluster;
       if (described === undefined) {
         throw new ApiProblem({
-          code: 'NOT_FOUND',
+          code: ApiErrorCodes.notFound,
           statusCode: 404,
           message: `LocalStack returned no EKS cluster named "${clusterName}".`,
           service: 'eks',
@@ -94,7 +118,7 @@ export function registerEksRoutes(
 
       if (described.status !== 'ACTIVE') {
         throw new ApiProblem({
-          code: 'CLUSTER_NOT_READY',
+          code: ApiErrorCodes.clusterNotReady,
           statusCode: 409,
           message:
             `The EKS cluster "${clusterName}" is ${described.status ?? 'in an unknown state'}. ` +
@@ -119,24 +143,32 @@ export function registerEksRoutes(
           certificateAuthorityData,
         },
         region: clientOverrides.region ?? 'us-east-1',
-        localstackEndpoint: clientOverrides.endpoint ?? '',
+        localstackEndpoint: publicEndpoint,
       });
 
       request.log.info(
-        { cluster: clusterName, endpoint },
+        { cluster: clusterName, endpoint, kubeconfigEndpoint: publicEndpoint },
         'eks kubeconfig generated from DescribeCluster',
       );
-      sendKubeconfig(reply, kubeconfigFileName(clusterName), yaml);
+      sendKubeconfig(reply, kubeconfigFileName(clusterName), yaml, publicEndpoint);
     },
   );
 }
 
 /** One place for the download headers, so the ui can rely on them. */
-function sendKubeconfig(reply: FastifyReply, fileName: string, yaml: string): void {
+function sendKubeconfig(
+  reply: FastifyReply,
+  fileName: string,
+  yaml: string,
+  publicEndpoint: string,
+): void {
   void reply.header('content-type', 'application/yaml; charset=utf-8');
   void reply.header('content-disposition', `attachment; filename="${fileName}"`);
   void reply.header('cache-control', 'no-store');
   // Provenance for the console and the live verification script.
   void reply.header('x-localdeck-kubeconfig', 'describe-cluster');
+  if (publicEndpoint.length > 0) {
+    void reply.header('x-localdeck-kubeconfig-endpoint', publicEndpoint);
+  }
   void reply.send(yaml);
 }

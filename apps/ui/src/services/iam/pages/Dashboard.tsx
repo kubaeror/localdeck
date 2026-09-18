@@ -27,9 +27,9 @@ interface DashboardCounts {
 
 /**
  * The IAM landing page: the four account-wide counts and links into each
- * section, mirroring the console's dashboard. The counts page through every
- * resource (LocalStack accounts are small), so a truncated first page can never
- * under-report.
+ * section, mirroring the console's dashboard. Each count asks LocalStack for up
+ * to a thousand items in one page; only an account larger than that pays for
+ * additional pages, so a visit is usually four calls and never under-reports.
  */
 export function DashboardPage({ descriptor }: ServicePageProps): ReactElement {
   const navigate = useNavigate();
@@ -43,11 +43,12 @@ export function DashboardPage({ descriptor }: ServicePageProps): ReactElement {
     requestId.current = id;
     setLoading(true);
     try {
+      const listOptions = { pageSize: 1000 };
       const [users, groups, roles, policies] = await Promise.all([
-        listAllUsers(),
-        listAllGroups(),
-        listAllRoles(),
-        listAllPolicies('Local'),
+        listAllUsers(listOptions),
+        listAllGroups(listOptions),
+        listAllRoles(listOptions),
+        listAllPolicies('Local', listOptions),
       ]);
       if (requestId.current !== id) return;
       setCounts({
@@ -167,6 +168,7 @@ export function DashboardPage({ descriptor }: ServicePageProps): ReactElement {
             </Box>
             <SpaceBetween direction="horizontal" size="s">
               <Button onClick={() => open('users/create')}>Create user</Button>
+              <Button onClick={() => open('groups/create')}>Create user group</Button>
               <Button onClick={() => open('roles/create')}>Create role</Button>
               <Button onClick={() => open('policies/create')}>Create policy</Button>
             </SpaceBetween>

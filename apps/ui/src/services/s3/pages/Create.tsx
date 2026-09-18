@@ -1,10 +1,12 @@
 import {
   S3_PUBLIC_ACCESS_ALL_BLOCKED,
   S3_PUBLIC_ACCESS_DEFAULTS,
+  type ApiError,
   type AwsTag,
 } from '@localdeck/shared';
 import Alert from '@cloudscape-design/components/alert';
 import Box from '@cloudscape-design/components/box';
+import Button from '@cloudscape-design/components/button';
 import Container from '@cloudscape-design/components/container';
 import Form from '@cloudscape-design/components/form';
 import FormField from '@cloudscape-design/components/form-field';
@@ -17,29 +19,16 @@ import SpaceBetween from '@cloudscape-design/components/space-between';
 import Toggle from '@cloudscape-design/components/toggle';
 import { useState, type ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
-import type { ApiError } from '@localdeck/shared';
 import { CreateWizard } from '../../../components/CreateWizard';
-import { TagsEditor } from '../../../components/TagsEditor';
+import { TagsEditor, validateTags } from '../../../components/TagsEditor';
 import { useFlashbar } from '../../../hooks/useFlashbar';
 import { serviceConsolePath } from '../../paths';
 import type { ServicePageProps } from '../../types';
 import { createBucket } from '../api';
-import { toFriendlyS3Error } from '../errors';
+import { createdAnnotation, toFriendlyS3Error } from '../errors';
 import { bucketNameRules, S3_REGIONS, validateBucketName } from '../naming';
+import { meaningfulTags } from '../tags';
 import { PublicAccessBlockSettings } from '../components/PublicAccessBlockSettings';
-
-/** Drops tag rows the user added but never filled in. */
-function meaningfulTags(tags: readonly AwsTag[]): readonly AwsTag[] {
-  return tags.filter((tag) => tag.Key.trim().length > 0 || tag.Value.trim().length > 0);
-}
-
-/** Duplicate keys and the 50-key limit block the Tags step. */
-function tagsProblem(tags: readonly AwsTag[]): string | null {
-  const keys = tags.map((tag) => tag.Key).filter((key) => key.length > 0);
-  if (new Set(keys).size !== keys.length) return 'Remove duplicate tag keys before continuing.';
-  if (tags.length > 50) return 'A bucket can have at most 50 tags.';
-  return null;
-}
 
 /**
  * The console's create-bucket wizard: name and region, versioning, tags, Block
@@ -66,12 +55,23 @@ export function CreatePage({ descriptor }: ServicePageProps): ReactElement {
     navigate(serviceConsolePath(descriptor.id));
   };
 
+  const bucketPath = (bucket: string): string =>
+    `${serviceConsolePath(descriptor.id)}/buckets/${encodeURIComponent(bucket)}`;
+
   const clientProblem = name.length > 0 ? validateBucketName(name) : null;
+  const tagsProblems = validateTags(tags);
+  const tagsProblem = tagsProblems[0]?.message ?? null;
   const publicAccessSettings = blockPublicAccess
     ? S3_PUBLIC_ACCESS_ALL_BLOCKED
     : S3_PUBLIC_ACCESS_DEFAULTS;
 
   const submit = async (): Promise<void> => {
+    if (tagsProblem !== null) {
+      // The user may have skipped to Review; send them back to the Tags step,
+      // where the editor marks the offending row.
+      setActiveStepIndex(2);
+      return;
+    }
     setSubmitting(true);
     setError(null);
     setBucketNameError(null);
@@ -88,9 +88,30 @@ export function CreatePage({ descriptor }: ServicePageProps): ReactElement {
         header: 'Bucket created',
         content: name,
       });
-      navigate(`${serviceConsolePath(descriptor.id)}/buckets/${encodeURIComponent(name)}`);
+      navigate(bucketPath(name));
     } catch (caught) {
       const friendly = toFriendlyS3Error(caught);
+      const annotation = createdAnnotation(friendly.apiError);
+      if (annotation !== undefined) {
+        // The bucket exists; only a follow-up setting failed. Show the whole
+        // story and take the user to the bucket instead of a dead-end wizard.
+        flashbar.notify({
+          type: 'warning',
+          header: 'Bucket created, but a setting failed',
+          content: friendly.message,
+          action: (
+            <Button
+              onClick={() => {
+                navigate(bucketPath(name));
+              }}
+            >
+              View bucket
+            </Button>
+          ),
+        });
+        navigate(bucketPath(name));
+        return;
+      }
       if (friendly.field === 'bucketName') {
         setBucketNameError(friendly.message);
         setActiveStepIndex(0);
@@ -270,7 +291,7 @@ export function CreatePage({ descriptor }: ServicePageProps): ReactElement {
           id: 'tags',
           title: 'Tags',
           isOptional: true,
-          validate: () => tagsProblem(tags),
+          validate: () => validateTags(tags)[0]?.message ?? null,
           content: tagsStep,
         },
         {

@@ -29,8 +29,10 @@ import {
   listAllInstances,
   listAllInstanceTypes,
   listAllVolumes,
+  listInstanceVolumes,
   listSecurityGroups,
   listSubnets,
+  listVolumes,
   listVpcs,
   rebootInstances,
   revokeSecurityGroupIngress,
@@ -39,6 +41,7 @@ import {
   stopInstances,
   terminateInstances,
   type Ec2InstanceState,
+  type Ec2Volume,
 } from './api';
 
 const API_BASE = import.meta.env.VITE_LIVEDECK_LIVE_API;
@@ -186,10 +189,32 @@ liveDescribe('EC2 module against the live api and LocalStack', () => {
     });
 
     const volumes = await listAllVolumes();
-    const attached = volumes.find((volume) => volume.volumeId === created.volumeId);
+    let attached: Ec2Volume | undefined;
+    // Attaching is not instantaneous: poll until LocalStack reports in-use
+    // instead of asserting on the first read (the old flake).
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      const current = await listAllVolumes();
+      attached = current.find((volume) => volume.volumeId === created.volumeId);
+      if (attached?.state === 'in-use') break;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
     expect(attached?.state).toBe('in-use');
     expect(attached?.attachments[0]?.instanceId).toBe(launched.instanceId);
     expect(attached?.name).toBe(dataVolumeName);
+    expect(volumes.some((volume) => volume.volumeId === created.volumeId)).toBe(true);
+
+    // The filters the console relies on are scoped server-side: the instance
+    // filter only reports volumes attached to this instance, and the
+    // status=available filter never returns the in-use volume.
+    const instanceVolumes = await listInstanceVolumes(launched.instanceId);
+    expect(instanceVolumes.some((volume) => volume.volumeId === created.volumeId)).toBe(true);
+    expect(
+      instanceVolumes.every((volume) =>
+        volume.attachments.some((entry) => entry.instanceId === launched.instanceId),
+      ),
+    ).toBe(true);
+    const available = await listVolumes({ filters: [{ Name: 'status', Values: ['available'] }] });
+    expect(available.items.some((volume) => volume.volumeId === created.volumeId)).toBe(false);
 
     // 5. Security group round-trip.
     const createdGroup = await createSecurityGroup({

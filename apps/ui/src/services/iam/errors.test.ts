@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { ApiClientError } from '../../lib/apiClient';
-import { friendlyIamError, isIamCode, toFriendlyIamError } from './errors';
+import {
+  friendlyIamError,
+  isIamCode,
+  POLICY_VERSION_LIMIT_MESSAGE,
+  toFriendlyIamError,
+} from './errors';
 
 describe('friendlyIamError', () => {
   it('maps an already-existing resource to console wording', () => {
@@ -60,5 +65,11 @@ describe('toFriendlyIamError and isIamCode', () => {
     expect(isIamCode(error, 'NoSuchEntity')).toBe(false);
     expect(isIamCode(new Error('plain'), 'DeleteConflict')).toBe(false);
     expect(toFriendlyIamError(error).message).toContain('refused the deletion');
+  });
+
+  it('explains the five-version limit with a recovery path', () => {
+    expect(POLICY_VERSION_LIMIT_MESSAGE).toContain('five versions');
+    expect(POLICY_VERSION_LIMIT_MESSAGE).toContain('Versions tab');
+    expect(POLICY_VERSION_LIMIT_MESSAGE).toContain('delete-policy-version');
   });
 });

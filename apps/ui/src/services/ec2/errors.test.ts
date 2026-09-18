@@ -58,6 +58,44 @@ describe('EC2 error mapping', () => {
     expect(friendly.field).toBe('network');
   });
 
+  it('explains the newly mapped upstream volume and rule failures', () => {
+    const zone = friendlyEc2Error({
+      code: 'InvalidVolumeZoneMismatch',
+      statusCode: 400,
+      message: 'The volume is not in the same AZ',
+    });
+    expect(zone.message).toContain('different Availability Zones');
+
+    const duplicate = friendlyEc2Error({
+      code: 'InvalidPermission.Duplicate',
+      statusCode: 400,
+      message: 'The rule already exists',
+    });
+    expect(duplicate.field).toBe('securityGroups');
+    expect(duplicate.message).toContain('identical rule already exists');
+
+    const limit = friendlyEc2Error({
+      code: 'RulesPerSecurityGroupLimitExceeded',
+      statusCode: 400,
+      message: 'Rules limit exceeded',
+    });
+    expect(limit.message).toContain('rule limit');
+
+    const snapshot = friendlyEc2Error({
+      code: 'InvalidSnapshot.NotFound',
+      statusCode: 400,
+      message: 'Snapshot does not exist',
+    });
+    expect(snapshot.field).toBe('volumeSize');
+
+    const combination = friendlyEc2Error({
+      code: 'InvalidParameterCombination',
+      statusCode: 400,
+      message: 'Invalid combination',
+    });
+    expect(combination.message).toContain('combination of parameters');
+  });
+
   it('recognises codes on a caught ApiClientError regardless of the spelling', () => {
     const caught = new ApiClientError({
       code: 'InvalidGroupNotFound',

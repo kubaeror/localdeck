@@ -25,7 +25,9 @@ const SKIP_DIRECTORIES = new Set([
 ]);
 
 /** Screenshots of LocalDeck's own ui, vendored icon artwork and favicons only. */
-const ALLOWED_IMAGE_DIRECTORIES = ['docs/screens', 'apps/ui/src/assets'];
+const ALLOWED_RASTER_DIRECTORIES = ['docs/screens'];
+/** Icon artwork is SVG only: a raster dropped here could be a foreign-console shot. */
+const SVG_ONLY_DIRECTORIES = ['apps/ui/src/assets'];
 const IMAGE_EXTENSIONS = new Set(['.png', '.gif', '.jpg', '.jpeg', '.webp', '.avif']);
 
 const SECRET_PATTERNS: readonly { name: string; pattern: RegExp; allow?: RegExp }[] = [
@@ -62,11 +64,12 @@ function checkDisclaimer(): void {
   if (!readme.includes(normalizeWhitespace(DISCLAIMER))) {
     fail('disclaimer', 'README.md does not contain the required legal disclaimer verbatim.');
   }
-  const footer = read('apps/ui/src/layout/AppFooter.tsx');
-  if (
-    !normalizeWhitespace(footer).includes('not affiliated with or endorsed by Amazon Web Services')
-  ) {
-    fail('disclaimer', 'AppFooter.tsx does not render the required legal disclaimer.');
+  const footer = normalizeWhitespace(read('apps/ui/src/layout/AppFooter.tsx'));
+  if (!footer.includes(normalizeWhitespace(DISCLAIMER))) {
+    fail(
+      'disclaimer',
+      'AppFooter.tsx does not render the full required legal disclaimer verbatim.',
+    );
   }
 }
 
@@ -104,19 +107,24 @@ function checkTree(): void {
   for (const relativePath of files) {
     const extension = path.extname(relativePath).toLowerCase();
     const withoutLeadingSlash = relativePath.replace(/^\//, '');
+    const basename = path.basename(relativePath);
 
-    if (extension === '.env' || /(^|\/)\.env\.(?!example$)[^/]*$/.test(relativePath)) {
+    // `.env` and any `.env.*` variant are committed environment files; the
+    // documented template `.env.example` is the one allowed exception.
+    if ((basename === '.env' || basename.startsWith('.env.')) && basename !== '.env.example') {
       fail('secrets', `${relativePath} looks like a committed environment file.`);
     }
 
     if (IMAGE_EXTENSIONS.has(extension)) {
-      const allowed = ALLOWED_IMAGE_DIRECTORIES.some((directory) =>
+      const allowed = ALLOWED_RASTER_DIRECTORIES.some((directory) =>
         withoutLeadingSlash.startsWith(`${directory}/`),
       );
       if (!allowed) {
         fail(
           'images',
-          `${relativePath} is an image outside ${ALLOWED_IMAGE_DIRECTORIES.join(', ')}; only LocalDeck's own ui screenshots and vendored icon artwork are allowed.`,
+          `${relativePath} is a raster image; only LocalDeck's own ui screenshots under ` +
+            `${ALLOWED_RASTER_DIRECTORIES.join(', ')} and SVG artwork under ` +
+            `${SVG_ONLY_DIRECTORIES.join(', ')} are allowed.`,
         );
       }
     }

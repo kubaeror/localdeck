@@ -146,11 +146,12 @@ export async function deleteBuckets(buckets: readonly string[]): Promise<BulkDel
 }
 
 /** `GetBucketLocation`; us-east-1 reports as an empty LocationConstraint. */
-export async function getBucketLocation(bucket: string): Promise<string> {
+export async function getBucketLocation(bucket: string, signal?: AbortSignal): Promise<string> {
   const result = await callServiceOperation<{ LocationConstraint?: string | null }>(
     SERVICE_ID,
     'GetBucketLocation',
     { Bucket: bucket },
+    signal,
   );
   const location = result.LocationConstraint;
   return typeof location === 'string' && location.length > 0 ? location : 'us-east-1';
@@ -278,37 +279,73 @@ export async function deleteObject(input: { bucket: string; key: string }): Prom
   });
 }
 
-export interface DeleteObjectsResult {
-  deleted: readonly string[];
-  failures: readonly { key: string; code?: string; message?: string }[];
+/** One failure from a `DeleteObjects` batch. */
+export interface DeleteObjectsFailure {
+  /**
+   * The object key AWS named, or a summary for a whole batch that failed
+   * before S3 could answer per key (a network or proxy error).
+   */
+  key: string;
+  code?: string;
+  message?: string;
 }
 
-/** `DeleteObjects` in batches of 1000 (the API maximum), including failures. */
+export interface DeleteObjectsResult {
+  deleted: readonly string[];
+  failures: readonly DeleteObjectsFailure[];
+}
+
+function batchFailureLabel(batch: readonly string[]): string {
+  const first = batch[0] ?? '(unknown)';
+  return batch.length === 1 ? first : `${batch.length} objects (starting at "${first}")`;
+}
+
+/**
+ * `DeleteObjects` in batches of 1000 (the API maximum). Each batch is caught
+ * on its own, so a failure on page N never discards the keys that were already
+ * deleted and never blocks the remaining batches.
+ */
 export async function deleteObjects(input: {
   bucket: string;
   keys: readonly string[];
+  signal?: AbortSignal;
 }): Promise<DeleteObjectsResult> {
   const deleted: string[] = [];
-  const failures: { key: string; code?: string; message?: string }[] = [];
+  const failures: DeleteObjectsFailure[] = [];
 
   for (let offset = 0; offset < input.keys.length; offset += 1000) {
     const batch = input.keys.slice(offset, offset + 1000);
-    const result = await callServiceOperation<{
-      Deleted?: { Key?: string }[];
-      Errors?: { Key?: string; Code?: string; Message?: string }[];
-    }>(SERVICE_ID, 'DeleteObjects', {
-      Bucket: input.bucket,
-      Delete: { Objects: batch.map((key) => ({ Key: key })), Quiet: false },
-    });
+    try {
+      const result = await callServiceOperation<{
+        Deleted?: { Key?: string }[];
+        Errors?: { Key?: string; Code?: string; Message?: string }[];
+      }>(
+        SERVICE_ID,
+        'DeleteObjects',
+        {
+          Bucket: input.bucket,
+          Delete: { Objects: batch.map((key) => ({ Key: key })), Quiet: false },
+        },
+        input.signal,
+      );
 
-    for (const entry of result.Deleted ?? []) {
-      if (typeof entry.Key === 'string') deleted.push(entry.Key);
-    }
-    for (const entry of result.Errors ?? []) {
+      for (const entry of result.Deleted ?? []) {
+        if (typeof entry.Key === 'string') deleted.push(entry.Key);
+      }
+      for (const entry of result.Errors ?? []) {
+        failures.push({
+          key: entry.Key ?? '(unknown)',
+          ...(entry.Code === undefined ? {} : { code: entry.Code }),
+          ...(entry.Message === undefined ? {} : { message: entry.Message }),
+        });
+      }
+    } catch (caught) {
+      if (input.signal?.aborted === true) throw caught;
+      const friendly = toFriendlyS3Error(caught);
       failures.push({
-        key: entry.Key ?? '(unknown)',
-        ...(entry.Code === undefined ? {} : { code: entry.Code }),
-        ...(entry.Message === undefined ? {} : { message: entry.Message }),
+        key: batchFailureLabel(batch),
+        code: friendly.apiError.code,
+        message: friendly.message,
       });
     }
   }
@@ -323,12 +360,18 @@ export interface CopyObjectInput {
   destinationKey: string;
 }
 
-/** `CopyObject`; the source is a CrossBucket-safe `/{bucket}/{key}` source. */
+/** `CopySource` needs every key segment percent-encoded, but not the slashes. */
+function encodeCopySource(bucket: string, key: string): string {
+  const encodedKey = key.split('/').map(encodeURIComponent).join('/');
+  return `/${encodeURIComponent(bucket)}/${encodedKey}`;
+}
+
+/** `CopyObject`; the source is a cross-bucket-safe `/{bucket}/{key}` source. */
 export async function copyObject(input: CopyObjectInput): Promise<void> {
   await callServiceOperation(SERVICE_ID, 'CopyObject', {
     Bucket: input.destinationBucket,
     Key: input.destinationKey,
-    CopySource: encodeURI(`/${input.sourceBucket}/${input.sourceKey}`),
+    CopySource: encodeCopySource(input.sourceBucket, input.sourceKey),
   });
 }
 
@@ -343,28 +386,60 @@ export async function moveObject(input: CopyObjectInput): Promise<void> {
 
 /**
  * Deletes a folder and everything under it, the way the console's "Delete
- * folder" does: walk every key with the prefix, then `DeleteObjects` in
- * batches.
+ * folder" does. The recursive listing includes the prefix marker itself and
+ * every nested folder marker (S3 returns keys that end with a slash as regular
+ * keys when no delimiter is set), and each page is deleted as it arrives so a
+ * huge folder does not have to fit in memory.
  */
 export async function deleteFolder(input: {
   bucket: string;
   prefix: string;
+  signal?: AbortSignal;
 }): Promise<DeleteObjectsResult> {
-  const keys: string[] = [];
+  const deleted: string[] = [];
+  const failures: DeleteObjectsFailure[] = [];
   let continuationToken: string | undefined;
+  let firstPage = true;
+
   do {
-    const page = await listObjects({
-      bucket: input.bucket,
-      prefix: input.prefix,
-      recursive: true,
-      ...(continuationToken === undefined ? {} : { continuationToken }),
-    });
-    keys.push(...page.objects.map((object) => object.key));
-    continuationToken = page.nextToken;
+    const result = await callServiceOperation<{
+      Contents?: RawObject[];
+      NextContinuationToken?: string;
+    }>(
+      SERVICE_ID,
+      'ListObjectsV2',
+      {
+        Bucket: input.bucket,
+        ...(input.prefix.length === 0 ? {} : { Prefix: input.prefix }),
+        ...(continuationToken === undefined ? {} : { ContinuationToken: continuationToken }),
+      },
+      input.signal,
+    );
+
+    const keys = new Set<string>();
+    // The folder marker itself may not come back from a listing whose prefix
+    // starts after it; delete it explicitly so an "empty" folder disappears.
+    if (firstPage && input.prefix.length > 0) keys.add(input.prefix);
+    for (const entry of result.Contents ?? []) {
+      if (typeof entry.Key === 'string' && entry.Key.length > 0) keys.add(entry.Key);
+    }
+
+    if (keys.size > 0) {
+      const page = await deleteObjects({
+        bucket: input.bucket,
+        keys: [...keys],
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
+      });
+      deleted.push(...page.deleted);
+      failures.push(...page.failures);
+    }
+
+    firstPage = false;
+    const next = result.NextContinuationToken;
+    continuationToken = next === undefined || next.length === 0 ? undefined : next;
   } while (continuationToken !== undefined);
 
-  if (keys.length === 0) return { deleted: [], failures: [] };
-  return deleteObjects({ bucket: input.bucket, keys });
+  return { deleted, failures };
 }
 
 /** Object metadata (HeadObject) as the metadata modal renders it. */
@@ -403,12 +478,18 @@ export async function headObject(input: {
   bucket: string;
   key: string;
   versionId?: string;
+  signal?: AbortSignal;
 }): Promise<S3ObjectMetadata> {
-  const result = await callServiceOperation<RawHeadObject>(SERVICE_ID, 'HeadObject', {
-    Bucket: input.bucket,
-    Key: input.key,
-    ...(input.versionId === undefined ? {} : { VersionId: input.versionId }),
-  });
+  const result = await callServiceOperation<RawHeadObject>(
+    SERVICE_ID,
+    'HeadObject',
+    {
+      Bucket: input.bucket,
+      Key: input.key,
+      ...(input.versionId === undefined ? {} : { VersionId: input.versionId }),
+    },
+    input.signal,
+  );
   const lastModified = toIso(result.LastModified);
   return {
     bucket: input.bucket,
@@ -490,11 +571,15 @@ export interface S3BucketVersioning {
   mfaDelete: boolean;
 }
 
-export async function getBucketVersioning(bucket: string): Promise<S3BucketVersioning> {
+export async function getBucketVersioning(
+  bucket: string,
+  signal?: AbortSignal,
+): Promise<S3BucketVersioning> {
   const result = await callServiceOperation<{ Status?: string; MFADelete?: string }>(
     SERVICE_ID,
     'GetBucketVersioning',
     { Bucket: bucket },
+    signal,
   );
   const status =
     result.Status === 'Enabled' || result.Status === 'Suspended' ? result.Status : 'Unversioned';
@@ -514,12 +599,16 @@ export async function putBucketVersioning(input: {
 // ------------------------------------------------------------------- tags
 
 /** `GetBucketTagging`; an untagged bucket answers with an empty tag set. */
-export async function getBucketTags(bucket: string): Promise<readonly AwsTag[]> {
+export async function getBucketTags(
+  bucket: string,
+  signal?: AbortSignal,
+): Promise<readonly AwsTag[]> {
   try {
     const result = await callServiceOperation<{ TagSet?: AwsTag[] }>(
       SERVICE_ID,
       'GetBucketTagging',
       { Bucket: bucket },
+      signal,
     );
     return result.TagSet ?? [];
   } catch (error) {
@@ -546,11 +635,17 @@ export async function deleteBucketTags(bucket: string): Promise<void> {
 // ----------------------------------------------------------------- policy
 
 /** `GetBucketPolicy`; a bucket without a policy answers `undefined`. */
-export async function getBucketPolicy(bucket: string): Promise<string | undefined> {
+export async function getBucketPolicy(
+  bucket: string,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
   try {
-    const result = await callServiceOperation<{ Policy?: string }>(SERVICE_ID, 'GetBucketPolicy', {
-      Bucket: bucket,
-    });
+    const result = await callServiceOperation<{ Policy?: string }>(
+      SERVICE_ID,
+      'GetBucketPolicy',
+      { Bucket: bucket },
+      signal,
+    );
     return result.Policy;
   } catch (error) {
     if (isS3Code(error, 'NoSuchBucketPolicy', 'NoSuchBucketPolicyError')) return undefined;
@@ -584,11 +679,14 @@ const NO_PUBLIC_ACCESS: Omit<S3PublicAccessState, 'configured'> = {
   RestrictPublicBuckets: false,
 };
 
-export async function getPublicAccessBlock(bucket: string): Promise<S3PublicAccessState> {
+export async function getPublicAccessBlock(
+  bucket: string,
+  signal?: AbortSignal,
+): Promise<S3PublicAccessState> {
   try {
     const result = await callServiceOperation<{
       PublicAccessBlockConfiguration?: Partial<S3PublicAccessBlock>;
-    }>(SERVICE_ID, 'GetPublicAccessBlock', { Bucket: bucket });
+    }>(SERVICE_ID, 'GetPublicAccessBlock', { Bucket: bucket }, signal);
     const configuration = result.PublicAccessBlockConfiguration;
     if (configuration === undefined) {
       return { ...NO_PUBLIC_ACCESS, configured: false };
@@ -612,10 +710,23 @@ export async function putPublicAccessBlock(input: {
   bucket: string;
   settings: S3PublicAccessBlock;
 }): Promise<void> {
+  // Pick the four settings explicitly: callers may hand in a wider state object
+  // (the loaded configuration carries a `configured` flag) and the request
+  // must contain only what the API accepts.
   await callServiceOperation(SERVICE_ID, 'PutPublicAccessBlock', {
     Bucket: input.bucket,
-    PublicAccessBlockConfiguration: { ...input.settings },
+    PublicAccessBlockConfiguration: {
+      BlockPublicAcls: input.settings.BlockPublicAcls,
+      IgnorePublicAcls: input.settings.IgnorePublicAcls,
+      BlockPublicPolicy: input.settings.BlockPublicPolicy,
+      RestrictPublicBuckets: input.settings.RestrictPublicBuckets,
+    },
   });
+}
+
+/** `DeletePublicAccessBlock` — removes the bucket's explicit configuration. */
+export async function deletePublicAccessBlock(bucket: string): Promise<void> {
+  await callServiceOperation(SERVICE_ID, 'DeletePublicAccessBlock', { Bucket: bucket });
 }
 
 // ------------------------------------------------------------- encryption
@@ -629,7 +740,10 @@ export interface S3BucketEncryption {
   bucketKeyEnabled?: boolean;
 }
 
-export async function getBucketEncryption(bucket: string): Promise<S3BucketEncryption> {
+export async function getBucketEncryption(
+  bucket: string,
+  signal?: AbortSignal,
+): Promise<S3BucketEncryption> {
   try {
     const result = await callServiceOperation<{
       ServerSideEncryptionConfiguration?: {
@@ -641,15 +755,18 @@ export async function getBucketEncryption(bucket: string): Promise<S3BucketEncry
           BucketKeyEnabled?: boolean;
         }[];
       };
-    }>(SERVICE_ID, 'GetBucketEncryption', { Bucket: bucket });
+    }>(SERVICE_ID, 'GetBucketEncryption', { Bucket: bucket }, signal);
 
     const rule = result.ServerSideEncryptionConfiguration?.Rules?.[0];
-    const defaults = rule?.ApplyServerSideEncryptionByDefault;
+    // An empty Rules array means "no explicit rule": S3 applies SSE-S3, which
+    // the console renders as the default rather than an unknown algorithm.
+    if (rule === undefined) return { configured: false };
+    const defaults = rule.ApplyServerSideEncryptionByDefault;
     return {
       configured: true,
       ...(defaults?.SSEAlgorithm === undefined ? {} : { algorithm: defaults.SSEAlgorithm }),
       ...(defaults?.KMSMasterKeyID === undefined ? {} : { kmsKeyArn: defaults.KMSMasterKeyID }),
-      ...(rule?.BucketKeyEnabled === undefined ? {} : { bucketKeyEnabled: rule.BucketKeyEnabled }),
+      ...(rule.BucketKeyEnabled === undefined ? {} : { bucketKeyEnabled: rule.BucketKeyEnabled }),
     };
   } catch (error) {
     if (

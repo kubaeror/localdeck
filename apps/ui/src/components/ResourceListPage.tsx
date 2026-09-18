@@ -2,6 +2,8 @@ import type { ApiError, Paginated } from '@localdeck/shared';
 import Alert from '@cloudscape-design/components/alert';
 import Box from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
+import CollectionPreferences from '@cloudscape-design/components/collection-preferences';
+import type { CollectionPreferencesProps } from '@cloudscape-design/components/collection-preferences';
 import ContentLayout from '@cloudscape-design/components/content-layout';
 import Header from '@cloudscape-design/components/header';
 import Pagination from '@cloudscape-design/components/pagination';
@@ -11,6 +13,7 @@ import type { TableProps } from '@cloudscape-design/components/table';
 import TextFilter from '@cloudscape-design/components/text-filter';
 import {
   useCallback,
+  useDeferredValue,
   useEffect,
   useMemo,
   useRef,
@@ -19,6 +22,7 @@ import {
   type ReactNode,
 } from 'react';
 import { toApiError } from '../lib/apiClient';
+import { readListPreferences, writeListPreferences } from '../lib/listPreferences';
 import { ConsoleBreadcrumbs, type ConsoleBreadcrumb } from './ConsoleBreadcrumbs';
 import { EmptyState } from './EmptyState';
 
@@ -37,6 +41,49 @@ export interface ResourceListFetcherOptions {
   signal?: AbortSignal;
 }
 
+/**
+ * Visible-column choices for the preferences dialog. Accepts either
+ * Cloudscape's grouped descriptor or the flat shorthand most modules use
+ * (`{ title, options: [{ id, label }] }`).
+ */
+export interface ResourceListVisibleContentPreference {
+  title: string;
+  options: readonly (
+    | CollectionPreferencesProps.VisibleContentOption
+    | CollectionPreferencesProps.VisibleContentOptionsGroup
+  )[];
+}
+
+function isVisibleContentGroup(
+  entry:
+    | CollectionPreferencesProps.VisibleContentOption
+    | CollectionPreferencesProps.VisibleContentOptionsGroup,
+): entry is CollectionPreferencesProps.VisibleContentOptionsGroup {
+  return Array.isArray((entry as { options?: unknown }).options);
+}
+
+/** Normalizes either accepted shape into Cloudscape's grouped descriptor. */
+function toVisibleContentPreference(
+  preference: ResourceListVisibleContentPreference,
+): CollectionPreferencesProps.VisibleContentPreference {
+  const groups = preference.options.filter(isVisibleContentGroup);
+  if (groups.length === preference.options.length) {
+    return { title: preference.title, options: groups };
+  }
+  return {
+    title: preference.title,
+    options: [
+      {
+        label: preference.title,
+        options: preference.options.filter(
+          (entry): entry is CollectionPreferencesProps.VisibleContentOption =>
+            !isVisibleContentGroup(entry),
+        ),
+      },
+    ],
+  };
+}
+
 export interface ResourceListPageProps<T> {
   /** Page title (h1), table header and empty-state subject. */
   title: string;
@@ -52,6 +99,11 @@ export interface ResourceListPageProps<T> {
   /** Selection actions; providing this enables row selection. */
   bulkActions?: (selectedItems: readonly T[]) => ReactNode;
   filtering?: ResourceListFiltering<T>;
+  /**
+   * Extra controls rendered next to the filter in the table header. Service
+   * modules use it for view toggles that belong with the list.
+   */
+  filterExtras?: ReactNode;
   /** Page-level actions (a "Create" button); refresh is always added. */
   headerActions?: ReactNode;
   /** Rendered above the table: alerts, hints, long-running operations. */
@@ -61,8 +113,23 @@ export interface ResourceListPageProps<T> {
   emptyDescription?: ReactNode;
   pageSize?: number;
   /**
-   * Bump to reload the list programmatically (after a delete, for example).
-   * The initial load is unaffected.
+   * Enables the CollectionPreferences dialog and persists the confirmed page
+   * size / visible columns under this key in localStorage. Omit it and the
+   * list page behaves exactly as before (no preferences button).
+   */
+  preferencesId?: string;
+  /** Page-size choices; omit to leave the page size fixed. */
+  pageSizeOptions?: readonly CollectionPreferencesProps.PageSizeOption[];
+  /**
+   * Visible-column choices; option ids must match `columns[].id`. Both the
+   * Cloudscape grouped shape and the flat `{ id, label }` shorthand work.
+   */
+  visibleContentPreference?: ResourceListVisibleContentPreference;
+  /**
+   * Bump to reload the list programmatically (after a delete, or while an
+   * EC2/EKS action settles). After the initial load every reloadToken change
+   * is a silent refresh: rows are swapped in place and phase, page and
+   * selection are kept. The explicit Refresh button still resets all three.
    */
   reloadToken?: number;
   /** Sorting value for a column's `sortingField`; defaults to that property. */
@@ -102,11 +169,15 @@ export function ResourceListPage<T>({
   rowActions,
   bulkActions,
   filtering,
+  filterExtras,
   headerActions,
   notifications,
   emptyTitle,
   emptyDescription,
   pageSize = 10,
+  preferencesId,
+  pageSizeOptions,
+  visibleContentPreference,
   reloadToken = 0,
   getSortingValue = defaultSortingValue,
 }: ResourceListPageProps<T>): ReactElement {
@@ -123,6 +194,10 @@ export function ResourceListPage<T>({
       : { sortingField: columns[0].sortingField },
   );
   const [isSortingDescending, setIsSortingDescending] = useState(false);
+  const [storedPreferences, setStoredPreferences] =
+    useState<CollectionPreferencesProps.Preferences>(() =>
+      preferencesId === undefined ? {} : readListPreferences(preferencesId),
+    );
   const inFlight = useRef<AbortController | null>(null);
 
   // Held in a ref so an inline fetcher does not restart the initial load.
@@ -132,12 +207,15 @@ export function ResourceListPage<T>({
   }, [fetcher]);
 
   const load = useCallback(
-    async (options: { nextToken?: string; append?: boolean } = {}): Promise<void> => {
+    async (
+      options: { nextToken?: string; append?: boolean; silent?: boolean } = {},
+    ): Promise<void> => {
       inFlight.current?.abort();
       const controller = new AbortController();
       inFlight.current = controller;
+      const silent = options.silent === true;
       if (options.append === true) setLoadingMore(true);
-      else setPhase('loading');
+      else if (!silent) setPhase('loading');
 
       try {
         const page = await fetcherRef.current({
@@ -154,7 +232,9 @@ export function ResourceListPage<T>({
       } catch (caught) {
         if (controller.signal.aborted) return;
         setError(toApiError(caught));
-        setPhase('error');
+        // A silent refresh must not tear down rows the user is working with:
+        // the error alert appears above the table, the phase stays as it was.
+        if (!silent) setPhase('error');
       } finally {
         if (!controller.signal.aborted) setLoadingMore(false);
       }
@@ -172,21 +252,25 @@ export function ResourceListPage<T>({
     };
   }, [load]);
 
-  // Programmatic reloads (after a delete) reuse the same load path.
+  // Programmatic reloads (polling while a resource settles, post-delete)
+  // refresh in place instead of resetting phase, selection and page.
   const reloadTokenRef = useRef(reloadToken);
   useEffect(() => {
     if (reloadTokenRef.current === reloadToken) return;
     reloadTokenRef.current = reloadToken;
-    setSelectedItems([]);
-    setCurrentPageIndex(1);
-    void load();
+    void load({ silent: true });
   }, [load, reloadToken]);
 
+  const filterText = filtering?.text ?? '';
+  // Typing stays responsive; the (possibly large) filtering work follows the
+  // deferred value.
+  const deferredFilterText = useDeferredValue(filterText);
+  const filterMatch = filtering?.match;
   const filtered = useMemo(() => {
-    if (filtering === undefined || filtering.text.trim().length === 0) return items;
-    const match = filtering.match ?? defaultMatch;
-    return items.filter((item) => match(item, filtering.text));
-  }, [filtering, items]);
+    if (deferredFilterText.trim().length === 0) return items;
+    const match = filterMatch ?? defaultMatch;
+    return items.filter((item) => match(item, deferredFilterText));
+  }, [deferredFilterText, filterMatch, items]);
 
   const sorted = useMemo(() => {
     const field = sortingColumn.sortingField;
@@ -203,21 +287,66 @@ export function ResourceListPage<T>({
     });
   }, [filtered, getSortingValue, isSortingDescending, sortingColumn]);
 
-  const pagesCount = Math.max(1, Math.ceil(sorted.length / pageSize));
-  const visibleItems = sorted.slice((currentPageIndex - 1) * pageSize, currentPageIndex * pageSize);
+  const preferencesEnabled =
+    preferencesId !== undefined &&
+    (pageSizeOptions !== undefined || visibleContentPreference !== undefined);
+  const effectivePageSize =
+    preferencesEnabled &&
+    pageSizeOptions !== undefined &&
+    storedPreferences.pageSize !== undefined &&
+    pageSizeOptions.some((option) => option.value === storedPreferences.pageSize)
+      ? storedPreferences.pageSize
+      : pageSize;
+
+  const normalizedVisibleContent = useMemo(
+    () =>
+      visibleContentPreference === undefined
+        ? undefined
+        : toVisibleContentPreference(visibleContentPreference),
+    [visibleContentPreference],
+  );
+
+  const preferenceColumnIds = useMemo(() => {
+    if (normalizedVisibleContent === undefined) return undefined;
+    const ids = new Set<string>();
+    for (const group of normalizedVisibleContent.options) {
+      for (const option of group.options) ids.add(option.id);
+    }
+    return ids;
+  }, [normalizedVisibleContent]);
 
   const tableColumns = useMemo<readonly TableProps.ColumnDefinition<T>[]>(() => {
-    if (rowActions === undefined) return columns;
-    return [
-      ...columns,
-      {
-        id: 'localdeck-actions',
-        header: 'Actions',
-        minWidth: '140px',
-        cell: (item: T) => rowActions(item),
-      },
-    ];
-  }, [columns, rowActions]);
+    const base: readonly TableProps.ColumnDefinition<T>[] =
+      rowActions === undefined
+        ? columns
+        : [
+            ...columns,
+            {
+              id: 'localdeck-actions',
+              header: 'Actions',
+              minWidth: '140px',
+              cell: (item: T) => rowActions(item),
+            },
+          ];
+    const visible = storedPreferences.visibleContent;
+    if (preferenceColumnIds === undefined || visible === undefined || visible.length === 0) {
+      return base;
+    }
+    const visibleSet = new Set(visible);
+    return base.filter(
+      (column) =>
+        column.id === undefined || !preferenceColumnIds.has(column.id) || visibleSet.has(column.id),
+    );
+  }, [columns, preferenceColumnIds, rowActions, storedPreferences.visibleContent]);
+
+  const pagesCount = Math.max(1, Math.ceil(sorted.length / effectivePageSize));
+  // The list can shrink between polls or after a delete; clamp instead of
+  // showing an empty page.
+  const pageIndex = Math.min(currentPageIndex, pagesCount);
+  const visibleItems = sorted.slice(
+    (pageIndex - 1) * effectivePageSize,
+    pageIndex * effectivePageSize,
+  );
 
   const selectionEnabled = bulkActions !== undefined;
   const counter = `(${sorted.length}${sorted.length === items.length ? '' : ` of ${items.length}`})`;
@@ -228,7 +357,21 @@ export function ResourceListPage<T>({
       `Select ${getRowId(item)}`,
   };
 
-  const header = (
+  const filterControl =
+    filtering === undefined ? undefined : (
+      <TextFilter
+        filteringText={filtering.text}
+        filteringPlaceholder={filtering.placeholder ?? `Find ${title.toLowerCase()}`}
+        filteringAriaLabel={`Filter ${title.toLowerCase()}`}
+        countText={`${sorted.length} match${sorted.length === 1 ? '' : 'es'}`}
+        onChange={({ detail }) => {
+          filtering.onChange(detail.filteringText);
+          setCurrentPageIndex(1);
+        }}
+      />
+    );
+
+  const tableHeader = (
     <Header
       variant="h2"
       counter={counter}
@@ -236,7 +379,7 @@ export function ResourceListPage<T>({
         <SpaceBetween direction="horizontal" size="xs">
           {selectionEnabled && selectedItems.length > 0 && bulkActions !== undefined
             ? bulkActions(selectedItems)
-            : headerActions}
+            : null}
           <Button
             iconName="refresh"
             ariaLabel={`Refresh ${title}`}
@@ -253,6 +396,30 @@ export function ResourceListPage<T>({
       {title}
     </Header>
   );
+
+  const preferencesDialog = preferencesEnabled ? (
+    <CollectionPreferences
+      title="Preferences"
+      confirmLabel="Confirm"
+      cancelLabel="Cancel"
+      {...(pageSizeOptions === undefined
+        ? {}
+        : { pageSizePreference: { title: 'Page size', options: pageSizeOptions } })}
+      {...(normalizedVisibleContent === undefined
+        ? {}
+        : { visibleContentPreference: normalizedVisibleContent })}
+      preferences={storedPreferences}
+      onConfirm={({ detail }) => {
+        const next: CollectionPreferencesProps.Preferences = {
+          ...(detail.pageSize === undefined ? {} : { pageSize: detail.pageSize }),
+          ...(detail.visibleContent === undefined ? {} : { visibleContent: detail.visibleContent }),
+        };
+        setStoredPreferences(next);
+        if (preferencesId !== undefined) writeListPreferences(preferencesId, next);
+        setCurrentPageIndex(1);
+      }}
+    />
+  ) : undefined;
 
   return (
     <ContentLayout
@@ -296,6 +463,7 @@ export function ResourceListPage<T>({
           items={visibleItems}
           columnDefinitions={tableColumns}
           trackBy={getRowId}
+          preferences={preferencesDialog}
           {...(selectionEnabled
             ? {
                 selectionType: 'multi' as const,
@@ -314,25 +482,28 @@ export function ResourceListPage<T>({
             setCurrentPageIndex(1);
           }}
           filter={
-            filtering === undefined ? undefined : (
-              <TextFilter
-                filteringText={filtering.text}
-                filteringPlaceholder={filtering.placeholder ?? `Find ${title.toLowerCase()}`}
-                filteringAriaLabel={`Filter ${title.toLowerCase()}`}
-                countText={`${sorted.length} match${sorted.length === 1 ? '' : 'es'}`}
-                onChange={({ detail }) => {
-                  filtering.onChange(detail.filteringText);
-                  setCurrentPageIndex(1);
+            filterControl === undefined ? undefined : filterExtras === undefined ? (
+              filterControl
+            ) : (
+              <div
+                style={{
+                  display: 'flex',
+                  gap: '8px',
+                  alignItems: 'flex-start',
+                  flexWrap: 'wrap',
                 }}
-              />
+              >
+                <div style={{ flex: '1 1 320px', minWidth: 0 }}>{filterControl}</div>
+                {filterExtras}
+              </div>
             )
           }
           header={
             nextToken === undefined ? (
-              header
+              tableHeader
             ) : (
               <SpaceBetween size="xs">
-                {header}
+                {tableHeader}
                 <Box variant="small" color="text-body-secondary">
                   More results are available from the service.
                 </Box>
@@ -342,7 +513,7 @@ export function ResourceListPage<T>({
           pagination={
             <SpaceBetween direction="horizontal" size="xs" alignItems="center">
               <Pagination
-                currentPageIndex={currentPageIndex}
+                currentPageIndex={pageIndex}
                 pagesCount={pagesCount}
                 onChange={({ detail }) => {
                   setCurrentPageIndex(detail.currentPageIndex);

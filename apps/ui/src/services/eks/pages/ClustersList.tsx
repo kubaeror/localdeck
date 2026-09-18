@@ -270,7 +270,7 @@ export function ClustersListPage({ descriptor }: ServicePageProps): ReactElement
               cluster.name,
               cluster.status,
               cluster.version,
-              cluster.arn,
+              ...(cluster.arn === undefined ? [] : [cluster.arn]),
               cluster.roleArn,
             ].some((value) => value.toLowerCase().includes(needle));
           },

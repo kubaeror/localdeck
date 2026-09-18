@@ -13,7 +13,7 @@ import SpaceBetween from '@cloudscape-design/components/space-between';
 import Spinner from '@cloudscape-design/components/spinner';
 import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import { useEffect, useRef, useState, useCallback, type ReactElement } from 'react';
-import { TagsEditor } from '../../../components/TagsEditor';
+import { TagsEditor, validateTags } from '../../../components/TagsEditor';
 import { useFlashbar } from '../../../hooks/useFlashbar';
 import { toApiError } from '../../../lib/apiClient';
 import { formatDateTime } from '../../../lib/format';
@@ -29,78 +29,136 @@ import {
   type S3BucketVersioning,
 } from '../api';
 import { toFriendlyS3Error } from '../errors';
+import { meaningfulTags } from '../tags';
 
 export interface PropertiesTabProps {
   bucket: string;
   /** From ListBuckets on the detail page; the tab does not re-fetch it. */
   creationDate?: string;
+  /**
+   * Unsaved versioning choice, lifted to the detail page so switching tabs
+   * does not discard it. Without the prop the tab keeps its own draft.
+   */
+  versioningDraft?: boolean;
+  onVersioningDraftChange?: (enabled: boolean | undefined) => void;
+  /** Unsaved tag edits, lifted to the detail page so tab switches keep them. */
+  tagsDraft?: readonly AwsTag[];
+  onTagsDraftChange?: (tags: readonly AwsTag[] | undefined) => void;
 }
 
 /**
  * The bucket's Properties tab: versioning on/off, the tags editor and the
- * default-encryption readout. Every change is a separate, explicit save, and
- * failures are rendered next to the section that caused them.
+ * default-encryption readout. Versioning, tags and encryption load
+ * independently, so one failing read keeps the other sections usable, and
+ * every change is a separate, explicit save.
  */
-export function PropertiesTab({ bucket, creationDate }: PropertiesTabProps): ReactElement {
+export function PropertiesTab({
+  bucket,
+  creationDate,
+  versioningDraft,
+  onVersioningDraftChange,
+  tagsDraft,
+  onTagsDraftChange,
+}: PropertiesTabProps): ReactElement {
   const flashbar = useFlashbar();
 
   const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<ApiError | null>(null);
 
   const [versioning, setVersioning] = useState<S3BucketVersioning | null>(null);
-  const [versioningDraft, setVersioningDraft] = useState(false);
+  const [versioningLoadError, setVersioningLoadError] = useState<ApiError | null>(null);
   const [savingVersioning, setSavingVersioning] = useState(false);
   const [versioningError, setVersioningError] = useState<string | null>(null);
 
   const [tags, setTags] = useState<readonly AwsTag[]>([]);
   const [savedTags, setSavedTags] = useState<readonly AwsTag[]>([]);
+  const [tagsLoadError, setTagsLoadError] = useState<ApiError | null>(null);
   const [savingTags, setSavingTags] = useState(false);
   const [tagsError, setTagsError] = useState<string | null>(null);
 
   const [encryption, setEncryption] = useState<S3BucketEncryption | null>(null);
+  const [encryptionLoadError, setEncryptionLoadError] = useState<ApiError | null>(null);
   const [location, setLocation] = useState('');
   const [bucketLoadError, setBucketLoadError] = useState<ApiError | null>(null);
-  const propertiesRequestId = useRef(0);
-  const locationRequestId = useRef(0);
 
-  // Versioning, tags and encryption are independent reads.
+  // Drafts used when the detail page does not lift them.
+  const [localVersioningDraft, setLocalVersioningDraft] = useState<boolean | null>(null);
+  const [localTagsDraft, setLocalTagsDraft] = useState<readonly AwsTag[] | null>(null);
+
+  const propertiesRequestId = useRef(0);
+  const versioningAbort = useRef<AbortController | null>(null);
+  const tagsAbort = useRef<AbortController | null>(null);
+  const encryptionAbort = useRef<AbortController | null>(null);
+  const locationAbort = useRef<AbortController | null>(null);
+
+  const loadVersioning = useCallback(async (): Promise<void> => {
+    versioningAbort.current?.abort();
+    const controller = new AbortController();
+    versioningAbort.current = controller;
+    setVersioningLoadError(null);
+    try {
+      const result = await getBucketVersioning(bucket, controller.signal);
+      if (controller.signal.aborted) return;
+      setVersioning(result);
+    } catch (caught) {
+      if (controller.signal.aborted) return;
+      setVersioningLoadError(toApiError(caught));
+    }
+  }, [bucket]);
+
+  const loadTags = useCallback(async (): Promise<void> => {
+    tagsAbort.current?.abort();
+    const controller = new AbortController();
+    tagsAbort.current = controller;
+    setTagsLoadError(null);
+    try {
+      const result = await getBucketTags(bucket, controller.signal);
+      if (controller.signal.aborted) return;
+      setTags(result);
+      setSavedTags(result);
+    } catch (caught) {
+      if (controller.signal.aborted) return;
+      setTagsLoadError(toApiError(caught));
+    }
+  }, [bucket]);
+
+  const loadEncryption = useCallback(async (): Promise<void> => {
+    encryptionAbort.current?.abort();
+    const controller = new AbortController();
+    encryptionAbort.current = controller;
+    setEncryptionLoadError(null);
+    try {
+      const result = await getBucketEncryption(bucket, controller.signal);
+      if (controller.signal.aborted) return;
+      setEncryption(result);
+    } catch (caught) {
+      if (controller.signal.aborted) return;
+      setEncryptionLoadError(toApiError(caught));
+    }
+  }, [bucket]);
+
+  // Versioning, tags and encryption are independent reads: one failure must
+  // not hide the sections that did load.
   const loadProperties = useCallback(async (): Promise<void> => {
     const id = propertiesRequestId.current + 1;
     propertiesRequestId.current = id;
     setLoading(true);
-    setLoadError(null);
-    try {
-      const [versioningResult, tagResult, encryptionResult] = await Promise.all([
-        getBucketVersioning(bucket),
-        getBucketTags(bucket),
-        getBucketEncryption(bucket),
-      ]);
-      if (propertiesRequestId.current !== id) return;
-      setVersioning(versioningResult);
-      setVersioningDraft(versioningResult.status === 'Enabled');
-      setTags(tagResult);
-      setSavedTags(tagResult);
-      setEncryption(encryptionResult);
-    } catch (caught) {
-      if (propertiesRequestId.current !== id) return;
-      setLoadError(toApiError(caught));
-    } finally {
-      if (propertiesRequestId.current === id) setLoading(false);
-    }
-  }, [bucket]);
+    await Promise.allSettled([loadVersioning(), loadTags(), loadEncryption()]);
+    if (propertiesRequestId.current === id) setLoading(false);
+  }, [loadEncryption, loadTags, loadVersioning]);
 
   // The bucket's region is a separate read so a missing location cannot hide
   // the versioning and tag sections.
   const loadLocation = useCallback(async (): Promise<void> => {
-    const id = locationRequestId.current + 1;
-    locationRequestId.current = id;
+    locationAbort.current?.abort();
+    const controller = new AbortController();
+    locationAbort.current = controller;
     setBucketLoadError(null);
     try {
-      const result = await getBucketLocation(bucket);
-      if (locationRequestId.current !== id) return;
+      const result = await getBucketLocation(bucket, controller.signal);
+      if (controller.signal.aborted) return;
       setLocation(result);
     } catch (caught) {
-      if (locationRequestId.current !== id) return;
+      if (controller.signal.aborted) return;
       setBucketLoadError(toApiError(caught));
     }
   }, [bucket]);
@@ -108,31 +166,56 @@ export function PropertiesTab({ bucket, creationDate }: PropertiesTabProps): Rea
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- bucket properties fetch
     void loadProperties();
-    return () => {
-      propertiesRequestId.current += 1;
-    };
-  }, [loadProperties]);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- bucket location fetch
     void loadLocation();
     return () => {
-      locationRequestId.current += 1;
+      propertiesRequestId.current += 1;
+      versioningAbort.current?.abort();
+      tagsAbort.current?.abort();
+      encryptionAbort.current?.abort();
+      locationAbort.current?.abort();
     };
-  }, [loadLocation]);
+  }, [loadProperties, loadLocation]);
 
   const currentVersioningEnabled = versioning?.status === 'Enabled';
-  const tagsChanged = JSON.stringify(tags) !== JSON.stringify(savedTags);
+  const versioningEnabled = versioningDraft ?? localVersioningDraft ?? currentVersioningEnabled;
+  const versioningChanged = versioningEnabled !== currentVersioningEnabled;
+
+  const displayedTags = tagsDraft ?? localTagsDraft ?? tags;
+  const tagsChanged = JSON.stringify(displayedTags) !== JSON.stringify(savedTags);
+  const tagProblems = validateTags(displayedTags);
+  const tagsInvalid = tagProblems.length > 0;
+
+  const updateVersioningDraft = (enabled: boolean): void => {
+    if (onVersioningDraftChange !== undefined) onVersioningDraftChange(enabled);
+    else setLocalVersioningDraft(enabled);
+  };
+  const clearVersioningDraft = (): void => {
+    if (onVersioningDraftChange !== undefined) onVersioningDraftChange(undefined);
+    else setLocalVersioningDraft(null);
+  };
+  const updateTagsDraft = (next: readonly AwsTag[]): void => {
+    if (onTagsDraftChange !== undefined) onTagsDraftChange(next);
+    else setLocalTagsDraft(next);
+  };
+  const clearTagsDraft = (): void => {
+    if (onTagsDraftChange !== undefined) onTagsDraftChange(undefined);
+    else setLocalTagsDraft(null);
+  };
 
   const saveVersioning = async (): Promise<void> => {
     setSavingVersioning(true);
     setVersioningError(null);
     try {
-      await putBucketVersioning({ bucket, enabled: versioningDraft });
-      setVersioning({ status: versioningDraft ? 'Enabled' : 'Suspended', mfaDelete: false });
+      await putBucketVersioning({ bucket, enabled: versioningEnabled });
+      // MFA delete is loaded state we never write here; keep it as it was.
+      setVersioning({
+        status: versioningEnabled ? 'Enabled' : 'Suspended',
+        mfaDelete: versioning?.mfaDelete ?? false,
+      });
+      clearVersioningDraft();
       flashbar.notify({
         type: 'success',
-        header: versioningDraft ? 'Versioning enabled' : 'Versioning suspended',
+        header: versioningEnabled ? 'Versioning enabled' : 'Versioning suspended',
         content: bucket,
       });
     } catch (caught) {
@@ -143,12 +226,20 @@ export function PropertiesTab({ bucket, creationDate }: PropertiesTabProps): Rea
   };
 
   const saveTags = async (): Promise<void> => {
+    const problem = tagProblems[0]?.message ?? null;
+    if (problem !== null) {
+      setTagsError(problem);
+      return;
+    }
+    const toSave = meaningfulTags(displayedTags);
     setSavingTags(true);
     setTagsError(null);
     try {
-      if (tags.length === 0) await deleteBucketTags(bucket);
-      else await putBucketTags({ bucket, tags });
-      setSavedTags(tags);
+      if (toSave.length === 0) await deleteBucketTags(bucket);
+      else await putBucketTags({ bucket, tags: toSave });
+      setTags(toSave);
+      setSavedTags(toSave);
+      clearTagsDraft();
       flashbar.notify({ type: 'success', header: 'Tags saved', content: bucket });
     } catch (caught) {
       setTagsError(toFriendlyS3Error(caught).message);
@@ -165,91 +256,92 @@ export function PropertiesTab({ bucket, creationDate }: PropertiesTabProps): Rea
     );
   }
 
-  if (loadError !== null) {
-    return (
-      <Alert
-        type="error"
-        header="Could not load the bucket properties"
-        action={
-          <Button
-            onClick={() => {
-              void loadProperties();
-            }}
-          >
-            Retry
-          </Button>
-        }
-      >
-        {loadError.message}
-      </Alert>
-    );
-  }
-
   return (
     <SpaceBetween size="l">
       <Container header={<Header variant="h2">Bucket overview</Header>}>
-        <KeyValuePairs
-          columns={3}
-          items={[
-            { label: 'Name', value: <Box variant="code">{bucket}</Box> },
-            {
-              label: 'ARN',
-              value: (
-                <SpaceBetween direction="horizontal" size="xxs">
-                  <Box variant="code">arn:aws:s3:::{bucket}</Box>
-                  <CopyToClipboard
-                    variant="icon"
-                    textToCopy={`arn:aws:s3:::${bucket}`}
-                    copyButtonAriaLabel="Copy ARN"
-                    copySuccessText="ARN copied"
-                    copyErrorText="Could not copy the ARN"
-                  />
-                </SpaceBetween>
-              ),
-            },
-            { label: 'Region', value: bucketLoadError === null ? location : 'unknown' },
-            { label: 'Creation date', value: formatDateTime(creationDate) },
-            {
-              label: 'Default encryption',
-              value:
-                encryption === null || !encryption.configured ? (
-                  <SpaceBetween size="xxs">
-                    <StatusIndicator type="success">SSE-S3 (S3-managed keys)</StatusIndicator>
-                    <Box variant="small" color="text-body-secondary">
-                      No explicit encryption configuration; S3 applies SSE-S3 by default.
-                    </Box>
-                  </SpaceBetween>
-                ) : (
-                  <SpaceBetween size="xxs">
-                    <Box variant="code">{encryption.algorithm ?? 'unknown'}</Box>
-                    {encryption.kmsKeyArn === undefined ? null : (
-                      <Box variant="small">{encryption.kmsKeyArn}</Box>
-                    )}
-                    {encryption.bucketKeyEnabled === true ? (
-                      <Box variant="small">Bucket key enabled</Box>
-                    ) : null}
+        <SpaceBetween size="m">
+          <KeyValuePairs
+            columns={3}
+            items={[
+              { label: 'Name', value: <Box variant="code">{bucket}</Box> },
+              {
+                label: 'ARN',
+                value: (
+                  <SpaceBetween direction="horizontal" size="xxs">
+                    <Box variant="code">arn:aws:s3:::{bucket}</Box>
+                    <CopyToClipboard
+                      variant="icon"
+                      textToCopy={`arn:aws:s3:::${bucket}`}
+                      copyButtonAriaLabel="Copy ARN"
+                      copySuccessText="ARN copied"
+                      copyErrorText="Could not copy the ARN"
+                    />
                   </SpaceBetween>
                 ),
-            },
-          ]}
-        />
-        {bucketLoadError === null ? null : (
-          <Alert
-            type="error"
-            header="Could not read the bucket location"
-            action={
-              <Button
-                onClick={() => {
-                  void loadLocation();
-                }}
-              >
-                Retry
-              </Button>
-            }
-          >
-            {bucketLoadError.message}
-          </Alert>
-        )}
+              },
+              { label: 'Region', value: bucketLoadError === null ? location : 'unknown' },
+              { label: 'Creation date', value: formatDateTime(creationDate) },
+              {
+                label: 'Default encryption',
+                value:
+                  encryptionLoadError !== null ? (
+                    <StatusIndicator type="warning">Unknown</StatusIndicator>
+                  ) : encryption === null || !encryption.configured ? (
+                    <SpaceBetween size="xxs">
+                      <StatusIndicator type="success">SSE-S3 (S3-managed keys)</StatusIndicator>
+                      <Box variant="small" color="text-body-secondary">
+                        No explicit encryption configuration; S3 applies SSE-S3 by default.
+                      </Box>
+                    </SpaceBetween>
+                  ) : (
+                    <SpaceBetween size="xxs">
+                      <Box variant="code">{encryption.algorithm ?? 'unknown'}</Box>
+                      {encryption.kmsKeyArn === undefined ? null : (
+                        <Box variant="small">{encryption.kmsKeyArn}</Box>
+                      )}
+                      {encryption.bucketKeyEnabled === true ? (
+                        <Box variant="small">Bucket key enabled</Box>
+                      ) : null}
+                    </SpaceBetween>
+                  ),
+              },
+            ]}
+          />
+          {bucketLoadError === null ? null : (
+            <Alert
+              type="error"
+              header="Could not read the bucket location"
+              action={
+                <Button
+                  onClick={() => {
+                    void loadLocation();
+                  }}
+                >
+                  Retry
+                </Button>
+              }
+            >
+              {bucketLoadError.message}
+            </Alert>
+          )}
+          {encryptionLoadError === null ? null : (
+            <Alert
+              type="error"
+              header="Could not read the default encryption"
+              action={
+                <Button
+                  onClick={() => {
+                    void loadEncryption();
+                  }}
+                >
+                  Retry
+                </Button>
+              }
+            >
+              {encryptionLoadError.message}
+            </Alert>
+          )}
+        </SpaceBetween>
       </Container>
 
       <Container
@@ -267,7 +359,7 @@ export function PropertiesTab({ bucket, creationDate }: PropertiesTabProps): Rea
             <Button
               variant="primary"
               loading={savingVersioning}
-              disabled={versioningDraft === currentVersioningEnabled}
+              disabled={!versioningChanged || versioningLoadError !== null}
               onClick={() => {
                 void saveVersioning();
               }}
@@ -278,6 +370,23 @@ export function PropertiesTab({ bucket, creationDate }: PropertiesTabProps): Rea
         >
           <SpaceBetween size="m">
             {versioningError === null ? null : <Alert type="error">{versioningError}</Alert>}
+            {versioningLoadError === null ? null : (
+              <Alert
+                type="error"
+                header="Could not read the bucket versioning"
+                action={
+                  <Button
+                    onClick={() => {
+                      void loadVersioning();
+                    }}
+                  >
+                    Retry
+                  </Button>
+                }
+              >
+                {versioningLoadError.message}
+              </Alert>
+            )}
             <Box>
               Current status:{' '}
               <StatusIndicator
@@ -296,11 +405,21 @@ export function PropertiesTab({ bucket, creationDate }: PropertiesTabProps): Rea
                     : 'Unversioned'}
               </StatusIndicator>
             </Box>
+            <Box>
+              MFA delete:{' '}
+              <StatusIndicator type={versioning?.mfaDelete === true ? 'success' : 'stopped'}>
+                {versioning?.mfaDelete === true ? 'Enabled' : 'Disabled'}
+              </StatusIndicator>{' '}
+              <Box variant="small" color="text-body-secondary">
+                MFA delete can only be changed by the account root user, so LocalDeck keeps the
+                loaded value.
+              </Box>
+            </Box>
             <FormField label="Bucket versioning">
               <RadioGroup
-                value={versioningDraft ? 'enabled' : 'disabled'}
+                value={versioningEnabled ? 'enabled' : 'disabled'}
                 onChange={({ detail }) => {
-                  setVersioningDraft(detail.value === 'enabled');
+                  updateVersioningDraft(detail.value === 'enabled');
                 }}
                 items={[
                   {
@@ -326,7 +445,7 @@ export function PropertiesTab({ bucket, creationDate }: PropertiesTabProps): Rea
             <Button
               variant="primary"
               loading={savingTags}
-              disabled={!tagsChanged}
+              disabled={!tagsChanged || tagsInvalid || tagsLoadError !== null}
               onClick={() => {
                 void saveTags();
               }}
@@ -335,12 +454,31 @@ export function PropertiesTab({ bucket, creationDate }: PropertiesTabProps): Rea
             </Button>
           }
         >
-          <TagsEditor
-            tags={tags}
-            onChange={setTags}
-            errorText={tagsError ?? undefined}
-            description="Saving replaces the bucket's entire tag set; saving with no tags removes it."
-          />
+          <SpaceBetween size="m">
+            {tagsLoadError === null ? null : (
+              <Alert
+                type="error"
+                header="Could not read the bucket tags"
+                action={
+                  <Button
+                    onClick={() => {
+                      void loadTags();
+                    }}
+                  >
+                    Retry
+                  </Button>
+                }
+              >
+                {tagsLoadError.message}
+              </Alert>
+            )}
+            <TagsEditor
+              tags={displayedTags}
+              onChange={updateTagsDraft}
+              errorText={tagsError ?? undefined}
+              description="Saving replaces the bucket's entire tag set; saving with no tags removes it."
+            />
+          </SpaceBetween>
         </Form>
       </Container>
     </SpaceBetween>

@@ -1,13 +1,18 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ApiClientError } from '../../lib/apiClient';
 import {
   clusterStatusName,
   fromAwsTags,
   instanceBelongsToNodegroup,
   isClusterTransitional,
   isNodegroupTransitional,
+  isResourceNotFound,
   kubeconfigFileName,
   kubeconfigPath,
+  listClusterSummaries,
+  listNodegroups,
   nodegroupStatusName,
+  normalizeTags,
   toAwsTags,
   toEksCluster,
   toEksNodegroup,
@@ -153,5 +158,137 @@ describe('EKS api mappers', () => {
     expect(kubeconfigPath('my cluster')).toBe('/api/eks/my%20cluster/kubeconfig');
     expect(kubeconfigFileName('my-cluster')).toBe('kubeconfig-my-cluster.yaml');
     expect(kubeconfigFileName('../../etc/passwd')).toBe('kubeconfig-etc-passwd.yaml');
+    // A name with no ASCII-safe characters falls back to a fixed safe name.
+    expect(kubeconfigFileName('クラスター')).toBe('kubeconfig-cluster.yaml');
+  });
+
+  it('never fabricates an ARN when LocalStack omits one', () => {
+    const cluster = toEksCluster({ name: 'c' });
+    const nodegroup = toEksNodegroup({ nodegroupName: 'ng' });
+
+    expect(cluster?.arn).toBeUndefined();
+    expect(nodegroup?.nodegroupArn).toBeUndefined();
+  });
+
+  it('normalizes tags (trim, drop empty keys, last duplicate wins)', () => {
+    expect(
+      normalizeTags([
+        { Key: ' a ', Value: '1' },
+        { Key: '   ', Value: 'x' },
+        { Key: 'b', Value: '1' },
+        { Key: 'b', Value: '2' },
+      ]),
+    ).toEqual([
+      { Key: 'a', Value: '1' },
+      { Key: 'b', Value: '2' },
+    ]);
+  });
+});
+
+describe('EKS list helpers error handling', () => {
+  type Handler = (operation: string, input: Record<string, unknown>) => unknown;
+
+  function stubEks(handler: Handler): void {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const match = /\/api\/services\/eks\/([^/?]+)/.exec(url);
+      if (match === null) return new Response('{}', { status: 404 });
+      const operation = match[1] ?? '';
+      const body =
+        init?.body === undefined
+          ? {}
+          : (JSON.parse(String(init.body)) as { input?: Record<string, unknown> });
+      const result = handler(operation, body.input ?? {});
+      if (typeof result === 'object' && result !== null && '__error' in result) {
+        const error = (result as { __error: { code: string; message: string; statusCode: number } })
+          .__error;
+        return new Response(JSON.stringify({ error }), {
+          status: error.statusCode,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ service: 'eks', operation, result }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('skips only ResourceNotFoundException when describing clusters', async () => {
+    stubEks((operation, input) => {
+      if (operation === 'ListClusters') return { clusters: ['gone', 'ok'] };
+      if (operation === 'DescribeCluster' && input.name === 'gone') {
+        return {
+          __error: { code: 'ResourceNotFoundException', message: 'gone', statusCode: 404 },
+        };
+      }
+      if (operation === 'DescribeCluster') {
+        return { cluster: { name: 'ok', status: 'ACTIVE', version: '1.36' } };
+      }
+      return {};
+    });
+
+    expect(
+      isResourceNotFound(
+        new ApiClientError({
+          code: 'ResourceNotFoundException',
+          message: 'gone',
+          statusCode: 404,
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      isResourceNotFound(
+        new ApiClientError({ code: 'AccessDeniedException', message: 'denied', statusCode: 403 }),
+      ),
+    ).toBe(false);
+    const clusters = await listClusterSummaries();
+    expect(clusters.map((cluster) => cluster.name)).toEqual(['ok']);
+  });
+
+  it('fails the cluster list when every describe fails with AccessDenied', async () => {
+    stubEks((operation) => {
+      if (operation === 'ListClusters') return { clusters: ['a', 'b'] };
+      if (operation === 'DescribeCluster') {
+        return { __error: { code: 'AccessDeniedException', message: 'denied', statusCode: 403 } };
+      }
+      return {};
+    });
+
+    await expect(listClusterSummaries()).rejects.toThrow(/denied/);
+  });
+
+  it('fails the node group list instead of rendering a false empty state', async () => {
+    stubEks((operation) => {
+      if (operation === 'ListNodegroups') return { nodegroups: ['ng-1'] };
+      if (operation === 'DescribeNodegroup') {
+        return {
+          __error: { code: 'ServerException', message: 'upstream exploded', statusCode: 500 },
+        };
+      }
+      return {};
+    });
+
+    await expect(listNodegroups('cluster')).rejects.toThrow(/upstream exploded/);
+  });
+
+  it('treats a node group deleted mid-list as gone, not as a failure', async () => {
+    stubEks((operation) => {
+      if (operation === 'ListNodegroups') return { nodegroups: ['ng-gone'] };
+      if (operation === 'DescribeNodegroup') {
+        return {
+          __error: { code: 'ResourceNotFoundException', message: 'gone', statusCode: 404 },
+        };
+      }
+      return {};
+    });
+
+    const page = await listNodegroups('cluster');
+    expect(page.items).toEqual([]);
   });
 });

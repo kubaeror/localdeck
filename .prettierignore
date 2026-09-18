@@ -6,6 +6,12 @@ pnpm-lock.yaml
 *.tsbuildinfo
 e2e/test-results
 e2e/playwright-report
+e2e/test-results-container
+e2e/playwright-report-container
 
 # Generator templates are Handlebars documents, not TS/JSX.
 turbo/generators/templates
+
+# No Prettier parser: nginx config template and dotenv example.
+apps/ui/nginx.conf.template
+.env.example

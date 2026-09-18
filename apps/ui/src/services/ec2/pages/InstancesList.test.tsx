@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FlashbarProvider } from '../../../contexts/FlashbarProvider';
@@ -226,6 +227,81 @@ describe('EC2 InstancesListPage', () => {
       // The stub serves running/stopped instances, so no timer is scheduled.
       await vi.advanceTimersByTimeAsync(30_000);
       expect(dispatchedOperationCalls('ec2', 'DescribeInstances')).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps polling after an action even when the refetch still looks settled', async () => {
+    vi.useFakeTimers();
+    try {
+      stubApiFetch({
+        operations: {
+          'ec2/DescribeInstances': {
+            service: 'ec2',
+            operation: 'DescribeInstances',
+            result: {
+              Reservations: [
+                {
+                  Instances: [
+                    {
+                      InstanceId: 'i-alpha',
+                      InstanceType: 't3.micro',
+                      State: { Name: 'running' },
+                      Tags: [{ Key: 'Name', Value: 'alpha' }],
+                    },
+                    {
+                      InstanceId: 'i-beta',
+                      InstanceType: 't3.small',
+                      State: { Name: 'stopped' },
+                      Tags: [{ Key: 'Name', Value: 'beta' }],
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+          'ec2/StopInstances': {
+            service: 'ec2',
+            operation: 'StopInstances',
+            result: {
+              StoppingInstances: [{ InstanceId: 'i-alpha', CurrentState: { Name: 'stopping' } }],
+            },
+          },
+        },
+      });
+      renderList();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(dispatchedOperationCalls('ec2', 'DescribeInstances')).toBe(1);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Actions for alpha' }));
+      fireEvent.click(screen.getByText('Stop instance'));
+      const modal = screen.getByRole('dialog');
+      fireEvent.click(within(modal).getByRole('button', { name: 'Stop' }));
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(dispatchedOperationCalls('ec2', 'StopInstances')).toBe(1);
+      const afterAction = dispatchedOperationCalls('ec2', 'DescribeInstances');
+
+      // The action opened a tracking window: the next tick refetches even
+      // though the stub never reports a transitional state.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      expect(dispatchedOperationCalls('ec2', 'DescribeInstances')).toBe(afterAction + 1);
+
+      // The window closes after 30 s; without an observed transitional state
+      // polling stops again.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(40_000);
+      });
+      const afterWindow = dispatchedOperationCalls('ec2', 'DescribeInstances');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+      expect(dispatchedOperationCalls('ec2', 'DescribeInstances')).toBe(afterWindow);
     } finally {
       vi.useRealTimers();
     }

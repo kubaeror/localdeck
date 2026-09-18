@@ -10,6 +10,12 @@ import Badge from '@cloudscape-design/components/badge';
 import type { SideNavigationProps } from '@cloudscape-design/components/side-navigation';
 import { InfoTooltip } from '../components/InfoTooltip';
 import { ServiceIcon } from '../components/ServiceIcon';
+import {
+  NOT_EMULATED_LABEL,
+  NOT_EMULATED_SHORT_LABEL,
+  NOT_INSTALLED_SHORT_LABEL,
+  NOT_INSTALLED_TOOLTIP,
+} from '../lib/copy';
 import { searchServices } from '../lib/serviceSearch';
 import {
   ALL_SERVICES_PATH,
@@ -18,8 +24,12 @@ import {
   serviceConsolePath,
 } from '../services/paths';
 
-/** Exact wording required for services the emulator does not report. */
-export const NOT_EMULATED_TOOLTIP = 'Not emulated locally';
+/**
+ * Exact wording required for services the emulator does not report. Kept as a
+ * named export for the navigation tests; the string itself lives in lib/copy
+ * so pages and widgets cannot drift from it.
+ */
+export const NOT_EMULATED_TOOLTIP = NOT_EMULATED_LABEL;
 
 const FIXED_NAV_PATHS = [CONSOLE_HOME_PATH, SERVICE_HEALTH_PATH, ALL_SERVICES_PATH];
 
@@ -60,7 +70,11 @@ function byDisplayName(left: ServiceDescriptor, right: ServiceDescriptor): numbe
   return left.displayName.localeCompare(right.displayName, 'en');
 }
 
-function serviceLink(service: ServiceDescriptor, emulated: boolean): SideNavigationProps.Link {
+function serviceLink(
+  service: ServiceDescriptor,
+  emulated: boolean,
+  available: boolean,
+): SideNavigationProps.Link {
   const link: SideNavigationProps.Link = {
     type: 'link',
     text: service.displayName,
@@ -68,13 +82,19 @@ function serviceLink(service: ServiceDescriptor, emulated: boolean): SideNavigat
     icon: <ServiceIcon iconKey={service.iconKey} category={service.category} size="small" />,
   };
 
-  if (emulated) return link;
+  if (emulated && available) return link;
+
+  // Two different reasons a console cannot serve data: LocalStack does not
+  // emulate the service, or the api does not have its SDK package installed.
+  const reason = !emulated
+    ? { label: NOT_EMULATED_SHORT_LABEL, tooltip: NOT_EMULATED_TOOLTIP }
+    : { label: NOT_INSTALLED_SHORT_LABEL, tooltip: NOT_INSTALLED_TOOLTIP };
 
   return {
     ...link,
     info: (
-      <InfoTooltip content={NOT_EMULATED_TOOLTIP} className="app-shell__nav-unavailable">
-        <Badge color="grey">not emulated</Badge>
+      <InfoTooltip content={reason.tooltip} className="app-shell__nav-unavailable">
+        <Badge color="grey">{reason.label}</Badge>
       </InfoTooltip>
     ),
   };
@@ -84,11 +104,14 @@ function categorySection(
   category: ServiceCategory,
   services: readonly ServiceDescriptor[],
   isEmulated: (service: ServiceDescriptor) => boolean,
+  isAvailable: (service: ServiceDescriptor) => boolean,
 ): SideNavigationProps.Section {
   return {
     type: 'section',
     text: category,
-    items: services.map((service) => serviceLink(service, isEmulated(service))),
+    items: services.map((service) =>
+      serviceLink(service, isEmulated(service), isAvailable(service)),
+    ),
   };
 }
 
@@ -106,6 +129,9 @@ export function buildNavigation({
 }: BuildNavigationOptions): NavigationModel {
   const isEmulated = (service: ServiceDescriptor): boolean =>
     isServiceEmulated(service, serviceStatuses);
+  // `available` is set by the api registry; the bundled catalogue leaves it
+  // undefined, which means "assume the package is installed".
+  const isAvailable = (service: ServiceDescriptor): boolean => service.available !== false;
 
   const query = filter.trim();
   const matched = query.length === 0 ? null : searchServices(query, services, services.length);
@@ -135,7 +161,9 @@ export function buildNavigation({
       items.push({
         type: 'section',
         text: 'Recently visited',
-        items: recentServices.map((service) => serviceLink(service, isEmulated(service))),
+        items: recentServices.map((service) =>
+          serviceLink(service, isEmulated(service), isAvailable(service)),
+        ),
       });
     }
   }
@@ -160,7 +188,7 @@ export function buildNavigation({
   for (const category of SERVICE_CATEGORIES) {
     const categoryServices = servicesByCategory.get(category) ?? [];
     if (categoryServices.length === 0) continue;
-    sections.push(categorySection(category, categoryServices, isEmulated));
+    sections.push(categorySection(category, categoryServices, isEmulated, isAvailable));
   }
 
   if (sections.length > 0) {

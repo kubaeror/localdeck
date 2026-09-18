@@ -50,6 +50,8 @@ export const spec = createServiceSpec('iam', {
     'DeletePolicy',
     'GetPolicyVersion',
     'CreatePolicyVersion',
+    'ListPolicyVersions',
+    'DeletePolicyVersion',
     'ListEntitiesForPolicy',
     // Attached policies
     'ListAttachedUserPolicies',

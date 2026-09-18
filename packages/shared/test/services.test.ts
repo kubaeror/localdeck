@@ -115,6 +115,105 @@ describe('service catalog', () => {
   });
 });
 
+describe('generic-browser pagination catalog', () => {
+  function listSpec(serviceId: string) {
+    const service = findService(serviceId);
+    if (service?.browser === undefined) {
+      throw new Error(`${serviceId} has no browser binding`);
+    }
+    return service.browser.list;
+  }
+
+  it('declares the non-NextToken pagination contracts explicitly', () => {
+    expect(listSpec('rds').pagination).toEqual({ requestField: 'Marker', responseField: 'Marker' });
+    expect(listSpec('elasticache').pagination).toEqual({
+      requestField: 'Marker',
+      responseField: 'Marker',
+    });
+    expect(listSpec('redshift').pagination).toEqual({
+      requestField: 'Marker',
+      responseField: 'Marker',
+    });
+    expect(listSpec('docdb').pagination).toEqual({
+      requestField: 'Marker',
+      responseField: 'Marker',
+    });
+    expect(listSpec('neptune').pagination).toEqual({
+      requestField: 'Marker',
+      responseField: 'Marker',
+    });
+    expect(listSpec('dms').pagination).toEqual({ requestField: 'Marker', responseField: 'Marker' });
+    expect(listSpec('efs').pagination).toEqual({
+      requestField: 'Marker',
+      responseField: 'NextMarker',
+    });
+    expect(listSpec('glacier').pagination).toEqual({
+      requestField: 'marker',
+      responseField: 'Marker',
+    });
+    expect(listSpec('lambda').pagination).toEqual({
+      requestField: 'Marker',
+      responseField: 'NextMarker',
+    });
+    expect(listSpec('kms').pagination).toEqual({
+      requestField: 'Marker',
+      responseField: 'NextMarker',
+    });
+    expect(listSpec('route53').pagination).toEqual({
+      requestField: 'Marker',
+      responseField: 'NextMarker',
+    });
+    expect(listSpec('elbv2').pagination).toEqual({
+      requestField: 'Marker',
+      responseField: 'NextMarker',
+    });
+    expect(listSpec('dynamodb').pagination).toEqual({
+      requestField: 'ExclusiveStartTableName',
+      responseField: 'LastEvaluatedTableName',
+    });
+    expect(listSpec('dynamodbstreams').pagination).toEqual({
+      requestField: 'ExclusiveStartStreamArn',
+      responseField: 'LastEvaluatedStreamArn',
+    });
+    expect(listSpec('swf').pagination).toEqual({
+      requestField: 'nextPageToken',
+      responseField: 'nextPageToken',
+    });
+    // CloudFront nests its next marker inside DistributionList.
+    expect(listSpec('cloudfront').pagination).toEqual({
+      requestField: 'Marker',
+      responseField: 'DistributionList.NextMarker',
+    });
+    // Pinpoint accepts `Token` and answers with `NextToken`.
+    expect(listSpec('pinpoint').pagination).toEqual({
+      requestField: 'Token',
+      responseField: 'NextToken',
+    });
+    // GetResources uses `PaginationToken` in both directions.
+    expect(listSpec('resourcegroupstaggingapi').pagination).toEqual({
+      requestField: 'PaginationToken',
+      responseField: 'PaginationToken',
+    });
+    expect(listSpec('apigateway').pagination).toEqual({
+      requestField: 'position',
+      responseField: 'position',
+    });
+    expect(listSpec('wafv2').pagination).toEqual({
+      requestField: 'NextMarker',
+      responseField: 'NextMarker',
+    });
+    expect(listSpec('emr').pagination).toEqual({ requestField: 'Marker', responseField: 'Marker' });
+  });
+
+  it('declares the batch-describe unwrap for CodeBuild', () => {
+    const service = findService('codebuild');
+    expect(service?.browser?.describe).toMatchObject({
+      operation: 'BatchGetProjects',
+      resultItemField: 'projects',
+    });
+  });
+});
+
 describe('registry vs LocalStack health', () => {
   const services: Record<string, LocalStackServiceStatus> = {
     s3: 'available',

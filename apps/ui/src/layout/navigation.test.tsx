@@ -73,6 +73,19 @@ describe('buildNavigation', () => {
     expect(NOT_EMULATED_TOOLTIP).toBe('Not emulated locally');
   });
 
+  it('marks services the api cannot proxy because the SDK package is missing', () => {
+    const services = SERVICE_CATALOG.map((service) =>
+      service.id === 's3' ? { ...service, available: false } : service,
+    );
+    const model = buildNavigation({ services, serviceStatuses: STATUSES });
+    const s3 = links(model.items).find((link) => link.text === 'S3');
+
+    // Emulated locally, but the api has no @aws-sdk/client-s3 installed.
+    expect(s3?.info).toBeDefined();
+    const rendered = JSON.stringify(s3?.info);
+    expect(rendered).toContain('not installed');
+  });
+
   it('lists recently visited services after Console Home', () => {
     const model = buildNavigation({
       services: SERVICE_CATALOG,

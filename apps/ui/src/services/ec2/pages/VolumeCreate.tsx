@@ -11,7 +11,7 @@ import Select from '@cloudscape-design/components/select';
 import type { SelectProps } from '@cloudscape-design/components/select';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import Toggle from '@cloudscape-design/components/toggle';
-import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { CreateWizard } from '../../../components/CreateWizard';
 import { TagsEditor } from '../../../components/TagsEditor';
@@ -19,8 +19,20 @@ import { useFlashbar } from '../../../hooks/useFlashbar';
 import { toApiError } from '../../../lib/apiClient';
 import { serviceConsolePath } from '../../paths';
 import type { ServicePageProps } from '../../types';
-import { createVolume, listAvailabilityZones, type Ec2AvailabilityZone } from '../api';
+import {
+  createVolume,
+  listAvailabilityZones,
+  newClientToken,
+  type Ec2AvailabilityZone,
+} from '../api';
 import { toFriendlyEc2Error } from '../errors';
+import {
+  defaultVolumePerformance,
+  validateVolumeIops,
+  validateVolumeSize,
+  validateVolumeThroughput,
+  volumeTypeLimit,
+} from '../limits';
 
 const VOLUME_TYPES: readonly SelectProps.Option[] = [
   { label: 'gp3 (General Purpose SSD)', value: 'gp3' },
@@ -32,10 +44,8 @@ const VOLUME_TYPES: readonly SelectProps.Option[] = [
   { label: 'standard (Magnetic, previous generation)', value: 'standard' },
 ];
 
-/** Volume types that take an explicit IOPS value. */
-const IOPS_TYPES = new Set(['io1', 'io2', 'gp3']);
-/** Volume types that take an explicit throughput value. */
-const THROUGHPUT_TYPES = new Set(['gp3']);
+/** Snapshot ids the wizard accepts: `snap-` plus at least 8 hex characters. */
+const SNAPSHOT_PATTERN = /^snap-[0-9a-f]{8,}$/i;
 
 /**
  * The console's create-volume wizard: availability zone, size, type and
@@ -56,12 +66,16 @@ export function VolumeCreatePage({ descriptor }: ServicePageProps): ReactElement
   const [volumeType, setVolumeType] = useState('gp3');
   const [iops, setIops] = useState('3000');
   const [throughput, setThroughput] = useState('125');
+  const [snapshotId, setSnapshotId] = useState('');
   const [encrypted, setEncrypted] = useState(false);
   const [tags, setTags] = useState<readonly AwsTag[]>([]);
 
   const [activeStepIndex, setActiveStepIndex] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
+  // One token per wizard mount: a retry after an ambiguous failure is
+  // idempotent on the service side instead of creating a second volume.
+  const clientToken = useRef(newClientToken());
 
   const loadZones = useCallback(async (): Promise<void> => {
     setZonesLoading(true);
@@ -92,34 +106,47 @@ export function VolumeCreatePage({ descriptor }: ServicePageProps): ReactElement
   );
 
   const size = Number.parseInt(sizeGiB, 10);
-  const sizeProblem = !Number.isInteger(size)
-    ? 'Enter the volume size in GiB.'
-    : size < 1 || size > 16384
-      ? 'The volume size must be between 1 and 16384 GiB.'
-      : null;
+  const sizeProblem = validateVolumeSize(volumeType, size);
 
   const iopsValue = Number.parseInt(iops, 10);
-  const iopsProblem =
-    !IOPS_TYPES.has(volumeType) || volumeType === 'gp3'
-      ? null
-      : !Number.isInteger(iopsValue) || iopsValue < 100 || iopsValue > 64000
-        ? 'Provisioned IOPS must be between 100 and 64000.'
-        : null;
+  const iopsProblem = validateVolumeIops(volumeType, size, iopsValue);
 
   const throughputValue = Number.parseInt(throughput, 10);
-  const throughputProblem = !THROUGHPUT_TYPES.has(volumeType)
-    ? null
-    : !Number.isInteger(throughputValue) || throughputValue < 125 || throughputValue > 1000
-      ? 'Throughput must be between 125 and 1000 MiB/s.'
-      : null;
+  const throughputProblem = validateVolumeThroughput(volumeType, throughputValue);
+
+  const snapshotProblem =
+    snapshotId.trim().length === 0
+      ? null
+      : SNAPSHOT_PATTERN.test(snapshotId.trim())
+        ? null
+        : 'Use a snapshot id like snap-0123456789abcdef0.';
+
+  const iopsLimit = volumeTypeLimit(volumeType).iops;
+  const throughputLimit = volumeTypeLimit(volumeType).throughput;
+
+  const selectVolumeType = (next: string): void => {
+    setVolumeType(next);
+    const defaults = defaultVolumePerformance(next);
+    if (defaults.iops !== undefined) setIops(String(defaults.iops));
+    if (defaults.throughput !== undefined) setThroughput(String(defaults.throughput));
+  };
 
   const submit = async (): Promise<void> => {
+    if (submitting) return;
     if (zone === null) {
       setError({
         code: 'VALIDATION_FAILED',
         statusCode: 400,
         message: 'Select an Availability Zone for the volume.',
       });
+      setActiveStepIndex(0);
+      return;
+    }
+    if (sizeProblem !== null || iopsProblem !== null || throughputProblem !== null) {
+      setActiveStepIndex(0);
+      return;
+    }
+    if (snapshotProblem !== null) {
       setActiveStepIndex(0);
       return;
     }
@@ -130,8 +157,11 @@ export function VolumeCreatePage({ descriptor }: ServicePageProps): ReactElement
         availabilityZone: zone,
         sizeGiB: size,
         volumeType,
+        clientToken: clientToken.current,
         encrypted,
-        ...(volumeType === 'io1' || volumeType === 'io2' ? { iops: iopsValue } : {}),
+        ...(snapshotId.trim().length === 0 ? {} : { snapshotId: snapshotId.trim() }),
+        ...(iopsLimit === undefined ? {} : { iops: iopsValue }),
+        ...(throughputLimit === undefined ? {} : { throughput: throughputValue }),
         tags: [
           ...(name.trim().length === 0 ? [] : [{ Key: 'Name', Value: name.trim() }]),
           ...meaningfulTags.filter((tag) => tag.Key !== 'Name'),
@@ -211,7 +241,15 @@ export function VolumeCreatePage({ descriptor }: ServicePageProps): ReactElement
           </FormField>
 
           <SpaceBetween direction="horizontal" size="m">
-            <FormField label="Size (GiB)" errorText={sizeProblem ?? undefined}>
+            <FormField
+              label="Size (GiB)"
+              errorText={sizeProblem ?? undefined}
+              constraintText={
+                volumeType === 'st1' || volumeType === 'sc1'
+                  ? 'st1/sc1 volumes start at 125 GiB.'
+                  : undefined
+              }
+            >
               <Input
                 value={sizeGiB}
                 inputMode="numeric"
@@ -227,15 +265,23 @@ export function VolumeCreatePage({ descriptor }: ServicePageProps): ReactElement
                 options={[...VOLUME_TYPES]}
                 ariaLabel="Volume type"
                 onChange={({ detail }) => {
-                  setVolumeType(detail.selectedOption.value ?? 'gp3');
+                  selectVolumeType(detail.selectedOption.value ?? 'gp3');
                 }}
               />
             </FormField>
           </SpaceBetween>
 
           <SpaceBetween direction="horizontal" size="m">
-            {IOPS_TYPES.has(volumeType) && volumeType !== 'gp3' ? (
-              <FormField label="Provisioned IOPS" errorText={iopsProblem ?? undefined}>
+            {iopsLimit === undefined ? null : (
+              <FormField
+                label="Provisioned IOPS"
+                description={
+                  volumeType === 'gp3'
+                    ? `gp3 volumes include ${iopsLimit.default} IOPS; you can provision up to ${iopsLimit.max}.`
+                    : undefined
+                }
+                errorText={iopsProblem ?? undefined}
+              >
                 <Input
                   value={iops}
                   inputMode="numeric"
@@ -245,11 +291,11 @@ export function VolumeCreatePage({ descriptor }: ServicePageProps): ReactElement
                   }}
                 />
               </FormField>
-            ) : null}
-            {THROUGHPUT_TYPES.has(volumeType) ? (
+            )}
+            {throughputLimit === undefined ? null : (
               <FormField
                 label="Throughput (MiB/s)"
-                description="gp3 volumes let you provision throughput independently of size."
+                description={`gp3 volumes include ${throughputLimit.default} MiB/s and can provision up to ${throughputLimit.max}.`}
                 errorText={throughputProblem ?? undefined}
               >
                 <Input
@@ -261,8 +307,23 @@ export function VolumeCreatePage({ descriptor }: ServicePageProps): ReactElement
                   }}
                 />
               </FormField>
-            ) : null}
+            )}
           </SpaceBetween>
+
+          <FormField
+            label="Snapshot ID (optional)"
+            description="Create the volume from an existing snapshot. LocalStack's DescribeSnapshots is not part of this module, so enter the id directly."
+            errorText={snapshotProblem ?? undefined}
+          >
+            <Input
+              value={snapshotId}
+              placeholder="snap-0123456789abcdef0"
+              ariaLabel="Snapshot ID"
+              onChange={({ detail }) => {
+                setSnapshotId(detail.value);
+              }}
+            />
+          </FormField>
 
           <Toggle
             checked={encrypted}
@@ -299,11 +360,15 @@ export function VolumeCreatePage({ descriptor }: ServicePageProps): ReactElement
             { label: 'Volume type', value: volumeType },
             {
               label: 'Provisioned IOPS',
-              value: IOPS_TYPES.has(volumeType) && volumeType !== 'gp3' ? iops : 'Default',
+              value: iopsLimit === undefined ? 'Default' : iops,
             },
             {
               label: 'Throughput',
-              value: THROUGHPUT_TYPES.has(volumeType) ? `${throughput} MiB/s` : 'Default',
+              value: throughputLimit === undefined ? 'Default' : `${throughput} MiB/s`,
+            },
+            {
+              label: 'Snapshot',
+              value: snapshotId.trim().length === 0 ? 'None' : snapshotId.trim(),
             },
             { label: 'Encryption', value: encrypted ? 'Encrypted' : 'Not encrypted' },
             {
@@ -341,7 +406,7 @@ export function VolumeCreatePage({ descriptor }: ServicePageProps): ReactElement
           validate: () =>
             zone === null
               ? 'Select an Availability Zone.'
-              : (sizeProblem ?? iopsProblem ?? throughputProblem),
+              : (sizeProblem ?? iopsProblem ?? throughputProblem ?? snapshotProblem),
           content: detailsStep,
         },
         {

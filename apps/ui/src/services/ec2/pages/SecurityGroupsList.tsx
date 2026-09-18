@@ -6,13 +6,16 @@ import Link from '@cloudscape-design/components/link';
 import { useCallback, useMemo, useState, type ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { DeleteConfirmModal } from '../../../components/DeleteConfirmModal';
+import { InfoTooltip } from '../../../components/InfoTooltip';
 import { ResourceListPage } from '../../../components/ResourceListPage';
 import { useFlashbar } from '../../../hooks/useFlashbar';
 import { serviceConsolePath } from '../../paths';
 import type { ServicePageProps } from '../../types';
 import { deleteSecurityGroup, listSecurityGroups, type Ec2SecurityGroup } from '../api';
+import { copyTextToClipboard } from '../clipboard';
 import { toFriendlyEc2Error } from '../errors';
 import { CreateSecurityGroupModal } from '../components/CreateSecurityGroupModal';
+import { EC2_PAGE_SIZE_OPTIONS } from '../listOptions';
 
 /**
  * The console's security groups list: group id, name, description, VPC and rule
@@ -40,6 +43,22 @@ export function SecurityGroupsListPage({ descriptor }: ServicePageProps): ReactE
       navigate(groupPath(groupId));
     },
     [navigate, groupPath],
+  );
+
+  const copyGroupId = useCallback(
+    async (groupId: string): Promise<void> => {
+      try {
+        await copyTextToClipboard(groupId);
+        flashbar.notify({ type: 'success', header: 'Copied', content: groupId });
+      } catch (caught) {
+        flashbar.notify({
+          type: 'error',
+          header: 'Could not copy the security group ID',
+          content: caught instanceof Error ? caught.message : 'The clipboard is not available.',
+        });
+      }
+    },
+    [flashbar],
   );
 
   const columns = useMemo<readonly TableProps.ColumnDefinition<Ec2SecurityGroup>[]>(
@@ -108,10 +127,13 @@ export function SecurityGroupsListPage({ descriptor }: ServicePageProps): ReactE
   const isDefault = (group: Ec2SecurityGroup): boolean => group.groupName === 'default';
 
   const confirmDelete = async (): Promise<void> => {
+    if (deleting) return;
     const targets = deleteTargets ?? [];
     if (targets.length === 0) return;
     setDeleting(true);
     setDeleteError(null);
+    const failures: Ec2SecurityGroup[] = [];
+    const failureMessages: string[] = [];
     for (const group of targets) {
       try {
         await deleteSecurityGroup(group.groupId);
@@ -121,17 +143,25 @@ export function SecurityGroupsListPage({ descriptor }: ServicePageProps): ReactE
           content: group.groupName,
         });
       } catch (caught) {
-        flashbar.notify({
-          type: 'error',
-          header: `Could not delete ${group.groupName}`,
-          content: toFriendlyEc2Error(caught).message,
-        });
+        failures.push(group);
+        failureMessages.push(`${group.groupName}: ${toFriendlyEc2Error(caught).message}`);
       }
     }
     setDeleting(false);
-    setDeleteTargets(null);
     setReloadToken((token) => token + 1);
+    if (failures.length > 0) {
+      // Keep the modal open on the failed groups so the reason is readable and
+      // the user can retry without selecting them again.
+      setDeleteTargets(failures);
+      setDeleteError(
+        `${failures.length} of ${targets.length} security group${targets.length === 1 ? '' : 's'} could not be deleted. ${failureMessages.join(' ')}`,
+      );
+      return;
+    }
+    setDeleteTargets(null);
   };
+
+  const isFiltering = filteringText.trim().length > 0;
 
   return (
     <>
@@ -145,6 +175,8 @@ export function SecurityGroupsListPage({ descriptor }: ServicePageProps): ReactE
         columns={columns}
         getRowId={(group) => group.groupId}
         reloadToken={reloadToken}
+        preferencesId="ec2-security-groups-list"
+        pageSizeOptions={EC2_PAGE_SIZE_OPTIONS}
         fetcher={({ nextToken, signal }) =>
           listSecurityGroups({
             ...(nextToken === undefined ? {} : { nextToken }),
@@ -177,31 +209,38 @@ export function SecurityGroupsListPage({ descriptor }: ServicePageProps): ReactE
             The default security group of a VPC cannot be deleted; its delete action stays disabled.
           </Box>
         }
-        rowActions={(group) => (
-          <ButtonDropdown
-            variant="icon"
-            ariaLabel={`Actions for ${group.groupName}`}
-            items={[
-              { id: 'view', text: 'View details' },
-              { id: 'copy', text: 'Copy security group ID' },
-              {
-                id: 'delete',
-                text: 'Delete security group',
-                disabled: isDefault(group),
-              },
-            ]}
-            onItemClick={({ detail }) => {
-              if (detail.id === 'view') openGroup(group.groupId);
-              if (detail.id === 'copy') {
-                void navigator.clipboard?.writeText(group.groupId);
-              }
-              if (detail.id === 'delete') {
-                setDeleteError(null);
-                setDeleteTargets([group]);
-              }
-            }}
-          />
-        )}
+        rowActions={(group) => {
+          const menu = (
+            <ButtonDropdown
+              variant="icon"
+              ariaLabel={`Actions for ${group.groupName}`}
+              items={[
+                { id: 'view', text: 'View details' },
+                { id: 'copy', text: 'Copy security group ID' },
+                {
+                  id: 'delete',
+                  text: 'Delete security group',
+                  disabled: isDefault(group),
+                },
+              ]}
+              onItemClick={({ detail }) => {
+                if (detail.id === 'view') openGroup(group.groupId);
+                if (detail.id === 'copy') void copyGroupId(group.groupId);
+                if (detail.id === 'delete') {
+                  setDeleteError(null);
+                  setDeleteTargets([group]);
+                }
+              }}
+            />
+          );
+          return isDefault(group) ? (
+            <InfoTooltip content="The default security group of a VPC cannot be deleted.">
+              {menu}
+            </InfoTooltip>
+          ) : (
+            menu
+          );
+        }}
         bulkActions={(selected) => (
           <ButtonDropdown
             ariaLabel="Security group actions"
@@ -222,8 +261,12 @@ export function SecurityGroupsListPage({ descriptor }: ServicePageProps): ReactE
             Actions
           </ButtonDropdown>
         )}
-        emptyTitle="No security groups"
-        emptyDescription="A security group controls the traffic that is allowed to reach an instance. Create one to get started."
+        emptyTitle={isFiltering ? 'No matches' : 'No security groups'}
+        emptyDescription={
+          isFiltering
+            ? 'No security group matches the current filter. Clear the filter or try another search term.'
+            : 'A security group controls the traffic that is allowed to reach an instance. Create one to get started.'
+        }
       />
 
       {createVisible ? (

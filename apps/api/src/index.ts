@@ -1,24 +1,24 @@
 import { buildApp } from './app.js';
 import { getConfig } from './config.js';
 import { destroyAwsClients } from './lib/awsClients.js';
+import { createShutdownHandler } from './lib/shutdown.js';
 
 async function main(): Promise<void> {
   const config = getConfig();
   const app = await buildApp({ config });
 
-  let shuttingDown = false;
-  const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    app.log.info({ signal }, 'shutting down');
-    try {
-      await app.close();
-      destroyAwsClients();
-    } catch (error) {
-      app.log.error({ err: error }, 'graceful shutdown failed');
-      process.exitCode = 1;
-    }
-  };
+  const shutdown = createShutdownHandler({
+    log: (message, fields) => {
+      app.log.info(fields ?? {}, message);
+    },
+    closeApp: () => app.close(),
+    destroyClients: destroyAwsClients,
+    exit: (code) => {
+      process.exitCode = code;
+      process.exit(code);
+    },
+    timeoutMs: config.shutdownTimeoutMs,
+  });
 
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.on(signal, () => {
@@ -40,7 +40,9 @@ async function main(): Promise<void> {
     {
       environment: config.environment,
       localstackEndpoint: config.localstackEndpoint,
+      localstackPublicEndpoint: config.localstackPublicEndpoint,
       region: config.region,
+      requestTimeoutMs: config.localstackRequestTimeoutMs,
       healthUrl: config.localstackHealthUrl,
     },
     'LocalDeck api ready',

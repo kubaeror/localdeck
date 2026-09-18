@@ -83,7 +83,7 @@ export function GenericResourceCreate({ descriptor }: ServicePageProps): ReactEl
           dedicated modules implement wizards; this fallback stays read-only and points you at the
           CLI instead, so nothing is guessed. All create operations are added to the registry
           whitelist first, so the same request works through{' '}
-          <Box variant="code">POST /api/services/:service/:operation</Box>.
+          <Box variant="code">POST /api/services/:serviceId/:operation</Box>.
         </Alert>
 
         <Container

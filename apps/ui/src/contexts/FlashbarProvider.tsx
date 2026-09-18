@@ -12,6 +12,15 @@ import { FlashbarContext, type FlashMessage, type FlashMessageInput } from './fl
 /** Success/info messages disappear on their own; warnings and errors stay. */
 const AUTO_DISMISS_MS = 6_000;
 
+/**
+ * Flashbar policy: at most this many messages are shown at once. Identical
+ * `type`+`header` pairs are coalesced (the newest occurrence replaces the old
+ * one, which also restarts its auto-dismiss timer) and the oldest message is
+ * dropped when the cap is reached. A failing poll loop that notifies on every
+ * tick therefore cannot grow the flashbar without bound.
+ */
+const MAX_MESSAGES = 5;
+
 let nextMessageId = 0;
 
 function toFlashbarItem(
@@ -68,7 +77,14 @@ export function FlashbarProvider({ children }: { children: ReactNode }): ReactEl
     const autoDismissMs =
       message.autoDismissMs ??
       (message.type === 'success' || message.type === 'info' ? AUTO_DISMISS_MS : 0);
-    setMessages((previous) => [...previous, { ...message, id, autoDismissMs }]);
+    const entry: FlashMessage = { ...message, id, autoDismissMs };
+    setMessages((previous) => {
+      const coalesced = previous.filter(
+        (existing) => existing.type !== entry.type || existing.header !== entry.header,
+      );
+      const next = [...coalesced, entry];
+      return next.length > MAX_MESSAGES ? next.slice(next.length - MAX_MESSAGES) : next;
+    });
     return id;
   }, []);
 

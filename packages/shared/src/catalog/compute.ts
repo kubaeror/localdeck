@@ -63,7 +63,12 @@ export const COMPUTE_SERVICES = [
     parityLevel: 'browser',
     summary: 'Serverless functions, code, environment and invocations.',
     browser: {
-      list: { operation: 'ListFunctions', resultPath: 'Functions', idField: 'FunctionName' },
+      list: {
+        operation: 'ListFunctions',
+        resultPath: 'Functions',
+        idField: 'FunctionName',
+        pagination: { requestField: 'Marker', responseField: 'NextMarker' },
+      },
       describe: { operation: 'GetFunction', idParam: 'FunctionName' },
       delete: { operation: 'DeleteFunction', idParam: 'FunctionName' },
     },
@@ -120,6 +125,7 @@ export const COMPUTE_SERVICES = [
         resultPath: 'jobQueues',
         idField: 'jobQueueArn',
         nameField: 'jobQueueName',
+        pagination: { requestField: 'nextToken', responseField: 'nextToken' },
       },
       delete: { operation: 'DeleteJobQueue', idParam: 'jobQueue' },
     },

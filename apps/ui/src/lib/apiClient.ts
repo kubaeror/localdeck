@@ -154,8 +154,18 @@ export async function getText(path: string, signal?: AbortSignal): Promise<ApiTe
   }
 
   const fileName = parseContentDispositionFileName(response.headers.get('content-disposition'));
+  let text: string;
+  try {
+    text = await response.text();
+  } catch {
+    throw new ApiClientError({
+      code: 'UNEXPECTED_RESPONSE',
+      statusCode: response.status,
+      message: `The LocalDeck api responded with HTTP ${response.status} but the body could not be read.`,
+    });
+  }
   return {
-    text: await response.text(),
+    text,
     ...(fileName === undefined ? {} : { fileName }),
   };
 }
@@ -171,8 +181,19 @@ async function readResponse<T>(response: Response): Promise<T> {
     });
   }
 
-  // The api is the only producer of these payloads; responses are trusted.
-  return (await response.json()) as T;
+  // The api is the only producer of these payloads, but a proxy or a truncated
+  // response can still hand us a body that is not JSON. That is an api/proxy
+  // contract failure, not a network failure, so it must not be reported as
+  // "could not reach the LocalDeck api".
+  try {
+    return (await response.json()) as T;
+  } catch {
+    throw new ApiClientError({
+      code: 'UNEXPECTED_RESPONSE',
+      statusCode: response.status,
+      message: `The LocalDeck api responded with HTTP ${response.status} and a body that is not valid JSON.`,
+    });
+  }
 }
 
 export function getConfig(signal?: AbortSignal): Promise<ApiConfigResponse> {

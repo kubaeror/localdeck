@@ -5,6 +5,10 @@ import type { FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
+import {
+  parseLocalStackHealthSnapshot,
+  resetLocalStackHealthCache,
+} from '../src/lib/localstackHealth.js';
 
 const HEALTH_PAYLOAD = {
   version: '2026.8.2',
@@ -21,12 +25,16 @@ const HEALTH_PAYLOAD = {
 
 interface StubLocalStack {
   url: string;
+  /** Number of health requests the stub actually received. */
+  requestCount: () => number;
   close: () => Promise<void>;
 }
 
 async function startStubLocalStack(payload: unknown): Promise<StubLocalStack> {
+  let requests = 0;
   const server: Server = createServer((request, response) => {
     if (request.url?.startsWith('/_localstack/health') === true) {
+      requests += 1;
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify(payload));
       return;
@@ -44,6 +52,7 @@ async function startStubLocalStack(payload: unknown): Promise<StubLocalStack> {
 
   return {
     url: `http://127.0.0.1:${address.port}`,
+    requestCount: () => requests,
     close: async () => {
       server.closeAllConnections();
       server.close();
@@ -58,6 +67,9 @@ function testConfig(endpoint: string) {
     NODE_ENV: 'test',
     LOCALSTACK_ENDPOINT: endpoint,
     LOCALSTACK_TIMEOUT_MS: '2000',
+    // The caching behaviour has its own suite below; the route suites need a
+    // fresh probe per assertion.
+    LOCALSTACK_HEALTH_CACHE_MS: '0',
     AWS_REGION: 'us-east-1',
   });
 }
@@ -192,5 +204,131 @@ describe('api behaviour with an invalid LocalStack response', () => {
     const body = response.json<ApiErrorResponse>();
     expect(body.error.code).toBe('LOCALSTACK_INVALID_RESPONSE');
     expect(body.error.details?.['reason']).toContain('services');
+  });
+});
+
+describe('health probe caching and single-flight', () => {
+  let stub: StubLocalStack;
+  let app: FastifyInstance;
+
+  beforeAll(async () => {
+    resetLocalStackHealthCache();
+    stub = await startStubLocalStack(HEALTH_PAYLOAD);
+    app = await buildApp({
+      config: loadConfig({
+        ...process.env,
+        NODE_ENV: 'test',
+        LOCALSTACK_ENDPOINT: stub.url,
+        LOCALSTACK_TIMEOUT_MS: '2000',
+        LOCALSTACK_HEALTH_CACHE_MS: '5000',
+        AWS_REGION: 'us-east-1',
+      }),
+      logger: false,
+    });
+    await app.ready();
+  });
+
+  afterAll(async () => {
+    await app.close();
+    await stub.close();
+    resetLocalStackHealthCache();
+  });
+
+  it('reuses one upstream probe for concurrent and repeated requests', async () => {
+    const responses = await Promise.all(
+      Array.from({ length: 5 }, () => app.inject({ method: 'GET', url: '/api/health' })),
+    );
+    for (const response of responses) expect(response.statusCode).toBe(200);
+
+    const repeated = await app.inject({ method: 'GET', url: '/api/health' });
+    expect(repeated.statusCode).toBe(200);
+    expect(stub.requestCount()).toBe(1);
+  });
+
+  it('keys the cache by endpoint so a second app never reuses the first result', async () => {
+    // A process can host more than one app (tests, verification scripts); a
+    // probe for the reachable stub must not answer for an unreachable endpoint.
+    const unreachable = await buildApp({
+      config: loadConfig({
+        ...process.env,
+        NODE_ENV: 'test',
+        LOCALSTACK_ENDPOINT: 'http://127.0.0.1:9',
+        LOCALSTACK_TIMEOUT_MS: '1000',
+        LOCALSTACK_HEALTH_CACHE_MS: '5000',
+        AWS_REGION: 'us-east-1',
+      }),
+      logger: false,
+    });
+    try {
+      const response = await unreachable.inject({ method: 'GET', url: '/api/health' });
+      expect(response.statusCode).toBe(503);
+      expect(response.json<ApiErrorResponse>().error.code).toBe('LOCALSTACK_UNREACHABLE');
+    } finally {
+      await unreachable.close();
+    }
+  });
+});
+
+describe('health response semantics (API-023)', () => {
+  it('answers 200 + degraded when LocalStack reports no available service', async () => {
+    const stub = await startStubLocalStack({
+      version: '2026.8.3',
+      edition: 'community',
+      services: { s3: 'starting', lambda: 'disabled' },
+    });
+    resetLocalStackHealthCache();
+    const app = await buildApp({
+      config: loadConfig({
+        ...process.env,
+        NODE_ENV: 'test',
+        LOCALSTACK_ENDPOINT: stub.url,
+        LOCALSTACK_TIMEOUT_MS: '2000',
+        LOCALSTACK_HEALTH_CACHE_MS: '0',
+        AWS_REGION: 'us-east-1',
+      }),
+      logger: false,
+    });
+    await app.ready();
+
+    const response = await app.inject({ method: 'GET', url: '/api/health' });
+    expect(response.statusCode).toBe(200);
+    const body = response.json<HealthResponse>();
+    expect(body.status).toBe('degraded');
+    expect(body.localstack.counts.available).toBe(0);
+    expect(response.headers['x-request-id']).toBeDefined();
+
+    await app.close();
+    await stub.close();
+  });
+});
+
+describe('health document parsing', () => {
+  it('normalizes unknown statuses and missing optional fields', () => {
+    const snapshot = parseLocalStackHealthSnapshot(
+      { services: { s3: 'available', lambda: 'weird', dynamodb: 'error' }, features: 'nope' },
+      'http://localhost:4566',
+    );
+
+    expect(snapshot.version).toBeNull();
+    expect(snapshot.edition).toBeNull();
+    expect(snapshot.features).toEqual({});
+    expect(snapshot.services).toEqual({
+      s3: 'available',
+      lambda: 'unknown',
+      dynamodb: 'error',
+    });
+    expect(snapshot.counts).toEqual({ total: 3, available: 1, error: 1, other: 1 });
+  });
+
+  it('rejects payloads whose services member is missing or an array', () => {
+    expect(() => parseLocalStackHealthSnapshot({}, 'http://localhost:4566')).toThrow(
+      /"services" property is missing/,
+    );
+    expect(() => parseLocalStackHealthSnapshot({ services: [] }, 'http://localhost:4566')).toThrow(
+      /"services" property is missing/,
+    );
+    expect(() => parseLocalStackHealthSnapshot([], 'http://localhost:4566')).toThrow(
+      /not a JSON object/,
+    );
   });
 });

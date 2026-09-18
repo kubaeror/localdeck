@@ -31,6 +31,9 @@ import {
   listClusterNames,
   listClusterVersions,
   listNodegroups,
+  tagResource,
+  untagResource,
+  updateNodegroupScaling,
   type EksCluster,
 } from './api';
 
@@ -186,6 +189,38 @@ liveDescribe('EKS module against the live api and LocalStack', () => {
 
         const listed = await listNodegroups(clusterName);
         expect(listed.items.map((entry) => entry.nodegroupName)).toContain(nodegroupName);
+
+        // The console's "Edit scaling" modal sends UpdateNodegroupConfig; the
+        // Compute tab keeps polling until the status settles.
+        const scaled = await updateNodegroupScaling({
+          clusterName,
+          nodegroupName,
+          scaling: { minSize: 1, maxSize: 3, desiredSize: 1 },
+        });
+        expect(scaled.scaling.maxSize).toBe(3);
+        let scaledStatus = scaled.status;
+        const scaleDeadline = Date.now() + 5 * 60_000;
+        while (!['ACTIVE', 'DEGRADED'].includes(scaledStatus) && Date.now() < scaleDeadline) {
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+          scaledStatus = (await getNodegroup(clusterName, nodegroupName)).status;
+        }
+        expect(['ACTIVE', 'DEGRADED']).toContain(scaledStatus);
+
+        // ARN-keyed tag round-trip: TagResource then UntagResource, verified
+        // through DescribeCluster (the only read the module uses for tags).
+        const clusterArn = settled.arn;
+        if (clusterArn === undefined) {
+          throw new Error('DescribeCluster did not report an ARN; the tag round-trip cannot run.');
+        }
+        await tagResource(clusterArn, [{ Key: 'localdeck:live', Value: stamp }]);
+        expect((await getCluster(clusterName)).tags).toContainEqual({
+          Key: 'localdeck:live',
+          Value: stamp,
+        });
+        await untagResource(clusterArn, ['localdeck:live']);
+        expect(
+          (await getCluster(clusterName)).tags.some((tag) => tag.Key === 'localdeck:live'),
+        ).toBe(false);
 
         await deleteNodegroup(clusterName, nodegroupName);
         nodegroupCreated = false;

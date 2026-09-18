@@ -1,16 +1,21 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  copyObject,
   createBucket,
   deleteBuckets,
   deleteFolder,
+  deleteObjects,
+  deletePublicAccessBlock,
   downloadObjectUrl,
+  getBucketEncryption,
   getBucketPolicy,
   getBucketTags,
   getPublicAccessBlock,
   listObjects,
   uploadObject,
 } from './api';
+import { toFriendlyS3Error } from './errors';
 
 type Handler = (input: Record<string, unknown>) => unknown;
 
@@ -151,6 +156,41 @@ describe('optional reads', () => {
     }));
     await expect(getBucketTags('b')).rejects.toMatchObject({ apiError: { code: 'AccessDenied' } });
   });
+
+  it('treats an empty encryption Rules list as the SSE-S3 default', async () => {
+    stubDispatcher(() => ({ ServerSideEncryptionConfiguration: { Rules: [] } }));
+    await expect(getBucketEncryption('b')).resolves.toEqual({ configured: false });
+  });
+
+  it('reports an explicit encryption rule', async () => {
+    stubDispatcher(() => ({
+      ServerSideEncryptionConfiguration: {
+        Rules: [
+          {
+            ApplyServerSideEncryptionByDefault: {
+              SSEAlgorithm: 'aws:kms',
+              KMSMasterKeyID: 'key-1',
+            },
+            BucketKeyEnabled: true,
+          },
+        ],
+      },
+    }));
+    await expect(getBucketEncryption('b')).resolves.toEqual({
+      configured: true,
+      algorithm: 'aws:kms',
+      kmsKeyArn: 'key-1',
+      bucketKeyEnabled: true,
+    });
+  });
+
+  it('calls DeletePublicAccessBlock with the bucket', async () => {
+    const calls = stubDispatcher(() => ({}));
+    await deletePublicAccessBlock('my-bucket');
+    expect(calls).toEqual([
+      { operation: 'DeletePublicAccessBlock', input: { Bucket: 'my-bucket' } },
+    ]);
+  });
 });
 
 describe('createBucket', () => {
@@ -213,17 +253,23 @@ describe('createBucket', () => {
         : {},
     );
 
-    await expect(
-      createBucket({
-        name: 'my-bucket',
-        region: 'us-east-1',
-        versioning: false,
-        tags: [{ Key: 'a', Value: 'b' }],
-        blockPublicAccess: true,
-      }),
-    ).rejects.toMatchObject({
-      apiError: { message: expect.stringContaining('was created, but tagging failed') },
-    });
+    const caught = await createBucket({
+      name: 'my-bucket',
+      region: 'us-east-1',
+      versioning: false,
+      tags: [{ Key: 'a', Value: 'b' }],
+      blockPublicAccess: true,
+    }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+    // The user-facing wording is what matters: the annotation survives the
+    // friendly-code mapping instead of being replaced by generic AccessDenied.
+    const friendly = toFriendlyS3Error(caught);
+    expect(friendly.message).toContain('was created, but tagging failed');
+    expect(friendly.message).toContain('LocalStack denied this action');
+    expect(friendly.field).toBeNull();
   });
 });
 
@@ -244,12 +290,17 @@ describe('deleteBuckets', () => {
 });
 
 describe('deleteFolder', () => {
-  it('walks the prefix recursively and deletes in one batch', async () => {
+  it('includes the prefix marker and nested markers, not just leaf objects', async () => {
     const calls = stubDispatcher((input) => {
-      if ('Delete' in input) return { Deleted: [{ Key: 'a/one.txt' }, { Key: 'a/two.txt' }] };
+      if ('Delete' in input) {
+        const objects = (input['Delete'] as { Objects: { Key: string }[] }).Objects;
+        return { Deleted: objects };
+      }
       return {
         Contents: [
-          { Key: 'a/one.txt', Size: 1 },
+          { Key: 'a/', Size: 0 },
+          { Key: 'a/nested/', Size: 0 },
+          { Key: 'a/nested/one.txt', Size: 1 },
           { Key: 'a/two.txt', Size: 2 },
         ],
       };
@@ -257,11 +308,110 @@ describe('deleteFolder', () => {
 
     const result = await deleteFolder({ bucket: 'my-bucket', prefix: 'a/' });
 
-    expect(operationInput(calls, 'ListObjectsV2')).not.toHaveProperty('Delimiter');
-    expect(operationInput(calls, 'DeleteObjects')).toMatchObject({
-      Delete: { Objects: [{ Key: 'a/one.txt' }, { Key: 'a/two.txt' }] },
+    expect(operationInput(calls, 'ListObjectsV2')).toEqual({ Bucket: 'my-bucket', Prefix: 'a/' });
+    const keys = (
+      operationInput(calls, 'DeleteObjects')['Delete'] as { Objects: { Key: string }[] }
+    ).Objects.map((entry) => entry.Key);
+    expect(keys).toEqual(
+      expect.arrayContaining(['a/', 'a/nested/', 'a/nested/one.txt', 'a/two.txt']),
+    );
+    expect(result.deleted).toHaveLength(4);
+    expect(result.failures).toEqual([]);
+  });
+
+  it('deletes the marker of an otherwise empty folder', async () => {
+    const calls = stubDispatcher((input) => {
+      if ('Delete' in input) return { Deleted: [{ Key: 'empty/' }] };
+      return { Contents: [{ Key: 'empty/', Size: 0 }] };
     });
-    expect(result.deleted).toHaveLength(2);
+
+    const result = await deleteFolder({ bucket: 'my-bucket', prefix: 'empty/' });
+
+    const keys = (
+      operationInput(calls, 'DeleteObjects')['Delete'] as { Objects: { Key: string }[] }
+    ).Objects.map((entry) => entry.Key);
+    expect(keys).toEqual(['empty/']);
+    expect(result.deleted).toEqual(['empty/']);
+  });
+
+  it('deletes each listing page as it arrives, without buffering every key', async () => {
+    const firstPage = Array.from({ length: 1000 }, (_value, index) => ({
+      Key: `a/object-${String(index).padStart(4, '0')}.txt`,
+      Size: 1,
+    }));
+    const calls = stubDispatcher((input) => {
+      if ('Delete' in input) {
+        const objects = (input['Delete'] as { Objects: { Key: string }[] }).Objects;
+        return { Deleted: objects };
+      }
+      if (input['ContinuationToken'] === 'page-2') {
+        return { Contents: [{ Key: 'a/last.txt', Size: 1 }] };
+      }
+      return { Contents: firstPage, NextContinuationToken: 'page-2' };
+    });
+
+    const result = await deleteFolder({ bucket: 'my-bucket', prefix: 'a/' });
+
+    const listings = calls.filter((call) => call.operation === 'ListObjectsV2');
+    expect(listings).toHaveLength(2);
+    expect(listings[1]?.input).toMatchObject({ ContinuationToken: 'page-2' });
+    const deleteBatches = calls.filter((call) => call.operation === 'DeleteObjects');
+    // 1000 objects + the explicit prefix marker → two batches, then page two.
+    expect(deleteBatches).toHaveLength(3);
+    expect(result.deleted).toHaveLength(1002);
+    expect(result.failures).toEqual([]);
+  });
+});
+
+describe('deleteObjects', () => {
+  it('keeps per-batch failures and continues with the remaining batches', async () => {
+    const calls = stubDispatcher((input) => {
+      const objects = (input['Delete'] as { Objects: { Key: string }[] }).Objects;
+      if (objects[0]?.Key === 'batch-0.txt') {
+        return { __error: { code: 'AccessDenied', message: 'batch denied', statusCode: 403 } };
+      }
+      return { Deleted: objects };
+    });
+    const keys = [
+      ...Array.from({ length: 1000 }, () => 'batch-0.txt'),
+      'batch-1.txt',
+      'batch-2.txt',
+    ];
+
+    const result = await deleteObjects({ bucket: 'my-bucket', keys });
+
+    expect(calls.filter((call) => call.operation === 'DeleteObjects')).toHaveLength(2);
+    expect(result.deleted).toEqual(['batch-1.txt', 'batch-2.txt']);
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]?.key).toContain('1000 objects');
+    expect(result.failures[0]?.message).toContain('denied this action');
+  });
+
+  it('reports per-key errors AWS answered inside a batch', async () => {
+    stubDispatcher(() => ({
+      Deleted: [{ Key: 'ok.txt' }],
+      Errors: [{ Key: 'locked.txt', Code: 'AccessDenied', Message: 'no' }],
+    }));
+
+    const result = await deleteObjects({ bucket: 'my-bucket', keys: ['ok.txt', 'locked.txt'] });
+    expect(result.deleted).toEqual(['ok.txt']);
+    expect(result.failures).toEqual([{ key: 'locked.txt', code: 'AccessDenied', message: 'no' }]);
+  });
+});
+
+describe('copyObject source encoding', () => {
+  it('percent-encodes every key segment but keeps the slashes', async () => {
+    const calls = stubDispatcher(() => ({}));
+    await copyObject({
+      sourceBucket: 'source-bucket',
+      sourceKey: 'dir/a b/%?#&é/ф.txt',
+      destinationBucket: 'dest-bucket',
+      destinationKey: 'copy.txt',
+    });
+
+    expect(operationInput(calls, 'CopyObject')).toMatchObject({
+      CopySource: '/source-bucket/dir/a%20b/%25%3F%23%26%C3%A9/%D1%84.txt',
+    });
   });
 });
 

@@ -45,6 +45,9 @@ export function CreateFolderModal({
   const folderName = name.trim().replace(/^\/+|\/+$/g, '');
   const key = `${prefix}${folderName}/`;
   const problem = folderName.length === 0 ? 'Enter a folder name.' : validateObjectKey(key);
+  // No trailing slash at the bucket root, one separator inside a folder.
+  const location =
+    prefix.length === 0 ? `s3://${bucket}` : `s3://${bucket}/${normalizePrefix(prefix)}`;
 
   const submit = async (): Promise<void> => {
     setCreating(true);
@@ -91,7 +94,7 @@ export function CreateFolderModal({
         <SpaceBetween size="m">
           <FormField
             label="Folder name"
-            description={`Created at s3://${bucket}/${prefix}`}
+            description={`Created at ${location}`}
             errorText={name.length > 0 && problem !== null ? problem : (errorText ?? undefined)}
           >
             <Input

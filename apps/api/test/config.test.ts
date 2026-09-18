@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { createLoggerOptions } from '../src/app.js';
 import { ConfigurationError, loadConfig } from '../src/config.js';
 
 describe('loadConfig', () => {
@@ -53,6 +54,58 @@ describe('loadConfig', () => {
 
   it('rejects an out-of-range port', () => {
     expect(() => loadConfig({ PORT: '99999' })).toThrow(ConfigurationError);
+  });
+
+  it('rejects trailing garbage instead of truncating integers (API-012)', () => {
+    expect(() => loadConfig({ PORT: '3001abc' })).toThrow(/must be an integer/);
+    expect(() => loadConfig({ LOCALSTACK_REQUEST_TIMEOUT_MS: '30s' })).toThrow(
+      /must be an integer/,
+    );
+    expect(() => loadConfig({ LOCALSTACK_CONNECTION_TIMEOUT_MS: '1.5' })).toThrow(
+      /must be an integer/,
+    );
+  });
+
+  it('exposes the outbound SDK timeout configuration', () => {
+    const config = loadConfig({
+      LOCALSTACK_CONNECTION_TIMEOUT_MS: '2500',
+      LOCALSTACK_REQUEST_TIMEOUT_MS: '45000',
+    });
+
+    expect(config.localstackConnectionTimeoutMs).toBe(2500);
+    expect(config.localstackRequestTimeoutMs).toBe(45000);
+    expect(loadConfig({}).localstackRequestTimeoutMs).toBe(30_000);
+  });
+
+  it('defaults the public endpoint to the configured endpoint', () => {
+    expect(
+      loadConfig({ LOCALSTACK_ENDPOINT: 'http://localstack:4566' }).localstackPublicEndpoint,
+    ).toBe('http://localstack:4566');
+    expect(
+      loadConfig({
+        LOCALSTACK_ENDPOINT: 'http://host.docker.internal:4566',
+        LOCALSTACK_PUBLIC_ENDPOINT: 'http://127.0.0.1:4566/',
+      }).localstackPublicEndpoint,
+    ).toBe('http://127.0.0.1:4566');
+  });
+
+  it('forces pretty logging off in production (API-010)', () => {
+    const config = loadConfig({ NODE_ENV: 'production', LOG_PRETTY: 'true' });
+    expect(config.isProduction).toBe(true);
+    expect(config.logPretty).toBe(false);
+
+    // Defense in depth: even a hand-built config cannot pull the dev-only
+    // pino-pretty transport into a production logger.
+    const logger = createLoggerOptions({ ...config, logPretty: true });
+    expect(logger).not.toHaveProperty('transport');
+
+    const devLogger = createLoggerOptions(loadConfig({ NODE_ENV: 'development' }));
+    expect(devLogger).toHaveProperty('transport.target', 'pino-pretty');
+  });
+
+  it('allows disabling the health probe cache', () => {
+    expect(loadConfig({}).localstackHealthCacheMs).toBe(2000);
+    expect(loadConfig({ LOCALSTACK_HEALTH_CACHE_MS: '0' }).localstackHealthCacheMs).toBe(0);
   });
 
   it('exposes the ui poll interval', () => {

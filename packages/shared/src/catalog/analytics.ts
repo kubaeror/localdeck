@@ -64,7 +64,13 @@ export const ANALYTICS_SERVICES = [
     summary: 'Apache Spark and Hadoop clusters on EC2.',
     healthKeys: ['emr-serverless'],
     browser: {
-      list: { operation: 'ListClusters', resultPath: 'Clusters', idField: 'Id', nameField: 'Name' },
+      list: {
+        operation: 'ListClusters',
+        resultPath: 'Clusters',
+        idField: 'Id',
+        nameField: 'Name',
+        pagination: { requestField: 'Marker', responseField: 'Marker' },
+      },
       describe: { operation: 'DescribeCluster', idParam: 'ClusterId' },
       delete: { operation: 'TerminateJobFlows', idParam: 'JobFlowIds', idParamIsArray: true },
     },

@@ -6,11 +6,16 @@
 #
 #   docker compose -f docker-compose.yml -f docker-compose.loopback.yml up --build
 #
+# Requires Docker Compose >= 2.24: the `!reset` tag below was introduced in that
+# release. `docker compose version` reports yours.
+#
 # Linux/WSL only: `network_mode: host` is not available on Docker Desktop for
 # macOS or Windows.
 services:
   api:
     network_mode: host
+    # network_mode: host publishes the api directly, so the published-port
+    # mapping of the base file (host loopback) is redundant.
     ports: !reset []
     networks: !reset []
     extra_hosts: !reset []
