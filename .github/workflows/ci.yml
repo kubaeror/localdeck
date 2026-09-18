@@ -44,7 +44,7 @@ jobs:
           cache: pnpm
 
       - name: Restore the turbo cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .turbo
           key: turbo-${{ runner.os }}-checks-${{ hashFiles('turbo.json', 'pnpm-lock.yaml') }}
@@ -172,7 +172,7 @@ jobs:
           cache: pnpm
 
       - name: Restore the turbo cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .turbo
           key: turbo-${{ runner.os }}-smoke-${{ hashFiles('turbo.json', 'pnpm-lock.yaml') }}
@@ -180,7 +180,7 @@ jobs:
             turbo-${{ runner.os }}-smoke-
 
       - name: Cache the Playwright browsers
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('e2e/package.json', 'pnpm-lock.yaml') }}
@@ -273,7 +273,7 @@ jobs:
           cache: pnpm
 
       - name: Cache the Playwright browsers
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('e2e/package.json', 'pnpm-lock.yaml') }}
