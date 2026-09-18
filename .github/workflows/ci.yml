@@ -97,7 +97,7 @@ jobs:
       # Build gate only: a broken Dockerfile or nginx template must fail the PR,
       # not the release tag. Release builds pass the real tag as APP_VERSION.
       - name: Build the ${{ matrix.image }} image (no push)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ${{ matrix.dockerfile }}
