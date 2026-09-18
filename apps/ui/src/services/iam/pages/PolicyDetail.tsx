@@ -264,8 +264,13 @@ export function PolicyDetailPage({ descriptor }: ServicePageProps): ReactElement
         header: 'Policy updated',
         content: 'LocalStack created a new default version of the policy.',
       });
-      await load();
+      // Refresh both the document and the Versions tab: the new default
+      // version must appear without a manual refresh.
+      await Promise.all([load(), loadVersions()]);
     } catch (caught) {
+      // Close the confirmation so the page alert is visible and the user
+      // cannot fire a second save from a modal that looks unchanged.
+      setConfirmFullAdmin(false);
       if (isIamCode(caught, 'LimitExceeded')) {
         // Five versions exist; DeletePolicyVersion is not available in LocalDeck
         // yet, so explain the recovery instead of the generic limit wording.
@@ -533,8 +538,20 @@ export function PolicyDetailPage({ descriptor }: ServicePageProps): ReactElement
             {
               id: 'actions',
               header: 'Actions',
-              cell: (version) =>
-                version.isDefault ? (
+              cell: (version) => {
+                if (isAwsManaged) {
+                  // An AWS managed policy's versions are maintained by AWS;
+                  // deleting one is refused, so the action is offered disabled.
+                  return (
+                    <Button
+                      disabled
+                      disabledReason="AWS managed policies are maintained by AWS; their versions cannot be deleted."
+                    >
+                      Delete
+                    </Button>
+                  );
+                }
+                return version.isDefault ? (
                   <Box color="text-body-secondary">The default version cannot be deleted.</Box>
                 ) : (
                   <Button
@@ -544,7 +561,8 @@ export function PolicyDetailPage({ descriptor }: ServicePageProps): ReactElement
                   >
                     Delete
                   </Button>
-                ),
+                );
+              },
             },
           ]}
           empty={

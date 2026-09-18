@@ -28,6 +28,14 @@ export class ApiClientError extends Error {
 
 export function toApiError(error: unknown): ApiError {
   if (error instanceof ApiClientError) return error.apiError;
+  if (error instanceof Error && error.name === 'TimeoutError') {
+    return {
+      code: 'REQUEST_TIMEOUT',
+      statusCode: 0,
+      message:
+        'The LocalDeck api did not answer in time. Check that the api process or container is running and responsive.',
+    };
+  }
   if (error instanceof Error && error.name === 'AbortError') {
     return {
       code: 'REQUEST_ABORTED',
@@ -51,12 +59,26 @@ async function readJson(response: Response): Promise<unknown> {
   }
 }
 
+/** Default deadline for JSON api calls. */
+const JSON_REQUEST_TIMEOUT_MS = 30_000;
+/** Deadline for streaming calls (uploads/downloads) that legitimately run long. */
+const STREAM_REQUEST_TIMEOUT_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Combines the caller's cancellation signal with a wall-clock deadline. Without
+ * a deadline a hung api/proxy leaves every page loading forever.
+ */
+function withTimeout(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return signal === undefined ? timeout : AbortSignal.any([signal, timeout]);
+}
+
 async function request<T>(path: string, signal?: AbortSignal): Promise<T> {
   let response: Response;
   try {
     response = await fetch(`${baseUrl}${path}`, {
       headers: { accept: 'application/json' },
-      ...(signal === undefined ? {} : { signal }),
+      signal: withTimeout(signal, JSON_REQUEST_TIMEOUT_MS),
     });
   } catch (error) {
     throw new ApiClientError(toApiError(error));
@@ -72,7 +94,7 @@ export async function postJson<T>(path: string, body: unknown, signal?: AbortSig
       method: 'POST',
       headers: { accept: 'application/json', 'content-type': 'application/json' },
       body: JSON.stringify(body),
-      ...(signal === undefined ? {} : { signal }),
+      signal: withTimeout(signal, JSON_REQUEST_TIMEOUT_MS),
     });
   } catch (error) {
     throw new ApiClientError(toApiError(error));
@@ -83,7 +105,7 @@ export async function postJson<T>(path: string, body: unknown, signal?: AbortSig
 /**
  * POSTs one file as `multipart/form-data`; the S3 upload proxy reads it from
  * the request stream. The browser sets the boundary, so no content-type header
- * is added here.
+ * is added here. Uploads get the long streaming deadline, not the JSON one.
  */
 export async function postMultipart<T>(path: string, file: File, signal?: AbortSignal): Promise<T> {
   const body = new FormData();
@@ -95,7 +117,7 @@ export async function postMultipart<T>(path: string, file: File, signal?: AbortS
       method: 'POST',
       headers: { accept: 'application/json' },
       body,
-      ...(signal === undefined ? {} : { signal }),
+      signal: withTimeout(signal, STREAM_REQUEST_TIMEOUT_MS),
     });
   } catch (error) {
     throw new ApiClientError(toApiError(error));
@@ -118,9 +140,22 @@ export interface ApiTextResponse {
   fileName?: string;
 }
 
-/** Reads `filename="…"` (or `filename=…`) out of a Content-Disposition value. */
+/**
+ * Reads the file name out of a Content-Disposition value. RFC 5987
+ * `filename*=UTF-8''…` (percent-encoded) wins over the plain
+ * `filename="…"`/`filename=…` parameter, as RFC 6266 prescribes.
+ */
 function parseContentDispositionFileName(value: string | null): string | undefined {
   if (value === null) return undefined;
+  const extended = /filename\*\s*=\s*utf-8'[^']*'([^;]+)/i.exec(value)?.[1];
+  if (extended !== undefined) {
+    try {
+      const decoded = decodeURIComponent(extended.trim());
+      if (decoded.length > 0) return decoded;
+    } catch {
+      // Malformed percent-encoding: fall back to the plain filename below.
+    }
+  }
   const quoted = /filename\s*=\s*"([^"]+)"/i.exec(value)?.[1];
   const bare = /filename\s*=\s*([^;]+)/i.exec(value)?.[1]?.trim();
   const name = quoted ?? bare;
@@ -137,7 +172,7 @@ export async function getText(path: string, signal?: AbortSignal): Promise<ApiTe
   try {
     response = await fetch(`${baseUrl}${path}`, {
       headers: { accept: 'application/yaml, text/yaml, text/plain, */*' },
-      ...(signal === undefined ? {} : { signal }),
+      signal: withTimeout(signal, STREAM_REQUEST_TIMEOUT_MS),
     });
   } catch (error) {
     throw new ApiClientError(toApiError(error));
@@ -200,8 +235,24 @@ export function getConfig(signal?: AbortSignal): Promise<ApiConfigResponse> {
   return request<ApiConfigResponse>(API_PATHS.config, signal);
 }
 
-export function getHealth(signal?: AbortSignal): Promise<HealthResponse> {
-  return request<HealthResponse>(API_PATHS.health, signal);
+/**
+ * GET /api/health. In Floci Console Contract v1 mode the api answers HTTP 200
+ * with `{status: "unavailable"}` while the emulator is down; surface that as
+ * the same unreachable state a 503 produces so the console behaves identically.
+ */
+export async function getHealth(signal?: AbortSignal): Promise<HealthResponse> {
+  const payload = await request<HealthResponse | { status: 'unavailable'; error?: string }>(
+    API_PATHS.health,
+    signal,
+  );
+  if (payload.status === 'unavailable') {
+    throw new ApiClientError({
+      code: 'EMULATOR_UNREACHABLE',
+      statusCode: 503,
+      message: payload.error ?? 'The emulator is not reachable.',
+    });
+  }
+  return payload;
 }
 
 export function getLiveness(signal?: AbortSignal): Promise<LivenessResponse> {

@@ -14,7 +14,7 @@ import Toggle from '@cloudscape-design/components/toggle';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { CreateWizard } from '../../../components/CreateWizard';
-import { TagsEditor } from '../../../components/TagsEditor';
+import { TagsEditor, validateTags } from '../../../components/TagsEditor';
 import { useFlashbar } from '../../../hooks/useFlashbar';
 import { toApiError } from '../../../lib/apiClient';
 import { serviceConsolePath } from '../../paths';
@@ -104,6 +104,9 @@ export function VolumeCreatePage({ descriptor }: ServicePageProps): ReactElement
     () => tags.filter((tag) => tag.Key.trim().length > 0 || tag.Value.trim().length > 0),
     [tags],
   );
+  const tagProblems = validateTags(tags);
+  const tagsProblem =
+    tagProblems.length === 0 ? null : tagProblems.map((problem) => problem.message).join(' ');
 
   const size = Number.parseInt(sizeGiB, 10);
   const sizeProblem = validateVolumeSize(volumeType, size);
@@ -148,6 +151,12 @@ export function VolumeCreatePage({ descriptor }: ServicePageProps): ReactElement
     }
     if (snapshotProblem !== null) {
       setActiveStepIndex(0);
+      return;
+    }
+    if (tagsProblem !== null) {
+      // The tags step validates the same set; this keeps a programmatic submit
+      // from sending invalid tags even if the wizard gate were bypassed.
+      setActiveStepIndex(1);
       return;
     }
     setSubmitting(true);
@@ -413,6 +422,7 @@ export function VolumeCreatePage({ descriptor }: ServicePageProps): ReactElement
           id: 'tags',
           title: 'Tags',
           isOptional: true,
+          validate: () => tagsProblem,
           content: tagsStep,
         },
         {

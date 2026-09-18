@@ -53,7 +53,21 @@ function includesFullWildcard(value: unknown): boolean {
   return Array.isArray(value) && value.some((entry) => entry === FULL_WILDCARD);
 }
 
+/** The only `Version` values IAM accepts. */
+const POLICY_VERSIONS = new Set(['2012-10-17', '2008-10-17']);
+
 const EFFECTS = new Set(['Allow', 'Deny']);
+
+/**
+ * A trust-policy Principal is "*" or an object mapping principal types (AWS,
+ * Service, Federated, CanonicalUser) to a string or an array of strings.
+ */
+function isPrincipalShape(value: unknown): boolean {
+  if (value === FULL_WILDCARD) return true;
+  if (!isRecord(value)) return false;
+  const entries = Object.values(value);
+  return entries.length > 0 && entries.every((entry) => isStringOrStringArray(entry));
+}
 
 interface StatementCheck {
   errors: readonly string[];
@@ -90,6 +104,16 @@ function checkStatement(
       errors.push(
         `${where} is missing "Principal" (trust policies must name who can assume the role).`,
       );
+    } else if (principal !== undefined && notPrincipal !== undefined) {
+      errors.push(`${where} must not include both "Principal" and "NotPrincipal".`);
+    } else {
+      const label = principal !== undefined ? 'Principal' : 'NotPrincipal';
+      const value = principal ?? notPrincipal;
+      if (!isPrincipalShape(value)) {
+        errors.push(
+          `${where} "${label}" must be "*" or an object whose values are strings or arrays of strings.`,
+        );
+      }
     }
   } else if (principal !== undefined || notPrincipal !== undefined) {
     errors.push(
@@ -101,6 +125,8 @@ function checkStatement(
   const notAction = statement['NotAction'];
   if (action === undefined && notAction === undefined) {
     errors.push(`${where} is missing "Action".`);
+  } else if (action !== undefined && notAction !== undefined) {
+    errors.push(`${where} must not include both "Action" and "NotAction".`);
   } else if (action !== undefined && !isStringOrStringArray(action)) {
     errors.push(`${where} "Action" must be a string or an array of strings.`);
   } else if (notAction !== undefined && !isStringOrStringArray(notAction)) {
@@ -112,6 +138,8 @@ function checkStatement(
     const notResource = statement['NotResource'];
     if (resource === undefined && notResource === undefined) {
       errors.push(`${where} is missing "Resource".`);
+    } else if (resource !== undefined && notResource !== undefined) {
+      errors.push(`${where} must not include both "Resource" and "NotResource".`);
     } else if (resource !== undefined && !isStringOrStringArray(resource)) {
       errors.push(`${where} "Resource" must be a string or an array of strings.`);
     } else if (notResource !== undefined && !isStringOrStringArray(notResource)) {
@@ -164,8 +192,8 @@ function validateDocument(text: string, kind: 'identity' | 'trust'): IamPolicyVa
   const version = policy['Version'];
   if (version === undefined) {
     errors.push('The policy is missing "Version" (use "2012-10-17").');
-  } else if (typeof version !== 'string' || version.length === 0) {
-    errors.push('"Version" must be a string, for example "2012-10-17".');
+  } else if (typeof version !== 'string' || !POLICY_VERSIONS.has(version)) {
+    errors.push('"Version" must be "2012-10-17" or "2008-10-17".');
   }
 
   const statement = policy['Statement'];
@@ -185,8 +213,22 @@ function validateDocument(text: string, kind: 'identity' | 'trust'): IamPolicyVa
         : isRecord(statement)
           ? [statement]
           : [];
+  // IAM rejects a policy whose statements reuse a "Sid"; track the first
+  // occurrence so every duplicate is reported against its statement.
+  const sidIndexes = new Map<string, number>();
   statements.forEach((entry, index) => {
     errors.push(...checkStatement(entry, index, kind).errors);
+    if (!isRecord(entry)) return;
+    const sid = entry['Sid'];
+    if (typeof sid !== 'string' || sid.length === 0) return;
+    const firstIndex = sidIndexes.get(sid);
+    if (firstIndex === undefined) {
+      sidIndexes.set(sid, index);
+    } else {
+      errors.push(
+        `Statement[${index}] "Sid" "${sid}" is already used by Statement[${firstIndex}]; statement IDs must be unique.`,
+      );
+    }
   });
 
   return {

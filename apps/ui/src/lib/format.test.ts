@@ -87,7 +87,8 @@ describe('formatServiceName', () => {
 
 describe('describeServiceStatus', () => {
   it('uses console wording', () => {
-    expect(describeServiceStatus('available')).toBe('Available');
+    expect(describeServiceStatus('enabled')).toBe('Enabled');
+    expect(describeServiceStatus('disabled')).toBe('Disabled');
     expect(describeServiceStatus('starting')).toBe('Starting');
     expect(describeServiceStatus('unknown')).toBe('Unknown');
   });

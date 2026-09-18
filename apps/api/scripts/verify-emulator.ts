@@ -295,8 +295,8 @@ async function verifyGenericBrowserAcceptance(config: AppConfig): Promise<void> 
           `${serviceId} is marked unavailable but is part of the verification sweep; ` +
             'install its SDK package or remove it from GENERIC_BROWSER_SWEEP',
         );
-        if (health.localstack.services[serviceId] === undefined) {
-          return `skipped: LocalStack does not report ${serviceId}`;
+        if (health.emulator.services[serviceId] === undefined) {
+          return `skipped: the emulator does not report ${serviceId}`;
         }
         const descriptor = findService(serviceId);
         const list = descriptor?.browser?.list;
@@ -481,7 +481,7 @@ async function verifyS3Acceptance(config: AppConfig): Promise<void> {
       return `objects: ${keys.join(', ')}`;
     });
 
-    await check('acceptance: download through the presigned-URL proxy', async () => {
+    await check('acceptance: download through the SDK stream proxy', async () => {
       if (!bucketCreated) return 'skipped: the bucket was not created';
       const response = await apiRequest(app, {
         method: 'GET',
@@ -489,8 +489,8 @@ async function verifyS3Acceptance(config: AppConfig): Promise<void> {
       });
       assert(response.statusCode === 200, `expected 200, received ${response.statusCode}`);
       assert(
-        response.headers['x-localdeck-download-mode'] === 'presigned-proxy',
-        'the download did not go through the presigned-URL proxy',
+        response.headers['x-localdeck-download-mode'] === 'sdk-stream',
+        'the download did not go through the SDK stream proxy',
       );
       assert(response.body === reportBody.toString(), 'downloaded bytes do not match');
       return `bytes match, content-disposition: ${String(response.headers['content-disposition'])}`;
@@ -1563,14 +1563,15 @@ async function verifyEksAcceptance(config: AppConfig): Promise<void> {
 
 async function run(): Promise<void> {
   const config = getConfig();
-  console.log('LocalDeck ↔ LocalStack live verification');
-  console.log(`  endpoint : ${config.localstackEndpoint}`);
+  console.log('LocalDeck ↔ local emulator live verification');
+  console.log(`  endpoint : ${config.emulatorEndpoint}`);
+  console.log(`  provider : ${config.emulatorProvider}`);
   console.log(`  region   : ${config.region}`);
   console.log('');
 
-  await check('LocalStack health endpoint (raw HTTP)', async () => {
-    const response = await fetch(config.localstackHealthUrl, {
-      signal: AbortSignal.timeout(config.localstackTimeoutMs),
+  await check('emulator health endpoint (raw HTTP)', async () => {
+    const response = await fetch(new URL('/_localstack/health', `${config.emulatorEndpoint}/`), {
+      signal: AbortSignal.timeout(config.emulatorTimeoutMs),
     });
     assert(response.ok, `expected 2xx, received ${response.status}`);
     const payload = (await response.json()) as {
@@ -1591,15 +1592,10 @@ async function run(): Promise<void> {
       const response = await app.inject({ method: 'GET', url: '/api/health' });
       assert(response.statusCode === 200, `expected 200, received ${response.statusCode}`);
       const body = response.json<HealthResponse>();
-      assert(body.localstack.counts.total > 0, 'no services reported by LocalStack');
-      // LocalStack reports 'available' for a ready service and 'running' once
-      // the service has been exercised; both mean "up".
-      const s3Status = body.localstack.services['s3'];
-      assert(
-        s3Status === 'available' || s3Status === 'running',
-        `expected s3 to be up, received ${String(s3Status)}`,
-      );
-      return `${body.status}, ${body.localstack.counts.available}/${body.localstack.counts.total} services available, version ${body.localstack.version ?? 'unknown'}`;
+      assert(body.emulator.counts.total > 0, 'no services reported by the emulator');
+      const s3Status = body.emulator.services['s3'];
+      assert(s3Status === 'enabled', `expected s3 to be enabled, received ${String(s3Status)}`);
+      return `${body.status}, ${body.emulator.counts.enabled}/${body.emulator.counts.total} services enabled, ${body.provider.providerLabel} ${body.provider.version ?? 'unknown'}`;
     } finally {
       await app.close();
     }
@@ -1612,10 +1608,10 @@ async function run(): Promise<void> {
       assert(response.statusCode === 200, `expected 200, received ${response.statusCode}`);
       const body = response.json<ApiConfigResponse>();
       assert(
-        body.localstack.endpoint === config.localstackEndpoint,
+        body.emulator.endpoint === config.emulatorEndpoint,
         'config endpoint does not match the configured endpoint',
       );
-      return `${body.application.name} ${body.application.version} (${body.application.environment}), ${body.localstack.endpoint}, ${body.localstack.region}`;
+      return `${body.application.name} ${body.application.version} (${body.application.environment}), ${body.emulator.endpoint}, ${body.emulator.region}`;
     } finally {
       await app.close();
     }
@@ -1705,11 +1701,13 @@ async function run(): Promise<void> {
     }
   });
 
-  await check('Unreachable LocalStack yields 503 + clean ApiError (no crash)', async () => {
+  await check('Unreachable emulator yields 503 + clean ApiError (no crash)', async () => {
     const unreachable = loadConfig({
       ...process.env,
-      LOCALSTACK_ENDPOINT: 'http://127.0.0.1:9',
-      LOCALSTACK_TIMEOUT_MS: '2000',
+      // Explicit EMULATOR_ENDPOINT: it wins over any alias the shell exported.
+      EMULATOR_ENDPOINT: 'http://127.0.0.1:9',
+      EMULATOR_TIMEOUT_MS: '2000',
+      EMULATOR_HEALTH_CACHE_MS: '0',
     });
     const app = await buildApp({ config: unreachable, logger: false });
     try {
@@ -1717,8 +1715,8 @@ async function run(): Promise<void> {
       assert(response.statusCode === 503, `expected 503, received ${response.statusCode}`);
       const body = response.json<ApiErrorResponse>();
       assert(
-        body.error.code === 'LOCALSTACK_UNREACHABLE',
-        `expected LOCALSTACK_UNREACHABLE, received ${body.error.code}`,
+        body.error.code === 'EMULATOR_UNREACHABLE',
+        `expected EMULATOR_UNREACHABLE, received ${body.error.code}`,
       );
       const liveness = await app.inject({ method: 'GET', url: '/api/health/live' });
       assert(liveness.statusCode === 200, 'api did not stay alive after the failure');
@@ -1761,7 +1759,7 @@ async function run(): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  console.log(`All ${checks.length} checks passed against ${config.localstackEndpoint}`);
+  console.log(`All ${checks.length} checks passed against ${config.emulatorEndpoint}`);
 }
 
 run().catch((error: unknown) => {

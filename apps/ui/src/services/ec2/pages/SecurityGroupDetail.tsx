@@ -44,6 +44,24 @@ function toRevokeInput(rule: Ec2SecurityGroupRule): SecurityGroupIngressRule {
   };
 }
 
+/** Human label for one rule, shown in the revoke confirmation. */
+function ruleLabel(rule: Ec2SecurityGroupRule): string {
+  const protocol = rule.protocol === '-1' ? 'All traffic' : rule.protocol.toUpperCase();
+  const ports =
+    rule.protocol === '-1' || (rule.fromPort === undefined && rule.toPort === undefined)
+      ? 'all ports'
+      : rule.toPort === undefined || rule.fromPort === rule.toPort
+        ? `port ${String(rule.fromPort ?? 'all')}`
+        : `ports ${String(rule.fromPort ?? 'all')}-${String(rule.toPort)}`;
+  const sources = [
+    ...rule.ipv4Ranges,
+    ...rule.ipv6Ranges,
+    ...rule.prefixListIds,
+    ...rule.referencedGroups,
+  ];
+  return `${protocol} ${ports}${sources.length === 0 ? '' : ` from ${sources.join(', ')}`}`;
+}
+
 /**
  * One security group: inbound and outbound rules with add/revoke actions, plus
  * details and tags. The default group of a VPC cannot be deleted, so its delete
@@ -59,30 +77,34 @@ export function SecurityGroupDetailPage({ descriptor }: ServicePageProps): React
   const { data: group, loading, error, reload } = useEc2Resource(loader);
 
   const [addVisible, setAddVisible] = useState(false);
-  const [revoking, setRevoking] = useState(false);
+  const [revokeTarget, setRevokeTarget] = useState<{
+    rule: Ec2SecurityGroupRule;
+    rowId: string;
+  } | null>(null);
+  const [revokingRowId, setRevokingRowId] = useState<string | null>(null);
+  const [revokeError, setRevokeError] = useState<string | null>(null);
   const [deleteVisible, setDeleteVisible] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
-  const revoke = async (rule: Ec2SecurityGroupRule): Promise<void> => {
-    if (revoking) return;
-    setRevoking(true);
+  const confirmRevoke = async (): Promise<void> => {
+    if (revokeTarget === null || revokingRowId !== null) return;
+    setRevokingRowId(revokeTarget.rowId);
+    setRevokeError(null);
     try {
-      await revokeSecurityGroupIngress({ groupId, rule: toRevokeInput(rule) });
+      await revokeSecurityGroupIngress({ groupId, rule: toRevokeInput(revokeTarget.rule) });
       flashbar.notify({
         type: 'success',
         header: 'Inbound rule revoked',
-        content: `${rule.protocol} ${rule.fromPort ?? ''}-${rule.toPort ?? ''}`.trim(),
+        content:
+          `${revokeTarget.rule.protocol} ${revokeTarget.rule.fromPort ?? ''}-${revokeTarget.rule.toPort ?? ''}`.trim(),
       });
+      setRevokeTarget(null);
       await reload();
     } catch (caught) {
-      flashbar.notify({
-        type: 'error',
-        header: 'Could not revoke the rule',
-        content: toFriendlyEc2Error(caught).message,
-      });
+      setRevokeError(toFriendlyEc2Error(caught).message);
     } finally {
-      setRevoking(false);
+      setRevokingRowId(null);
     }
   };
 
@@ -190,9 +212,10 @@ export function SecurityGroupDetailPage({ descriptor }: ServicePageProps): React
                       <SecurityGroupRulesTable
                         rules={group.inbound}
                         direction="inbound"
-                        revoking={revoking}
-                        onRevoke={(rule) => {
-                          void revoke(rule);
+                        revokingRowId={revokingRowId}
+                        onRevoke={(rule, rowId) => {
+                          setRevokeError(null);
+                          setRevokeTarget({ rule, rowId });
                         }}
                       />
                     </Container>
@@ -280,6 +303,27 @@ export function SecurityGroupDetailPage({ descriptor }: ServicePageProps): React
           }}
         />
       ) : null}
+
+      {revokeTarget === null ? null : (
+        <DeleteConfirmModal
+          visible
+          title="Revoke inbound rule"
+          subjects={[ruleLabel(revokeTarget.rule)]}
+          confirmationText="revoke"
+          submitLabel="Revoke rule"
+          description="Revoking this inbound rule removes it from the security group immediately. Traffic the rule allowed is no longer permitted, and this action cannot be undone."
+          loading={revokingRowId !== null}
+          {...(revokeError === null ? {} : { errorText: revokeError })}
+          onDismiss={() => {
+            if (revokingRowId !== null) return;
+            setRevokeTarget(null);
+            setRevokeError(null);
+          }}
+          onConfirm={() => {
+            void confirmRevoke();
+          }}
+        />
+      )}
 
       {deleteVisible ? (
         <DeleteConfirmModal

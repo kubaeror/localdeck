@@ -51,17 +51,22 @@ export function PoliciesListPage({ descriptor }: ServicePageProps): ReactElement
         header: 'Policy name',
         sortingField: 'policyName',
         isRowHeader: true,
-        cell: (policy) => (
-          <Link
-            href={policyPath(policy.arn)}
-            onFollow={(event) => {
-              event.preventDefault();
-              openPolicy(policy.arn);
-            }}
-          >
-            {policy.policyName}
-          </Link>
-        ),
+        cell: (policy) => {
+          // Without an ARN there is nothing to route to; the name stays text.
+          if (policy.arn === undefined) return <Box>{policy.policyName}</Box>;
+          const arn = policy.arn;
+          return (
+            <Link
+              href={policyPath(arn)}
+              onFollow={(event) => {
+                event.preventDefault();
+                openPolicy(arn);
+              }}
+            >
+              {policy.policyName}
+            </Link>
+          );
+        },
       },
       {
         id: 'policyType',
@@ -79,7 +84,7 @@ export function PoliciesListPage({ descriptor }: ServicePageProps): ReactElement
   );
 
   const confirmDelete = async (): Promise<void> => {
-    if (deleteTarget === null) return;
+    if (deleteTarget === null || deleteTarget.arn === undefined) return;
     setDeleting(true);
     setDeleteError(null);
     try {
@@ -109,7 +114,7 @@ export function PoliciesListPage({ descriptor }: ServicePageProps): ReactElement
           { text: 'Policies' },
         ]}
         columns={columns}
-        getRowId={(policy) => policy.arn}
+        getRowId={(policy) => policy.arn ?? policy.policyName}
         reloadToken={reloadToken}
         fetcher={({ nextToken, signal }) =>
           listPolicies({
@@ -124,7 +129,7 @@ export function PoliciesListPage({ descriptor }: ServicePageProps): ReactElement
           placeholder: 'Find policies by name',
           match: (policy, text) =>
             policy.policyName.toLowerCase().includes(text.trim().toLowerCase()) ||
-            policy.arn.toLowerCase().includes(text.trim().toLowerCase()),
+            (policy.arn ?? '').toLowerCase().includes(text.trim().toLowerCase()),
         }}
         notifications={
           <SpaceBetween size="xs">
@@ -160,31 +165,50 @@ export function PoliciesListPage({ descriptor }: ServicePageProps): ReactElement
             Create policy
           </Button>
         }
-        rowActions={(policy) => (
-          <ButtonDropdown
-            variant="icon"
-            ariaLabel={`Actions for ${policy.policyName}`}
-            items={[
-              { id: 'view', text: 'View details' },
-              { id: 'copy-arn', text: 'Copy ARN' },
-              {
-                id: 'delete',
-                text: 'Delete',
-                disabled: policy.scope === 'AWS',
-              },
-            ]}
-            onItemClick={({ detail }) => {
-              if (detail.id === 'view') openPolicy(policy.arn);
-              if (detail.id === 'copy-arn') {
-                void navigator.clipboard?.writeText(policy.arn);
-              }
-              if (detail.id === 'delete' && policy.scope !== 'AWS') {
-                setDeleteError(null);
-                setDeleteTarget(policy);
-              }
-            }}
-          />
-        )}
+        rowActions={(policy) => {
+          const arn = policy.arn;
+          const missingArn = 'LocalStack did not report an ARN for this policy.';
+          return (
+            <ButtonDropdown
+              variant="icon"
+              ariaLabel={`Actions for ${policy.policyName}`}
+              items={[
+                {
+                  id: 'view',
+                  text: 'View details',
+                  disabled: arn === undefined,
+                  ...(arn === undefined ? { disabledReason: missingArn } : {}),
+                },
+                {
+                  id: 'copy-arn',
+                  text: 'Copy ARN',
+                  disabled: arn === undefined,
+                  ...(arn === undefined ? { disabledReason: missingArn } : {}),
+                },
+                {
+                  id: 'delete',
+                  text: 'Delete',
+                  disabled: policy.scope === 'AWS' || arn === undefined,
+                  ...(policy.scope === 'AWS'
+                    ? { disabledReason: 'AWS managed policies cannot be deleted.' }
+                    : arn === undefined
+                      ? { disabledReason: missingArn }
+                      : {}),
+                },
+              ]}
+              onItemClick={({ detail }) => {
+                if (detail.id === 'view' && arn !== undefined) openPolicy(arn);
+                if (detail.id === 'copy-arn' && arn !== undefined) {
+                  void navigator.clipboard?.writeText(arn);
+                }
+                if (detail.id === 'delete' && policy.scope !== 'AWS' && arn !== undefined) {
+                  setDeleteError(null);
+                  setDeleteTarget(policy);
+                }
+              }}
+            />
+          );
+        }}
         emptyTitle="No policies"
         emptyDescription={
           scope === 'Local'

@@ -37,7 +37,9 @@ export function readListPreferences(preferencesId: string): ListPagePreferences 
       const ids = record.visibleContent.filter(
         (entry): entry is string => typeof entry === 'string' && entry.length > 0,
       );
-      if (ids.length > 0) preferences.visibleContent = ids;
+      // An explicitly empty selection is a real preference, not missing data:
+      // keep it so a user who hid every column does not get them all back.
+      preferences.visibleContent = ids;
     }
     return preferences;
   } catch {

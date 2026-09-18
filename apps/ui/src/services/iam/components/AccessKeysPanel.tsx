@@ -2,6 +2,7 @@ import type { ApiError } from '@localdeck/shared';
 import Alert from '@cloudscape-design/components/alert';
 import Box from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
+import Checkbox from '@cloudscape-design/components/checkbox';
 import Container from '@cloudscape-design/components/container';
 import Header from '@cloudscape-design/components/header';
 import Modal from '@cloudscape-design/components/modal';
@@ -58,6 +59,7 @@ function CreateAccessKeyModal({
 }: CreateAccessKeyModalProps): ReactElement {
   const flashbar = useFlashbar();
   const [created, setCreated] = useState<CreatedAccessKey | null>(null);
+  const [acknowledged, setAcknowledged] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -67,6 +69,7 @@ function CreateAccessKeyModal({
     try {
       const key = await createAccessKey(userName);
       setCreated(key);
+      setAcknowledged(false);
       onCreated();
       flashbar.notify({
         type: 'success',
@@ -80,11 +83,16 @@ function CreateAccessKeyModal({
     }
   };
 
+  // Once the secret exists, the modal refuses to dismiss until the user has
+  // confirmed they copied it: the secret is shown exactly once and would be
+  // lost silently otherwise.
+  const canDismiss = !submitting && (created === null || acknowledged);
+
   return (
     <Modal
       visible
       onDismiss={() => {
-        if (!submitting) onDismiss();
+        if (canDismiss) onDismiss();
       }}
       header="Create access key"
       size="medium"
@@ -108,7 +116,7 @@ function CreateAccessKeyModal({
                 </Button>
               </>
             ) : (
-              <Button variant="primary" onClick={onDismiss}>
+              <Button variant="primary" disabled={!acknowledged} onClick={onDismiss}>
                 Done
               </Button>
             )}
@@ -138,6 +146,14 @@ function CreateAccessKeyModal({
               .csv file; IAM cannot return it again.
             </Alert>
             <AccessKeySecret accessKey={created} />
+            <Checkbox
+              checked={acknowledged}
+              onChange={({ detail }) => {
+                setAcknowledged(detail.checked);
+              }}
+            >
+              I have copied the secret access key
+            </Checkbox>
           </>
         )}
       </SpaceBetween>

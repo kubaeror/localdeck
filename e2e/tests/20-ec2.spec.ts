@@ -21,7 +21,7 @@ test.describe('ec2 instance lifecycle', () => {
 
   test('launches an instance and terminates it again', async ({ request }) => {
     const health = await fetchHealth(request);
-    test.skip(!isEmulated(health, 'ec2'), 'This LocalStack does not report EC2');
+    test.skip(!isEmulated(health, 'ec2'), 'This emulator does not report EC2');
 
     const name = uniqueName(`${E2E_RESOURCE_PREFIX}-instance`);
 

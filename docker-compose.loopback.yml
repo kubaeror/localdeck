@@ -20,7 +20,7 @@ services:
     networks: !reset []
     extra_hosts: !reset []
     environment:
-      LOCALSTACK_ENDPOINT: ${LOCALSTACK_ENDPOINT:-http://127.0.0.1:4566}
+      EMULATOR_ENDPOINT: ${EMULATOR_ENDPOINT:-${LOCALSTACK_ENDPOINT:-http://127.0.0.1:4566}}
   ui:
     environment:
       API_UPSTREAM: ${API_UPSTREAM:-http://host.docker.internal:3001}

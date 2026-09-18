@@ -98,6 +98,8 @@ jobs:
             dockerfile: apps/api/Dockerfile
           - image: ui
             dockerfile: apps/ui/Dockerfile
+          - image: console
+            dockerfile: apps/console/Dockerfile
     steps:
       - name: Checkout
         uses: actions/checkout@v4

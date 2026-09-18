@@ -2,9 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { dispatchedOperationCalls, jsonResponse, stubApiFetch } from '../../test/fixtures';
 import {
   authorizeSecurityGroupIngress,
+  countInstances,
   createVolume,
   getImage,
   getInstance,
+  getSecurityGroup,
+  getVolume,
   instanceName,
   isTransitionalInstanceState,
   isVolumeAttached,
@@ -16,6 +19,7 @@ import {
   listVolumes,
   runInstances,
   startInstances,
+  tagLaunchedVolumes,
   toEc2Image,
   toEc2Instance,
   toEc2InstanceType,
@@ -379,6 +383,84 @@ describe('EC2 api operations', () => {
     });
   });
 
+  it('requires an exact volume id even when LocalStack ignores the filter', async () => {
+    stubApiFetch({
+      operations: {
+        'ec2/DescribeVolumes': {
+          service: 'ec2',
+          operation: 'DescribeVolumes',
+          result: { Volumes: [{ VolumeId: 'vol-other', State: 'available' }] },
+        },
+      },
+    });
+
+    await expect(getVolume('vol-missing')).rejects.toMatchObject({
+      apiError: { code: 'NOT_FOUND' },
+    });
+  });
+
+  it('returns the exact volume the filter asked for', async () => {
+    stubApiFetch({
+      operations: {
+        'ec2/DescribeVolumes': {
+          service: 'ec2',
+          operation: 'DescribeVolumes',
+          result: {
+            Volumes: [
+              { VolumeId: 'vol-other', State: 'available' },
+              { VolumeId: 'vol-1', State: 'in-use', Size: 8 },
+            ],
+          },
+        },
+      },
+    });
+
+    const volume = await getVolume('vol-1');
+    expect(volume.volumeId).toBe('vol-1');
+    expect(volume.state).toBe('in-use');
+  });
+
+  it('requires an exact security group id even when LocalStack ignores the filter', async () => {
+    stubApiFetch({
+      operations: {
+        'ec2/DescribeSecurityGroups': {
+          service: 'ec2',
+          operation: 'DescribeSecurityGroups',
+          result: {
+            SecurityGroups: [
+              { GroupId: 'sg-other', GroupName: 'unrelated', Description: 'not it' },
+            ],
+          },
+        },
+      },
+    });
+
+    await expect(getSecurityGroup('sg-missing')).rejects.toMatchObject({
+      apiError: { code: 'NOT_FOUND' },
+    });
+  });
+
+  it('returns the exact security group the filter asked for', async () => {
+    stubApiFetch({
+      operations: {
+        'ec2/DescribeSecurityGroups': {
+          service: 'ec2',
+          operation: 'DescribeSecurityGroups',
+          result: {
+            SecurityGroups: [
+              { GroupId: 'sg-other', GroupName: 'unrelated' },
+              { GroupId: 'sg-1', GroupName: 'web', Description: 'web tier' },
+            ],
+          },
+        },
+      },
+    });
+
+    const group = await getSecurityGroup('sg-1');
+    expect(group.groupId).toBe('sg-1');
+    expect(group.groupName).toBe('web');
+  });
+
   it('sends gp3 throughput and IOPS but never throughput for other types', async () => {
     stubApiFetch({
       operations: {
@@ -449,6 +531,22 @@ describe('EC2 api operations', () => {
           Ebs: { VolumeSize: 20, VolumeType: 'gp3', Iops: 4000 },
         },
       ],
+    });
+  });
+
+  it('sends only instance tags in RunInstances, never a volume tag list', async () => {
+    await runInstances({
+      imageId: 'ami-1',
+      instanceType: 't3.micro',
+      tags: [{ Key: 'Name', Value: 'web' }],
+      blockDevices: [
+        { deviceName: '/dev/sda1', sizeGiB: 20, volumeType: 'gp3', deleteOnTermination: true },
+        { deviceName: '/dev/sdf', sizeGiB: 8, volumeType: 'gp3', deleteOnTermination: false },
+      ],
+    });
+
+    expect(lastDispatchedInput('RunInstances')).toMatchObject({
+      TagSpecifications: [{ ResourceType: 'instance', Tags: [{ Key: 'Name', Value: 'web' }] }],
     });
   });
 
@@ -533,6 +631,152 @@ describe('EC2 api operations', () => {
   });
 });
 
+describe('EC2 launch volume tagging', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('tags the root and each additional volume from the returned mappings', async () => {
+    stubApiFetch({
+      operations: {
+        'ec2/CreateTags': { service: 'ec2', operation: 'CreateTags', result: {} },
+      },
+    });
+
+    const failures = await tagLaunchedVolumes({
+      instance: {
+        rootDeviceName: '/dev/sda1',
+        blockDevices: [
+          { deviceName: '/dev/sda1', volumeId: 'vol-root' },
+          { deviceName: '/dev/sdf', volumeId: 'vol-data' },
+          { deviceName: '/dev/sdg', volumeId: 'vol-fallback' },
+        ],
+      },
+      instanceName: 'web',
+      additionalVolumes: [{ deviceName: '/dev/sdf', name: 'data' }, { deviceName: '/dev/sdg' }],
+    });
+
+    expect(failures).toEqual([]);
+    expect(createTagsInputs()).toEqual([
+      { Resources: ['vol-root'], Tags: [{ Key: 'Name', Value: 'web-root' }] },
+      { Resources: ['vol-data'], Tags: [{ Key: 'Name', Value: 'data' }] },
+      { Resources: ['vol-fallback'], Tags: [{ Key: 'Name', Value: 'web-/dev/sdg' }] },
+    ]);
+  });
+
+  it('falls back to the "instance" prefix and skips devices without a mapping', async () => {
+    stubApiFetch({
+      operations: {
+        'ec2/CreateTags': { service: 'ec2', operation: 'CreateTags', result: {} },
+      },
+    });
+
+    const failures = await tagLaunchedVolumes({
+      instance: {
+        rootDeviceName: '/dev/sda1',
+        blockDevices: [{ deviceName: '/dev/sda1', volumeId: 'vol-root' }],
+      },
+      instanceName: '   ',
+      additionalVolumes: [{ deviceName: '/dev/sdf' }],
+    });
+
+    expect(failures).toEqual([]);
+    expect(createTagsInputs()).toEqual([
+      { Resources: ['vol-root'], Tags: [{ Key: 'Name', Value: 'instance-root' }] },
+    ]);
+  });
+
+  it('reports a per-volume failure without throwing or skipping the remaining volumes', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes('/api/services/ec2/CreateTags')) {
+          const request = JSON.parse(String(init?.body)) as {
+            input: { Resources?: string[] };
+          };
+          if ((request.input.Resources ?? []).includes('vol-bad')) {
+            return jsonResponse(
+              {
+                error: {
+                  code: 'InvalidVolume.NotFound',
+                  statusCode: 400,
+                  message: 'The volume does not exist',
+                },
+              },
+              400,
+            );
+          }
+          return jsonResponse({ service: 'ec2', operation: 'CreateTags', result: {} });
+        }
+        return new Response('{}', { status: 404 });
+      }),
+    );
+
+    const failures = await tagLaunchedVolumes({
+      instance: {
+        rootDeviceName: '/dev/sda1',
+        blockDevices: [
+          { deviceName: '/dev/sda1', volumeId: 'vol-root' },
+          { deviceName: '/dev/sdf', volumeId: 'vol-bad' },
+        ],
+      },
+      instanceName: 'web',
+      additionalVolumes: [{ deviceName: '/dev/sdf' }],
+    });
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({
+      deviceName: '/dev/sdf',
+      volumeId: 'vol-bad',
+      message: 'The volume does not exist',
+    });
+    // The root was tagged before the failure; the failing volume never aborts
+    // the launch response the wizard is about to show.
+    expect(dispatchedOperationCalls('ec2', 'CreateTags')).toBe(2);
+  });
+});
+
+describe('EC2 dashboard counts', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function stubInstancePage(count: number, nextToken?: string): void {
+    const instances = Array.from({ length: count }, (_value, index) => ({
+      InstanceId: `i-${index + 1}`,
+      InstanceType: 't3.micro',
+      State: { Name: 'running' },
+    }));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        if (String(input).includes('/api/services/ec2/DescribeInstances')) {
+          return jsonResponse({
+            service: 'ec2',
+            operation: 'DescribeInstances',
+            result: {
+              Reservations: [{ Instances: instances }],
+              ...(nextToken === undefined ? {} : { NextToken: nextToken }),
+            },
+          });
+        }
+        return new Response('{}', { status: 404 });
+      }),
+    );
+  }
+
+  it('does not render a full first page as "100+" without a next token', async () => {
+    stubInstancePage(100);
+    await expect(countInstances()).resolves.toEqual({ count: 100, hasMore: false });
+  });
+
+  it('renders "100+" when the service returned a next token', async () => {
+    stubInstancePage(100, 'more');
+    await expect(countInstances()).resolves.toEqual({ count: 100, hasMore: true });
+  });
+});
+
 describe('EC2 pagination', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -613,4 +857,13 @@ function lastDispatchedInput(operation: string): Record<string, unknown> {
   if (call === undefined) throw new Error(`${operation} was not dispatched`);
   const request = JSON.parse(String(call[1]?.body)) as { input: Record<string, unknown> };
   return request.input;
+}
+
+/** Parsed inputs of every CreateTags dispatcher request, in call order. */
+function createTagsInputs(): Record<string, unknown>[] {
+  return vi
+    .mocked(globalThis.fetch)
+    .mock.calls.filter(([input]) => String(input).includes('/api/services/ec2/CreateTags'))
+    .map((call) => JSON.parse(String(call[1]?.body)) as { input: Record<string, unknown> })
+    .map((request) => request.input);
 }

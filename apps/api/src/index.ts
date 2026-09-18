@@ -39,11 +39,11 @@ async function main(): Promise<void> {
   app.log.info(
     {
       environment: config.environment,
-      localstackEndpoint: config.localstackEndpoint,
-      localstackPublicEndpoint: config.localstackPublicEndpoint,
+      emulatorEndpoint: config.emulatorEndpoint,
+      emulatorProvider: config.emulatorProvider,
+      emulatorPublicEndpoint: config.emulatorPublicEndpoint,
       region: config.region,
-      requestTimeoutMs: config.localstackRequestTimeoutMs,
-      healthUrl: config.localstackHealthUrl,
+      requestTimeoutMs: config.emulatorRequestTimeoutMs,
     },
     'LocalDeck api ready',
   );

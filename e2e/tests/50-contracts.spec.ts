@@ -6,7 +6,7 @@ import { REPO_ROOT, uniqueName } from './helpers';
  * The api's error contracts, exercised over HTTP exactly like the console does.
  * These are the guarantees the ui renders as honest, actionable states:
  * unknown service → 404, non-whitelisted operation → 400, missing SDK package
- * → 501, and an unreachable LocalStack → 503 with the shared ApiError shape.
+ * → 501, and an unreachable emulator → 503 with the shared ApiError shape.
  */
 
 interface ApiErrorBody {
@@ -61,7 +61,7 @@ test.describe('api error contracts', () => {
     expect(body.error.details?.sdkPackage).toBe('@aws-sdk/client-bedrock');
   });
 
-  test('an unreachable LocalStack answers 503 with LOCALSTACK_UNREACHABLE', async () => {
+  test('an unreachable emulator answers 503 with EMULATOR_UNREACHABLE', async () => {
     test.setTimeout(120_000);
     const port = Number.parseInt(process.env.E2E_DOWN_API_PORT ?? '3999', 10);
     if (!Number.isInteger(port) || port < 1 || port > 65_535) {
@@ -77,7 +77,7 @@ test.describe('api error contracts', () => {
         HOST: '127.0.0.1',
         PORT: String(port),
         // Port 9 (discard) never accepts connections: a deterministic refusal.
-        LOCALSTACK_ENDPOINT: 'http://127.0.0.1:9',
+        EMULATOR_ENDPOINT: 'http://127.0.0.1:9',
         LOCALSTACK_TIMEOUT_MS: '2000',
         LOG_LEVEL: 'warn',
         LOG_PRETTY: 'false',
@@ -90,7 +90,7 @@ test.describe('api error contracts', () => {
       const response = await fetch(`${origin}/api/health`);
       expect(response.status).toBe(503);
       const body = (await response.json()) as ApiErrorBody;
-      expect(body.error.code).toBe('LOCALSTACK_UNREACHABLE');
+      expect(body.error.code).toBe('EMULATOR_UNREACHABLE');
       expect(body.error.statusCode).toBe(503);
       expect(body.error.details?.endpoint).toBe('http://127.0.0.1:9');
       expect(typeof body.error.details?.reason).toBe('string');

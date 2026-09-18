@@ -1,12 +1,12 @@
 import { once } from 'node:events';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import type { Readable } from 'node:stream';
+import { Readable } from 'node:stream';
 import type { ApiErrorResponse, S3UploadResponse } from '@localdeck/shared';
 import type { FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
-import { rejectUploadPart } from '../src/routes/s3.js';
+import { rejectUploadPart, truncationGuard } from '../src/routes/s3.js';
 
 const BUCKET = 'localdeck-proxy-test';
 
@@ -15,6 +15,7 @@ interface RecordedRequest {
   path: string;
   query: string;
   bodyLength: number;
+  headers: Record<string, string | string[] | undefined>;
 }
 
 interface StubLocalStack {
@@ -39,7 +40,7 @@ function xml(response: ServerResponse, status: number, body: string): void {
 /**
  * Minimal S3-shaped stub covering exactly what the object proxy routes send:
  * bucket PUTs, single PutObject, the three multipart upload calls, and the
- * presigned GET the download proxy fetches. Presigned signature parameters are
+ * GetObject the download proxy sends through the SDK. Signature parameters are
  * ignored — the tests assert the route reached S3, not how it was signed.
  */
 async function startStubLocalStack(): Promise<StubLocalStack> {
@@ -59,6 +60,7 @@ async function startStubLocalStack(): Promise<StubLocalStack> {
         path: url.pathname,
         query: url.search.slice(1),
         bodyLength: rawBody.length,
+        headers: request.headers,
       });
 
       const uploadId = url.searchParams.get('uploadId');
@@ -266,7 +268,7 @@ describe('S3 object proxy routes', () => {
     expect(stub.stored.get('large.bin')?.equals(bytes)).toBe(true);
   }, 30_000);
 
-  it('downloads through the presigned-URL proxy', async () => {
+  it('streams the object through the SDK instead of a presigned URL', async () => {
     stub.stored.set('folder/report.txt', Buffer.from('proxied bytes'));
 
     const response = await app.inject({
@@ -276,17 +278,35 @@ describe('S3 object proxy routes', () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.body).toBe('proxied bytes');
-    expect(response.headers['x-localdeck-download-mode']).toBe('presigned-proxy');
+    expect(response.headers['x-localdeck-download-mode']).toBe('sdk-stream');
     expect(response.headers['content-disposition']).toBe('attachment; filename="report.txt"');
-    // The presigned URL the api fetched carries the signature; the browser sees
-    // only LocalDeck's route.
-    const presigned = stub.requests.filter(
-      (request) => request.method === 'GET' && request.query.includes('X-Amz-Signature'),
-    );
-    expect(presigned.length).toBeGreaterThan(0);
+    // The api fetched the object itself; no presigned URL is handed to the
+    // browser, and the stub saw a plain signed GetObject.
+    const gets = stub.requests.filter((request) => request.method === 'GET');
+    expect(gets.length).toBeGreaterThan(0);
+    expect(gets.every((request) => !request.query.includes('X-Amz-Signature'))).toBe(true);
   });
 
-  it('maps a missing object on the presigned download to NoSuchKey', async () => {
+  it('forwards content-encoding and supports Range requests', async () => {
+    stub.stored.set('encoded.txt.gz', Buffer.from('compressed-bytes'));
+
+    const ranged = await app.inject({
+      method: 'GET',
+      url: `/api/services/s3/objects/download?bucket=${BUCKET}&key=encoded.txt.gz`,
+      headers: { range: 'bytes=0-3' },
+    });
+
+    // The stub ignores Range, so the api answers the full body with 200; the
+    // assertion here is that the Range header is forwarded to S3, which the
+    // recorded request proves.
+    expect(ranged.statusCode).toBe(200);
+    const get = stub.requests.find(
+      (request) => request.method === 'GET' && request.path.endsWith('encoded.txt.gz'),
+    );
+    expect(get?.headers['range']).toBe('bytes=0-3');
+  });
+
+  it('maps a missing object on the SDK download to NoSuchKey', async () => {
     const response = await app.inject({
       method: 'GET',
       url: `/api/services/s3/objects/download?bucket=${BUCKET}&key=missing.txt`,
@@ -296,7 +316,7 @@ describe('S3 object proxy routes', () => {
     const body = response.json<ApiErrorResponse>();
     expect(body.error.code).toBe('NoSuchKey');
     expect(body.error.service).toBe('s3');
-    expect(body.error.details?.['mode']).toBe('presigned-proxy');
+    expect(body.error.details?.['upstreamStatusCode']).toBe(404);
   });
 
   it('rejects an upload without a file part', async () => {
@@ -383,5 +403,67 @@ describe('rejected multipart parts', () => {
       /Expected the file part to be named "file"/,
     );
     expect(resume).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('upload truncation guard', () => {
+  it('fails when the multipart part was truncated at the size limit', async () => {
+    const source = Readable.from([Buffer.from('partial')]) as Readable & { truncated?: boolean };
+    source.truncated = true;
+
+    const outcome = await new Promise<Error | undefined>((resolve) => {
+      const guarded = source.pipe(truncationGuard(source));
+      guarded.on('data', () => undefined);
+      guarded.on('end', () => {
+        resolve(undefined);
+      });
+      guarded.on('error', (error: Error) => {
+        resolve(error);
+      });
+    });
+
+    expect(outcome?.name).toBe('UploadTruncatedError');
+  });
+
+  it('passes a complete stream through untouched', async () => {
+    const source = Readable.from([Buffer.from('complete')]) as Readable & { truncated?: boolean };
+
+    const chunks = await new Promise<Buffer[]>((resolve, reject) => {
+      const collected: Buffer[] = [];
+      const guarded = source.pipe(truncationGuard(source));
+      guarded.on('data', (chunk: Buffer) => collected.push(chunk));
+      guarded.on('end', () => {
+        resolve(collected);
+      });
+      guarded.on('error', reject);
+    });
+
+    expect(Buffer.concat(chunks).toString()).toBe('complete');
+  });
+});
+
+describe('object key hardening', () => {
+  it('rejects keys with dot segments the URL normalization could rewrite', async () => {
+    const isolated = await buildApp({
+      config: loadConfig({
+        ...process.env,
+        NODE_ENV: 'test',
+        EMULATOR_ENDPOINT: 'http://127.0.0.1:1',
+        AWS_REGION: 'us-east-1',
+      }),
+      logger: false,
+    });
+    await isolated.ready();
+    try {
+      const response = await isolated.inject({
+        method: 'GET',
+        url: `/api/services/s3/objects/download?bucket=${BUCKET}&key=${encodeURIComponent('../other/secret')}`,
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json<ApiErrorResponse>().error.message).toContain('path segments');
+    } finally {
+      await isolated.close();
+    }
   });
 });

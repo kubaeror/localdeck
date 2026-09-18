@@ -1,4 +1,4 @@
-import type { LocalStackServiceStatus } from '@localdeck/shared';
+import type { EmulatorServiceState } from '@localdeck/shared';
 
 /**
  * Formatters are hoisted: `Intl.DateTimeFormat` construction is expensive and
@@ -100,6 +100,7 @@ export function formatServiceName(serviceId: string): string {
  * terminated, the EBS volume states, degraded / failed).
  */
 export type ResourceStatus =
+  | 'available'
   | 'running'
   | 'pending'
   | 'stopped'
@@ -118,16 +119,18 @@ export type ResourceStatus =
   | 'failed'
   | 'unknown';
 
-export type StatusName = LocalStackServiceStatus | ResourceStatus;
+export type StatusName = EmulatorServiceState | ResourceStatus;
 
-/** LocalStack service statuses are a subset of the console's status vocabulary. */
-export function describeServiceStatus(status: LocalStackServiceStatus): string {
+/** Emulator service states share the console's status vocabulary. */
+export function describeServiceStatus(status: EmulatorServiceState): string {
   return describeStatus(status);
 }
 
 /** Any status the console can render, in console wording. */
 export function describeStatus(status: StatusName): string {
   switch (status) {
+    case 'enabled':
+      return 'Enabled';
     case 'pending':
       return 'Pending';
     case 'stopped':

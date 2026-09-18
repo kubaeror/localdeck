@@ -80,7 +80,14 @@ export function UploadModal({
   };
 
   const dismiss = (): void => {
-    if (uploading) return;
+    const controller = abortRef.current;
+    abortRef.current = null;
+    if (controller !== null) {
+      // Cancel the in-flight request; the batch loop records that file and
+      // every queued file as cancelled (never as failures) before it stops.
+      controller.abort();
+      setUploading(false);
+    }
     reset();
     onDismiss();
   };
@@ -131,6 +138,12 @@ export function UploadModal({
       setProgress({ done: results.length, total: files.length });
     }
 
+    if (abortRef.current !== controller) {
+      // The dialog was cancelled while this batch was in flight: dismiss()
+      // aborted the request and reset the dialog, so this terminal state
+      // (including the remaining files marked cancelled above) is stale.
+      return;
+    }
     setUploading(false);
     setOutcomes(results);
     abortRef.current = null;
@@ -167,7 +180,7 @@ export function UploadModal({
       footer={
         <Box float="right">
           <SpaceBetween direction="horizontal" size="xs">
-            <Button variant="link" disabled={uploading} onClick={dismiss}>
+            <Button variant="link" onClick={dismiss}>
               Cancel
             </Button>
             <Button

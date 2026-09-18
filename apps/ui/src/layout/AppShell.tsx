@@ -16,8 +16,7 @@ import {
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { FLASHBAR_I18N } from '../contexts/flashbar-context';
 import { useFlashbar } from '../hooks/useFlashbar';
-import { useLocalStackStatus } from '../hooks/useLocalStackStatus';
-import { useRecentlyVisited } from '../hooks/useRecentlyVisited';
+import { useEmulatorStatus } from '../hooks/useEmulatorStatus';
 import { useServiceCatalog } from '../hooks/useServiceCatalog';
 import { AppFooter } from './AppFooter';
 import { ConsoleHelpModal } from './ConsoleHelpModal';
@@ -49,26 +48,36 @@ export function AppShell(): ReactElement {
 
   const location = useLocation();
   const navigate = useNavigate();
-  const status = useLocalStackStatus();
+  const status = useEmulatorStatus();
   const catalog = useServiceCatalog();
   const flashbar = useFlashbar();
-  const recentlyVisited = useRecentlyVisited();
 
-  const serviceStatuses = useMemo(() => status.health?.localstack.services ?? {}, [status.health]);
-  const recentlyVisitedIds = useMemo(
-    () => recentlyVisited.visited.map((entry) => entry.id),
-    [recentlyVisited.visited],
-  );
+  const serviceStatuses = useMemo(() => status.health?.emulator.services ?? {}, [status.health]);
+  const provider = status.health?.provider.provider ?? 'generic';
+  const providerLabel =
+    status.health?.provider.providerLabel ??
+    status.config?.emulator.providerLabel ??
+    'the emulator';
+  const hasServiceInventory = status.health?.emulator.hasServiceInventory ?? false;
 
   const navigation = useMemo(
     () =>
       buildNavigation({
         services: catalog.services,
         serviceStatuses,
+        provider,
+        providerLabel,
+        hasServiceInventory,
         filter: deferredFilter,
-        recentlyVisited: recentlyVisitedIds,
       }),
-    [catalog.services, deferredFilter, recentlyVisitedIds, serviceStatuses],
+    [
+      catalog.services,
+      deferredFilter,
+      hasServiceInventory,
+      provider,
+      providerLabel,
+      serviceStatuses,
+    ],
   );
 
   const openHelp = useCallback(() => {
@@ -126,8 +135,8 @@ export function AppShell(): ReactElement {
                   </Box>
                 ) : (
                   <Box variant="small" color="text-body-secondary" padding={{ horizontal: 's' }}>
-                    {navigation.emulatedCount} of {navigation.serviceCount} services emulated
-                    locally
+                    {navigation.emulatedCount} of {navigation.serviceCount} services reported by{' '}
+                    {providerLabel}
                   </Box>
                 )}
               </SpaceBetween>

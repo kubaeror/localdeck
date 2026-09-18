@@ -154,6 +154,48 @@ function defaultSortingValue(item: unknown, field: string): string | number | un
 }
 
 /**
+ * Appends one page of rows, skipping ids that are already loaded. A service
+ * that ignores the continuation token and returns the same page again must not
+ * grow the table with duplicates.
+ */
+function appendUniqueRows<T>(
+  previous: readonly T[],
+  incoming: readonly T[],
+  getRowId: (item: T) => string,
+): readonly T[] {
+  const seen = new Set(previous.map(getRowId));
+  const merged = [...previous];
+  for (const item of incoming) {
+    const id = getRowId(item);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    merged.push(item);
+  }
+  return merged;
+}
+
+/**
+ * Maps the selection onto the rows that were just loaded, by id: a refresh can
+ * return new object identities for the same resources (so bulk actions work on
+ * fresh data) and rows that disappeared are dropped from the selection.
+ */
+function reconcileSelection<T>(
+  selection: readonly T[],
+  items: readonly T[],
+  getRowId: (item: T) => string,
+): readonly T[] {
+  if (selection.length === 0) return selection;
+  const byId = new Map(items.map((item) => [getRowId(item), item]));
+  const next = selection.flatMap((selected) => {
+    const fresh = byId.get(getRowId(selected));
+    return fresh === undefined ? [] : [fresh];
+  });
+  const unchanged =
+    next.length === selection.length && next.every((item, index) => item === selection[index]);
+  return unchanged ? selection : next;
+}
+
+/**
  * The console's list page: breadcrumbs, header, controlled filter, selection
  * with bulk actions, per-row actions, client-side sorting/pagination, "load
  * more" for services that return continuation tokens, and a shared empty
@@ -199,12 +241,23 @@ export function ResourceListPage<T>({
       preferencesId === undefined ? {} : readListPreferences(preferencesId),
     );
   const inFlight = useRef<AbortController | null>(null);
+  // The rows currently on screen, readable from a fetch continuation without
+  // making the load callback depend on the items state.
+  const itemsRef = useRef<readonly T[]>([]);
+  // Monotonic request id: only the newest load may write results or settle the
+  // "Load more" spinner. Without it an aborted append never clears it.
+  const loadGeneration = useRef(0);
 
-  // Held in a ref so an inline fetcher does not restart the initial load.
+  // Held in refs so an inline fetcher/getRowId does not restart the initial
+  // load or invalidate the load callback.
   const fetcherRef = useRef(fetcher);
   useEffect(() => {
     fetcherRef.current = fetcher;
   }, [fetcher]);
+  const getRowIdRef = useRef(getRowId);
+  useEffect(() => {
+    getRowIdRef.current = getRowId;
+  }, [getRowId]);
 
   const load = useCallback(
     async (
@@ -213,30 +266,45 @@ export function ResourceListPage<T>({
       inFlight.current?.abort();
       const controller = new AbortController();
       inFlight.current = controller;
+      const generation = loadGeneration.current + 1;
+      loadGeneration.current = generation;
+      const append = options.append === true;
       const silent = options.silent === true;
-      if (options.append === true) setLoadingMore(true);
-      else if (!silent) setPhase('loading');
+      // Starting a newer request always resets the append spinner: an aborted
+      // append's `finally` no longer runs (it is not the newest request), so
+      // this is what guarantees the spinner settles.
+      setLoadingMore(append);
+      if (!append && !silent) setPhase('loading');
 
       try {
         const page = await fetcherRef.current({
           ...(options.nextToken === undefined ? {} : { nextToken: options.nextToken }),
           signal: controller.signal,
         });
-        if (controller.signal.aborted) return;
-        setItems((previous) =>
-          options.append === true ? [...previous, ...page.items] : page.items,
+        if (controller.signal.aborted || generation !== loadGeneration.current) return;
+        const nextItems = append
+          ? appendUniqueRows(itemsRef.current, page.items, getRowIdRef.current)
+          : page.items;
+        itemsRef.current = nextItems;
+        setItems(nextItems);
+        setSelectedItems((previous) =>
+          reconcileSelection(previous, nextItems, getRowIdRef.current),
         );
         setNextToken(page.nextToken);
         setError(null);
         setPhase('ready');
       } catch (caught) {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || generation !== loadGeneration.current) return;
         setError(toApiError(caught));
         // A silent refresh must not tear down rows the user is working with:
         // the error alert appears above the table, the phase stays as it was.
         if (!silent) setPhase('error');
       } finally {
-        if (!controller.signal.aborted) setLoadingMore(false);
+        // Only the newest, non-aborted request owns the spinner. When this
+        // append was superseded, the replacing load already stopped it.
+        if (!controller.signal.aborted && generation === loadGeneration.current) {
+          setLoadingMore(false);
+        }
       }
     },
     [],
@@ -532,14 +600,31 @@ export function ResourceListPage<T>({
             </SpaceBetween>
           }
           empty={
-            <EmptyState
-              title={emptyTitle ?? `No ${title.toLowerCase()} yet`}
-              description={
-                emptyDescription ??
-                'Nothing was returned for this service. Create a resource to see it here.'
-              }
-              action={headerActions}
-            />
+            items.length > 0 && sorted.length === 0 ? (
+              <EmptyState
+                title={`No matches for “${deferredFilterText.trim()}”`}
+                description="No resources match the current filter. Clear the filter to see every resource again."
+                action={
+                  <Button
+                    onClick={() => {
+                      filtering?.onChange('');
+                      setCurrentPageIndex(1);
+                    }}
+                  >
+                    Clear filter
+                  </Button>
+                }
+              />
+            ) : (
+              <EmptyState
+                title={emptyTitle ?? `No ${title.toLowerCase()} yet`}
+                description={
+                  emptyDescription ??
+                  'Nothing was returned for this service. Create a resource to see it here.'
+                }
+                action={headerActions}
+              />
+            )
           }
         />
       </SpaceBetween>

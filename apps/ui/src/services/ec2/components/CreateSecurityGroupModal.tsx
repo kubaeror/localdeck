@@ -10,7 +10,7 @@ import Select from '@cloudscape-design/components/select';
 import type { SelectProps } from '@cloudscape-design/components/select';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import { useEffect, useMemo, useState, type ReactElement } from 'react';
-import { TagsEditor } from '../../../components/TagsEditor';
+import { TagsEditor, validateTags } from '../../../components/TagsEditor';
 import { createSecurityGroup, listVpcs, type Ec2SecurityGroup, type Ec2Vpc } from '../api';
 import { toFriendlyEc2Error } from '../errors';
 import {
@@ -80,6 +80,9 @@ export function CreateSecurityGroupModal({
 
   const selectedVpc = vpcOptions.find((option) => option.value === selectedVpcId) ?? null;
 
+  const tagsProblem = validateTags(tags);
+  const tagsInvalid = tagsProblem.length > 0;
+
   const submit = async (): Promise<void> => {
     if (submitting) return;
     const nameProblem = validateSecurityGroupName(name);
@@ -87,6 +90,7 @@ export function CreateSecurityGroupModal({
     setNameError(nameProblem);
     setDescriptionError(descriptionProblem);
     if (nameProblem !== null || descriptionProblem !== null) return;
+    if (tagsInvalid) return;
     if (selectedVpcId === null) {
       setError('Choose a VPC for the security group.');
       return;
@@ -127,7 +131,7 @@ export function CreateSecurityGroupModal({
             <Button
               variant="primary"
               loading={submitting}
-              disabled={loading}
+              disabled={loading || tagsInvalid}
               onClick={() => {
                 void submit();
               }}

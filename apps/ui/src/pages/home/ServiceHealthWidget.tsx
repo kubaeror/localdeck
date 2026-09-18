@@ -11,28 +11,32 @@ import { useMemo, type ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ConnectionStatusIndicator } from '../../components/ConnectionStatusIndicator';
 import { RegistryCoverage } from '../../components/RegistryCoverage';
-import { useLocalStackStatus } from '../../hooks/useLocalStackStatus';
+import { useEmulatorStatus } from '../../hooks/useEmulatorStatus';
 import { useServiceCatalog } from '../../hooks/useServiceCatalog';
 import {
   LOCALDECK_API_ERROR_TITLE,
-  LOCALSTACK_UNREACHABLE_TITLE,
   STATUS_UNAVAILABLE_COPY,
+  UNKNOWN_PROVIDER_LABEL,
+  unreachableTitle,
 } from '../../lib/copy';
 import { formatAvailability, formatLatency, formatRelativeTime } from '../../lib/format';
 import { ALL_SERVICES_PATH, SERVICE_HEALTH_PATH } from '../../services/paths';
 import { BOARD_ITEM_I18N_STRINGS, type ConsoleWidgetProps } from './types';
 import { WidgetSettingsMenu } from './WidgetSettingsMenu';
 
-/** Console Home widget: the live stack status straight from /api/health. */
+/** Console Home widget: the live emulator status straight from /api/health. */
 export function ServiceHealthWidget({ onRemove }: ConsoleWidgetProps): ReactElement {
   const navigate = useNavigate();
-  const status = useLocalStackStatus();
+  const status = useEmulatorStatus();
   const catalog = useServiceCatalog();
   const { config, health } = status;
-  const counts = health?.localstack.counts;
+  const counts = health?.emulator.counts;
+  const provider = health?.provider.provider ?? 'generic';
+  const providerLabel =
+    health?.provider.providerLabel ?? config?.emulator.providerLabel ?? UNKNOWN_PROVIDER_LABEL;
   const coverage = useMemo(
-    () => summarizeRegistryCoverage(health?.localstack.services ?? {}, catalog.services),
-    [health, catalog.services],
+    () => summarizeRegistryCoverage(health?.emulator.services ?? {}, catalog.services, provider),
+    [health, catalog.services, provider],
   );
 
   return (
@@ -40,12 +44,12 @@ export function ServiceHealthWidget({ onRemove }: ConsoleWidgetProps): ReactElem
       header={
         <Header
           variant="h2"
-          description="Live from the LocalStack health endpoint."
+          description={`Live from ${providerLabel}'s health endpoint.`}
           actions={
             <SpaceBetween direction="horizontal" size="xs">
               <Button
                 iconName="refresh"
-                ariaLabel="Refresh LocalStack status"
+                ariaLabel={`Refresh ${providerLabel} status`}
                 loading={status.phase === 'loading'}
                 onClick={() => {
                   status.refresh();
@@ -68,7 +72,7 @@ export function ServiceHealthWidget({ onRemove }: ConsoleWidgetProps): ReactElem
             type="error"
             header={
               status.phase === 'unreachable'
-                ? LOCALSTACK_UNREACHABLE_TITLE
+                ? unreachableTitle(providerLabel)
                 : LOCALDECK_API_ERROR_TITLE
             }
             action={
@@ -90,31 +94,39 @@ export function ServiceHealthWidget({ onRemove }: ConsoleWidgetProps): ReactElem
           items={[
             { label: 'Connection', value: <ConnectionStatusIndicator phase={status.phase} /> },
             {
-              label: 'Endpoint',
-              value: <Box variant="code">{config?.localstack.endpoint ?? 'loading…'}</Box>,
-            },
-            {
-              label: 'Region',
-              value: <Box variant="code">{config?.localstack.region ?? 'loading…'}</Box>,
-            },
-            {
-              label: 'Stack',
+              label: 'Provider',
               value: health ? (
                 <Box>
-                  {health.localstack.version ?? 'unknown'} ({health.localstack.edition ?? 'unknown'}
-                  )
+                  {providerLabel}
+                  {health.provider.edition !== null ? ` (${health.provider.edition})` : ''}
                 </Box>
               ) : (
                 <Box color="text-status-inactive">unknown</Box>
               ),
             },
             {
-              label: 'Emulated services',
+              label: 'Endpoint',
+              value: <Box variant="code">{config?.emulator.endpoint ?? 'loading…'}</Box>,
+            },
+            {
+              label: 'Region',
+              value: <Box variant="code">{config?.emulator.region ?? 'loading…'}</Box>,
+            },
+            {
+              label: 'Version',
+              value: health ? (
+                <Box>{health.provider.version ?? 'unknown'}</Box>
+              ) : (
+                <Box color="text-status-inactive">unknown</Box>
+              ),
+            },
+            {
+              label: 'Enabled services',
               value:
                 counts === undefined ? (
                   <Box color="text-status-inactive">unknown</Box>
                 ) : (
-                  <Box>{formatAvailability(counts.available, counts.total)}</Box>
+                  <Box>{formatAvailability(counts.enabled, counts.total)}</Box>
                 ),
             },
             {
@@ -123,7 +135,12 @@ export function ServiceHealthWidget({ onRemove }: ConsoleWidgetProps): ReactElem
                 health === null ? (
                   <Box color="text-status-inactive">unknown</Box>
                 ) : (
-                  <RegistryCoverage coverage={coverage} source={catalog.source} variant="summary" />
+                  <RegistryCoverage
+                    coverage={coverage}
+                    source={catalog.source}
+                    providerLabel={providerLabel}
+                    variant="summary"
+                  />
                 ),
             },
             {
@@ -157,7 +174,7 @@ export function ServiceHealthWidget({ onRemove }: ConsoleWidgetProps): ReactElem
             navigate(ALL_SERVICES_PATH);
           }}
         >
-          Compare the registry with this stack
+          Compare the registry with this emulator
         </Link>
       </SpaceBetween>
     </BoardItem>

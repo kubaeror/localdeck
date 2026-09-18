@@ -73,8 +73,15 @@ export function PolicyCreatePage({ descriptor }: ServicePageProps): ReactElement
       flashbar.notify({ type: 'success', header: 'Policy created', content: policyName });
       setSubmitting(false);
       setConfirmFullAdmin(false);
-      navigate(`${serviceConsolePath(descriptor.id)}/policies/${encodeURIComponent(policy.arn)}`);
+      navigate(
+        policy.arn === undefined
+          ? `${serviceConsolePath(descriptor.id)}/policies`
+          : `${serviceConsolePath(descriptor.id)}/policies/${encodeURIComponent(policy.arn)}`,
+      );
     } catch (caught) {
+      // Close the full-admin confirmation so the wizard alert is visible and
+      // the user cannot submit a second create from the stale modal.
+      setConfirmFullAdmin(false);
       const friendly = toFriendlyIamError(caught, 'policyName');
       if (friendly.field === 'policyName') {
         setNameError(friendly.message);

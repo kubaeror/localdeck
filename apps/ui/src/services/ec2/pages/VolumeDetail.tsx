@@ -55,7 +55,9 @@ export function VolumeDetailPage({ descriptor }: ServicePageProps): ReactElement
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const transitional = volume !== null && isTransitionalVolumeState(volume.state);
-  usePolling(transitional, POLL_INTERVAL_MS, () => reload());
+  // Silent: a dropped poll keeps the last known state, so the page keeps
+  // polling until the transition settles.
+  usePolling(transitional, POLL_INTERVAL_MS, () => reload({ silent: true }));
 
   const attached = volume !== null && isVolumeAttached(volume);
 

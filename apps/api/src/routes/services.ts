@@ -5,11 +5,12 @@ import {
   type ServiceRegistryResponse,
 } from '@localdeck/shared';
 import type { FastifyInstance } from 'fastify';
+import { getConfig } from '../config.js';
 import {
   getService,
   getServiceOperations,
   getServiceRegistry,
-  localStackKeysOf,
+  healthKeysOf,
 } from '../registry/services.js';
 
 /**
@@ -18,7 +19,7 @@ import {
  * whitelist, parity level, runtime availability); `GET /api/services/:serviceId`
  * resolves one entry; `GET /api/services/:serviceId/operations` returns the
  * dispatcher whitelist plus the generic-browser binding. None of these routes
- * touch LocalStack, so they answer even when the emulator is down.
+ * touch the emulator, so they answer even when it is down.
  */
 
 /** Shared param shape for every `:serviceId` route. */
@@ -53,9 +54,10 @@ export function registerServiceRoutes(app: FastifyInstance): void {
     { schema: { params: SERVICE_ID_PARAMS_SCHEMA } },
     async (request): Promise<ServiceDetailResponse> => {
       const { serviceId } = request.params;
+      const provider = getConfig().emulatorProvider;
       return {
         service: getService(serviceId),
-        localStackKeys: localStackKeysOf(serviceId),
+        healthKeys: healthKeysOf(serviceId, provider),
       };
     },
   );

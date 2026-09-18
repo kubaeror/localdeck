@@ -135,7 +135,7 @@ liveDescribe('S3 module against the live api and LocalStack', () => {
     // 5. Download through the presigned-URL proxy.
     const download = await fetch(downloadObjectUrl({ bucket: bucketName, key: reportKey }));
     expect(download.status).toBe(200);
-    expect(download.headers.get('x-localdeck-download-mode')).toBe('presigned-proxy');
+    expect(download.headers.get('x-localdeck-download-mode')).toBe('sdk-stream');
     expect(await download.text()).toBe(reportBody);
 
     // 6. Permissions: the policy editor's structure validation rejects an

@@ -2,24 +2,25 @@ import { expect, test } from '@playwright/test';
 import { fetchHealth } from './helpers';
 
 /**
- * Stack-level smoke checks: the api reports the CI LocalStack as reachable and
+ * Stack-level smoke checks: the api reports the CI emulator as reachable and
  * the ui serves and renders the console. Everything else in this suite builds
  * on these two assumptions, so a failure here is the first thing to fix.
  */
 test.describe('stack smoke', () => {
-  test('GET /api/health answers 200 against the running LocalStack', async ({ request }) => {
+  test('GET /api/health answers 200 against the running emulator', async ({ request }) => {
     const response = await request.get('/api/health');
     expect(response.status()).toBe(200);
 
     const health = await fetchHealth(request);
     expect(['ok', 'degraded']).toContain(health.status);
     expect(health.endpoint.length).toBeGreaterThan(0);
-    expect(health.localstack.counts.available ?? 0).toBeGreaterThan(0);
+    expect(health.provider.providerLabel.length).toBeGreaterThan(0);
+    expect(health.emulator.counts.enabled ?? 0).toBeGreaterThan(0);
 
     // The storage flow the suite exercises needs S3; everything else is
-    // reported per environment (EKS is Ultimate-plan only).
-    expect(health.localstack.services['s3']).toBeDefined();
-    expect(health.localstack.services['s3']).not.toBe('error');
+    // reported per environment (EKS is entitlement-gated on some emulators).
+    expect(health.emulator.services['s3']).toBeDefined();
+    expect(health.emulator.services['s3']).not.toBe('error');
   });
 
   test('the ui serves the console index and renders the shell', async ({ page, request }) => {
@@ -34,11 +35,11 @@ test.describe('stack smoke', () => {
     await expect(page.getByRole('link', { name: 'LocalDeck' })).toBeVisible();
   });
 
-  test('the console home shows the live LocalStack endpoint', async ({ page }) => {
+  test('the console home shows the live emulator endpoint', async ({ page }) => {
     await page.goto('/console/home');
     // The Service health widget renders the endpoint the api is bound to and
-    // the number of services LocalStack reports.
-    await expect(page.getByText('Emulated services')).toBeVisible();
+    // the number of services the emulator reports.
+    await expect(page.getByText('Enabled services')).toBeVisible();
     await expect(page.getByText('Registry coverage')).toBeVisible();
   });
 });

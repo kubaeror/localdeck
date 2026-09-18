@@ -139,7 +139,7 @@ export function CreateNodegroupModal({
 
   const nameProblem = name.length > 0 ? validateNodegroupName(name) : null;
   const roleProblem = roleArn.length > 0 ? validateRoleArn(roleArn) : null;
-  const scalingProblem = validateScaling(scaling);
+  const scalingProblem = validateScaling(scaling, { requireDesired: true });
   const diskSizeGiB = parsePositiveInteger(diskSize);
   const diskProblem =
     diskSizeGiB !== undefined && Number.isNaN(diskSizeGiB)
@@ -170,6 +170,9 @@ export function CreateNodegroupModal({
   );
 
   const submit = async (): Promise<void> => {
+    // EKS has no idempotency token: a second CreateNodegroup would make a
+    // second node group, so an in-flight submit must never run twice.
+    if (submitting) return;
     setSubmitting(true);
     setError(null);
     try {
@@ -213,7 +216,7 @@ export function CreateNodegroupModal({
             <Button
               variant="primary"
               loading={submitting}
-              disabled={!canSubmit}
+              disabled={!canSubmit || submitting}
               onClick={() => {
                 void submit();
               }}

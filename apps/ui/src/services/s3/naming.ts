@@ -8,6 +8,8 @@
  * the reserved prefixes/suffixes).
  */
 
+import { isS3KeyWithinLimit, S3_KEY_MAX_BYTES, utf8ByteLength } from '@localdeck/shared';
+
 const MIN_LENGTH = 3;
 const MAX_LENGTH = 63;
 
@@ -99,10 +101,19 @@ export function needsLocationConstraint(region: string): boolean {
   return region !== '' && region !== 'us-east-1';
 }
 
-/** S3 object keys may be at most 1024 UTF-8 bytes. */
+/**
+ * S3 object keys may be at most 1024 UTF-8 bytes (not UTF-16 code units), and
+ * those bytes must not include `.` or `..` path segments: the api refuses them
+ * because URL normalization would silently address a different object.
+ */
 export function validateObjectKey(key: string): string | null {
   if (key.trim().length === 0) return 'Enter an object key.';
-  if (key.length > 1024) return 'Object keys can be at most 1024 characters long.';
+  if (!isS3KeyWithinLimit(key)) {
+    return `Object keys can be at most ${S3_KEY_MAX_BYTES} UTF-8 bytes long; this key uses ${utf8ByteLength(key)} bytes.`;
+  }
+  if (key.split('/').some((segment) => segment === '.' || segment === '..')) {
+    return 'Object keys must not contain "." or ".." path segments.';
+  }
   return null;
 }
 

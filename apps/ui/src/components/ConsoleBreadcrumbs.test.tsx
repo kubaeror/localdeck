@@ -28,14 +28,31 @@ describe('ConsoleBreadcrumbs', () => {
     expect(s3.getAttribute('href')).toBe('/console/s3');
   });
 
-  it('does not turn an intermediate crumb without href into a self-link', () => {
+  it('omits an intermediate crumb without href instead of rendering a dead "#" link', () => {
     renderTrail([{ text: 'S3', href: '/console/s3' }, { text: 'Buckets' }, { text: 'my-bucket' }]);
 
-    const bucketsLinks = screen.getAllByRole('link', { name: 'Buckets' });
-    expect(bucketsLinks.length).toBeGreaterThan(0);
-    for (const link of bucketsLinks) {
-      expect(link.getAttribute('href')).not.toBe('/console/s3/buckets/my-bucket');
-    }
+    // Cloudscape's BreadcrumbGroup renders every item except the last as an
+    // anchor (`href || '#'`), so an href-less intermediate step cannot be a
+    // plain text item: it is dropped from the trail instead.
+    expect(screen.queryByRole('link', { name: 'Buckets' })).toBeNull();
+    expect(document.querySelector('a[href="#"]')).toBeNull();
+
+    // Linked steps keep their target; the current page is still text.
+    expect(screen.getByRole('link', { name: 'S3' }).getAttribute('href')).toBe('/console/s3');
+    const current = screen.getByRole('link', { name: 'my-bucket' });
+    expect(current.tagName).toBe('SPAN');
+    expect(current.getAttribute('aria-current')).toBe('page');
+  });
+
+  it('keeps an intermediate crumb that has an href as a real link', () => {
+    renderTrail([
+      { text: 'S3', href: '/console/s3' },
+      { text: 'Buckets', href: '/console/s3/buckets' },
+      { text: 'my-bucket' },
+    ]);
+
+    const buckets = document.querySelector('a[href="/console/s3/buckets"]');
+    expect(buckets?.textContent).toBe('Buckets');
   });
 
   it('always links back to Console Home', () => {

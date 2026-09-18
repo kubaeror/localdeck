@@ -34,9 +34,15 @@ function isStringOrStringArray(value: unknown): boolean {
   return false;
 }
 
+/**
+ * IAM allows `Principal` to be `"*"`, an array, or a map such as
+ * `{"AWS": "*"}` / `{"AWS": ["*"]}` (a wildcard deep inside the map still
+ * grants everyone), so every nested value is checked.
+ */
 function principalIsPublic(value: unknown): boolean {
   if (value === '*') return true;
-  if (Array.isArray(value)) return value.includes('*');
+  if (Array.isArray(value)) return value.some((entry) => principalIsPublic(entry));
+  if (isRecord(value)) return Object.values(value).some((entry) => principalIsPublic(entry));
   return false;
 }
 
@@ -153,20 +159,26 @@ export function validateBucketPolicy(text: string): BucketPolicyValidation {
   };
 }
 
-/** The example the empty policy editor starts from, matching the console. */
-export const EXAMPLE_BUCKET_POLICY = JSON.stringify(
-  {
-    Version: '2012-10-17',
-    Statement: [
-      {
-        Sid: 'PublicReadGetObject',
-        Effect: 'Allow',
-        Principal: '*',
-        Action: ['s3:GetObject'],
-        Resource: ['arn:aws:s3:::my-bucket/*'],
-      },
-    ],
-  },
-  null,
-  2,
-);
+/**
+ * The example the empty policy editor starts from, matching the console but
+ * scoped to the bucket that is actually open so it never points at a bucket
+ * the user does not have (or at the doc placeholder `my-bucket`).
+ */
+export function buildExampleBucketPolicy(bucket: string): string {
+  return JSON.stringify(
+    {
+      Version: '2012-10-17',
+      Statement: [
+        {
+          Sid: 'PublicReadGetObject',
+          Effect: 'Allow',
+          Principal: '*',
+          Action: ['s3:GetObject'],
+          Resource: [`arn:aws:s3:::${bucket}/*`],
+        },
+      ],
+    },
+    null,
+    2,
+  );
+}

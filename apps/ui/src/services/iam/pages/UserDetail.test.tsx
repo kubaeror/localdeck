@@ -14,6 +14,7 @@ const IAM = ((): ServiceDescriptor => {
 })();
 
 const USER_ARN = 'arn:aws:iam::000000000000:user/alice';
+const BOUNDARY_ARN = 'arn:aws:iam::000000000000:policy/boundary';
 
 function renderDetail(): void {
   render(
@@ -42,6 +43,10 @@ describe('IAM UserDetailPage', () => {
               UserName: 'alice',
               Arn: USER_ARN,
               CreateDate: '2026-01-02T03:04:05.000Z',
+              PermissionsBoundary: {
+                PermissionsBoundaryType: 'Policy',
+                PermissionsBoundaryArn: BOUNDARY_ARN,
+              },
               Tags: [{ Key: 'team', Value: 'core' }],
             },
           },
@@ -97,6 +102,9 @@ describe('IAM UserDetailPage', () => {
     const policiesTable = await screen.findByRole('table', { name: 'Attached policies' });
     expect(within(policiesTable).getByRole('link', { name: 'ReadOnlyAccess' })).toBeDefined();
     expect(within(policiesTable).getByText('AWS managed')).toBeDefined();
+    // GetUser reports the permissions boundary; the notice renders it read-only.
+    expect(screen.getByText(BOUNDARY_ARN)).toBeDefined();
+    expect(screen.getByText('Customer managed')).toBeDefined();
 
     // Groups tab.
     fireEvent.click(screen.getByRole('tab', { name: 'Groups' }));

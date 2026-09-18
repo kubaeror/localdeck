@@ -21,7 +21,7 @@ import { listAllInstances, type Ec2Instance } from '../../ec2/api';
 import { serviceConsolePath } from '../../paths';
 import {
   deleteNodegroup,
-  instanceBelongsToNodegroup,
+  filterNodegroupInstances,
   isNodegroupTransitional,
   nodegroupStatusName,
   listNodegroups,
@@ -46,6 +46,19 @@ const FARGATE_REASON =
   'Fargate profiles are not whitelisted in LocalDeck yet (CreateFargateProfile is not verified against LocalStack).';
 const ADDON_REASON =
   'EKS add-ons are not whitelisted in LocalDeck yet (CreateAddon is not verified against LocalStack).';
+
+/**
+ * EKS only accepts DeleteNodegroup while the node group is settled. Deleting a
+ * CREATING/UPDATING group is rejected upstream, so the action is disabled with
+ * the allowed states instead of failing after the click.
+ */
+const DELETE_REASON =
+  'EKS only deletes a node group whose status is ACTIVE, CREATE_FAILED or DEGRADED. Wait for the current operation to finish.';
+
+/** The statuses EKS accepts DeleteNodegroup for. */
+function canDeleteNodegroup(status: string): boolean {
+  return status === 'ACTIVE' || status === 'CREATE_FAILED' || status === 'DEGRADED';
+}
 
 export interface NodegroupsTabProps {
   cluster: EksCluster;
@@ -86,6 +99,7 @@ export function NodegroupsTab({ cluster }: NodegroupsTabProps): ReactElement {
 
   const [nodegroups, setNodegroups] = useState<readonly EksNodegroup[]>([]);
   const [instances, setInstances] = useState<readonly Ec2Instance[]>([]);
+  const [instancesError, setInstancesError] = useState<ApiError | null>(null);
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading');
   const [error, setError] = useState<ApiError | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
@@ -115,9 +129,11 @@ export function NodegroupsTab({ cluster }: NodegroupsTabProps): ReactElement {
       const result = await listAllInstances();
       if (instancesInFlight.current !== request) return;
       setInstances(result);
-    } catch {
+      setInstancesError(null);
+    } catch (caught) {
       if (instancesInFlight.current !== request) return;
       setInstances([]);
+      setInstancesError(toApiError(caught));
     }
   }, []);
 
@@ -226,8 +242,8 @@ export function NodegroupsTab({ cluster }: NodegroupsTabProps): ReactElement {
 
   const instancesFor = useCallback(
     (nodegroup: EksNodegroup): readonly Ec2Instance[] =>
-      instances.filter((instance) => instanceBelongsToNodegroup(instance, nodegroup.nodegroupName)),
-    [instances],
+      filterNodegroupInstances(instances, cluster.name, nodegroup.nodegroupName),
+    [cluster.name, instances],
   );
 
   const openInstance = useCallback(
@@ -323,6 +339,9 @@ export function NodegroupsTab({ cluster }: NodegroupsTabProps): ReactElement {
         id: 'ec2',
         header: 'Emulated EC2 instances',
         cell: (nodegroup) => {
+          if (instancesError !== null) {
+            return <Box color="text-status-warning">Lookup failed</Box>;
+          }
           const matches = instancesFor(nodegroup);
           if (matches.length === 0) {
             return (
@@ -374,7 +393,8 @@ export function NodegroupsTab({ cluster }: NodegroupsTabProps): ReactElement {
               {
                 id: 'delete',
                 text: 'Delete',
-                disabled: nodegroup.status === 'DELETING',
+                disabled: !canDeleteNodegroup(nodegroup.status),
+                disabledReason: DELETE_REASON,
               },
             ]}
             onItemClick={({ detail }) => {
@@ -388,7 +408,7 @@ export function NodegroupsTab({ cluster }: NodegroupsTabProps): ReactElement {
         ),
       },
     ],
-    [instancesFor, openInstance],
+    [instancesError, instancesFor, openInstance],
   );
 
   const header = (
@@ -466,6 +486,26 @@ export function NodegroupsTab({ cluster }: NodegroupsTabProps): ReactElement {
           <Alert type="info">
             Node groups can only be created once the cluster is ACTIVE. {cluster.name} is currently{' '}
             {cluster.status}.
+          </Alert>
+        )}
+
+        {instancesError === null ? null : (
+          <Alert
+            type="warning"
+            header="Could not load the emulated EC2 instances"
+            action={
+              <Button
+                onClick={() => {
+                  void loadInstances();
+                }}
+              >
+                Retry
+              </Button>
+            }
+          >
+            The node groups loaded, but the EC2 instance lookup behind the "Emulated EC2 instances"
+            column failed: {instancesError.message} The column shows "Lookup failed" instead of
+            pretending there are no instances.
           </Alert>
         )}
 

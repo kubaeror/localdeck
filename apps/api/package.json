@@ -2,9 +2,15 @@
   "name": "@localdeck/api",
   "version": "0.1.0",
   "private": true,
-  "description": "LocalDeck backend — proxies the external LocalStack instance",
+  "description": "LocalDeck backend \u2014 proxies the external LocalStack instance",
   "type": "module",
   "main": "dist/index.js",
+  "exports": {
+    "./app": {
+      "types": "./dist/app.d.ts",
+      "import": "./dist/app.js"
+    }
+  },
   "scripts": {
     "dev": "tsx watch --clear-screen=false src/index.ts",
     "start": "node dist/index.js",
@@ -13,8 +19,9 @@
     "lint": "eslint src test scripts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "verify:localstack": "tsx scripts/verify-localstack.ts",
-    "clean": "rm -rf dist coverage .turbo"
+    "verify:localstack": "tsx scripts/verify-emulator.ts",
+    "clean": "rm -rf dist coverage .turbo",
+    "verify:emulator": "tsx scripts/verify-emulator.ts"
   },
   "dependencies": {
     "@aws-sdk/client-athena": "^3.1135.0",
@@ -45,7 +52,6 @@
     "@aws-sdk/client-ssm": "^3.1135.0",
     "@aws-sdk/client-sts": "^3.1135.0",
     "@aws-sdk/lib-storage": "^3.1135.0",
-    "@aws-sdk/s3-request-presigner": "^3.1135.0",
     "@fastify/cors": "^11.3.0",
     "@fastify/multipart": "^10.1.1",
     "@localdeck/shared": "workspace:*",

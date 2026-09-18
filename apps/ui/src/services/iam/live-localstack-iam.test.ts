@@ -157,6 +157,9 @@ liveDescribe('IAM module against the live api and LocalStack', () => {
 
     // 2. Policy: create, read, update as a new default version, attachments.
     const createdPolicy = await createPolicy({ policyName, policyDocument });
+    if (createdPolicy.arn === undefined) {
+      throw new Error('CreatePolicy did not return an ARN; the live contract changed.');
+    }
     policyArn = createdPolicy.arn;
     expect(createdPolicy.attachmentCount).toBe(0);
 

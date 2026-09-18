@@ -3,7 +3,7 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import { ConsoleErrorBoundary } from './components/ConsoleErrorBoundary';
 import { FlashbarProvider } from './contexts/FlashbarProvider';
 import { GlobalSearchProvider } from './contexts/GlobalSearchProvider';
-import { LocalStackStatusProvider } from './contexts/LocalStackStatusProvider';
+import { EmulatorStatusProvider } from './contexts/EmulatorStatusProvider';
 import { RecentlyVisitedProvider } from './contexts/RecentlyVisitedProvider';
 import { ServiceCatalogProvider } from './contexts/ServiceCatalogProvider';
 import { AppShell } from './layout/AppShell';
@@ -21,7 +21,7 @@ import { CONSOLE_HOME_PATH } from './services/paths';
 export function App(): ReactElement {
   return (
     <FlashbarProvider>
-      <LocalStackStatusProvider>
+      <EmulatorStatusProvider>
         <ServiceCatalogProvider>
           <RecentlyVisitedProvider>
             <GlobalSearchProvider>
@@ -40,7 +40,7 @@ export function App(): ReactElement {
             </GlobalSearchProvider>
           </RecentlyVisitedProvider>
         </ServiceCatalogProvider>
-      </LocalStackStatusProvider>
+      </EmulatorStatusProvider>
     </FlashbarProvider>
   );
 }

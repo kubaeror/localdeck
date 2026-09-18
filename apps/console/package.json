@@ -1,0 +1,25 @@
+{
+  "name": "@localdeck/console",
+  "version": "0.1.0",
+  "private": true,
+  "description": "LocalDeck console sidecar — the api and ui in one container for emulator-managed sidecar mode",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch --clear-screen=false src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src",
+    "clean": "rm -rf dist .turbo"
+  },
+  "dependencies": {
+    "@fastify/static": "^10.1.4",
+    "@localdeck/api": "workspace:*",
+    "@localdeck/shared": "workspace:*",
+    "fastify": "^5.12.5"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.13"
+  }
+}

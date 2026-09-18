@@ -1,10 +1,14 @@
 import { readFileSync } from 'node:fs';
-import { LOCALSTACK_HEALTH_PATH } from '@localdeck/shared';
+import {
+  EMULATOR_PROVIDER_IDS,
+  isEmulatorProviderId,
+  type EmulatorProviderId,
+} from '@localdeck/shared';
 
 /**
- * Effective LocalDeck api configuration. Everything is env-driven: LocalStack
- * is managed outside this project, so its endpoint must never be hardcoded
- * outside of these defaults.
+ * Effective LocalDeck api configuration. Everything is env-driven: the local
+ * emulator (LocalStack, MiniStack, Floci, …) is managed outside this project,
+ * so its endpoint must never be hardcoded outside of these defaults.
  */
 export interface AppConfig {
   applicationName: string;
@@ -15,33 +19,46 @@ export interface AppConfig {
   port: number;
   logLevel: string;
   logPretty: boolean;
-  /** `true` reflects the request origin, otherwise a fixed allow-list. */
-  corsOrigin: true | string[];
+  /**
+   * `false` disables cross-origin access (the bundled ui is same-origin through
+   * nginx), `true` reflects the caller's origin (CORS_ORIGIN=*) and an array is
+   * a fixed allow-list.
+   */
+  corsOrigin: false | true | string[];
   /** Normalized, no trailing slash, e.g. http://localhost:4566 */
-  localstackEndpoint: string;
+  emulatorEndpoint: string;
+  /**
+   * Pinned provider id, or `auto` to fingerprint the health document. The
+   * generic fallback is also `auto` when no health endpoint answers.
+   */
+  emulatorProvider: EmulatorProviderId | 'auto';
   /**
    * Endpoint written into generated client artifacts (the EKS kubeconfig).
-   * Never used for api→LocalStack traffic: when the api runs in Docker the
+   * Never used for api→emulator traffic: when the api runs in Docker the
    * internal endpoint (`host.docker.internal`) is not resolvable from the
-   * machine where kubectl runs, so `LOCALSTACK_PUBLIC_ENDPOINT` overrides it.
-   * Falls back to `localstackEndpoint`.
+   * machine where kubectl runs, so a public endpoint can override it.
+   * Falls back to `emulatorEndpoint`.
    */
-  localstackPublicEndpoint: string;
-  /** Absolute URL of the LocalStack health endpoint. */
-  localstackHealthUrl: string;
+  emulatorPublicEndpoint: string;
   region: string;
-  /** Per-request timeout for LocalStack health probes. */
-  localstackTimeoutMs: number;
-  /** TCP connect timeout for AWS SDK calls against LocalStack. */
-  localstackConnectionTimeoutMs: number;
-  /** Whole-request timeout for AWS SDK calls against LocalStack. */
-  localstackRequestTimeoutMs: number;
+  /** Per-request timeout for emulator health probes. */
+  emulatorTimeoutMs: number;
+  /** TCP connect timeout for AWS SDK calls against the emulator. */
+  emulatorConnectionTimeoutMs: number;
+  /** Whole-request timeout for AWS SDK calls against the emulator. */
+  emulatorRequestTimeoutMs: number;
   /** How long a successful health probe is reused (0 disables the cache). */
-  localstackHealthCacheMs: number;
+  emulatorHealthCacheMs: number;
   /** How long a graceful shutdown may drain before the process is forced out. */
   shutdownTimeoutMs: number;
   /** How often the ui should refresh the status widget. */
   statusPollIntervalMs: number;
+  /**
+   * Floci Console Contract v1 mode: unreachable emulators answer
+   * `200 {status:"unavailable"}` instead of `503` on `/api/health`, which is
+   * what the Floci sidecar supervisor polls before redirecting the browser.
+   */
+  consoleContractMode: boolean;
 }
 
 export class ConfigurationError extends Error {
@@ -57,21 +74,32 @@ const DEFAULTS = {
   host: '0.0.0.0',
   port: 3001,
   logLevel: 'info',
-  localstackEndpoint: 'http://localhost:4566',
+  emulatorEndpoint: 'http://localhost:4566',
   region: 'us-east-1',
-  localstackTimeoutMs: 5_000,
-  localstackConnectionTimeoutMs: 5_000,
-  localstackRequestTimeoutMs: 30_000,
-  localstackHealthCacheMs: 2_000,
+  emulatorTimeoutMs: 5_000,
+  emulatorConnectionTimeoutMs: 5_000,
+  emulatorRequestTimeoutMs: 30_000,
+  emulatorHealthCacheMs: 2_000,
   shutdownTimeoutMs: 10_000,
   statusPollIntervalMs: 15_000,
 } as const;
+
+const LOG_LEVELS = new Set(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']);
 
 function readEnv(env: NodeJS.ProcessEnv, key: string): string | undefined {
   const raw = env[key];
   if (raw === undefined) return undefined;
   const trimmed = raw.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/** First defined, non-empty environment variable from an ordered alias list. */
+function readFirstEnv(env: NodeJS.ProcessEnv, keys: readonly string[]): string | undefined {
+  for (const key of keys) {
+    const value = readEnv(env, key);
+    if (value !== undefined) return value;
+  }
+  return undefined;
 }
 
 function parseIntEnv(
@@ -92,6 +120,19 @@ function parseIntEnv(
   return parsed;
 }
 
+/** Reads the first alias that parses, so EMULATOR_* wins over LOCALSTACK_*. */
+function parseIntEnvAliases(
+  env: NodeJS.ProcessEnv,
+  keys: readonly string[],
+  fallback: number,
+  bounds: { min: number; max: number },
+): number {
+  for (const key of keys) {
+    if (readEnv(env, key) !== undefined) return parseIntEnv(env, key, fallback, bounds);
+  }
+  return fallback;
+}
+
 function parseBooleanEnv(env: NodeJS.ProcessEnv, key: string, fallback: boolean): boolean {
   const raw = readEnv(env, key)?.toLowerCase();
   if (raw === undefined) return fallback;
@@ -100,32 +141,64 @@ function parseBooleanEnv(env: NodeJS.ProcessEnv, key: string, fallback: boolean)
   throw new ConfigurationError(`${key} must be a boolean, received "${raw}"`);
 }
 
-function normalizeEndpoint(raw: string): string {
+function normalizeEndpoint(_env: NodeJS.ProcessEnv, raw: string, key: string): string {
   const withScheme = /^https?:\/\//i.test(raw) ? raw : `http://${raw}`;
   let url: URL;
   try {
     url = new URL(withScheme);
   } catch {
-    throw new ConfigurationError(`LOCALSTACK_ENDPOINT is not a valid URL: "${raw}"`);
+    throw new ConfigurationError(`${key} is not a valid URL: "${raw}"`);
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new ConfigurationError(
-      `LOCALSTACK_ENDPOINT must use http or https, received "${url.protocol}"`,
-    );
+    throw new ConfigurationError(`${key} must use http or https, received "${url.protocol}"`);
   }
   if (url.hostname.length === 0) {
-    throw new ConfigurationError(`LOCALSTACK_ENDPOINT must include a host, received "${raw}"`);
+    throw new ConfigurationError(`${key} must include a host, received "${raw}"`);
+  }
+  if (url.username.length > 0 || url.password.length > 0) {
+    // Credentials in the endpoint would be echoed by /api/config, health
+    // errors and logs; refuse them instead.
+    throw new ConfigurationError(
+      `${key} must not contain credentials (user:password@); pass AWS_ACCESS_KEY_ID / ` +
+        'AWS_SECRET_ACCESS_KEY instead.',
+    );
+  }
+  if (url.search.length > 0 || url.hash.length > 0) {
+    throw new ConfigurationError(
+      `${key} must not contain a query string or fragment, received "${raw}"`,
+    );
   }
   return url.toString().replace(/\/+$/, '');
 }
 
-function parseCorsOrigin(raw: string | undefined): true | string[] {
-  if (raw === undefined || raw === '*') return true;
+function parseCorsOrigin(raw: string | undefined): false | true | string[] {
+  if (raw === undefined) return false;
+  if (raw === '*') return true;
   const origins = raw
     .split(',')
     .map((origin) => origin.trim())
     .filter((origin) => origin.length > 0);
-  return origins.length > 0 ? origins : true;
+  if (origins.length === 0) return false;
+  return origins;
+}
+
+function parseLogLevel(raw: string | undefined): string {
+  const level = (raw ?? DEFAULTS.logLevel).toLowerCase();
+  if (!LOG_LEVELS.has(level)) {
+    throw new ConfigurationError(
+      `LOG_LEVEL must be one of ${[...LOG_LEVELS].join(', ')}, received "${raw}"`,
+    );
+  }
+  return level;
+}
+
+function parseProvider(raw: string | undefined): EmulatorProviderId | 'auto' {
+  if (raw === undefined || raw === 'auto') return 'auto';
+  const normalized = raw.toLowerCase();
+  if (isEmulatorProviderId(normalized)) return normalized;
+  throw new ConfigurationError(
+    `EMULATOR_PROVIDER must be auto or one of ${EMULATOR_PROVIDER_IDS.join(', ')}, received "${raw}"`,
+  );
 }
 
 function readPackageVersion(env: NodeJS.ProcessEnv): string {
@@ -146,11 +219,27 @@ function readPackageVersion(env: NodeJS.ProcessEnv): string {
   return '0.0.0';
 }
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
-  const endpoint = normalizeEndpoint(
-    readEnv(env, 'LOCALSTACK_ENDPOINT') ?? DEFAULTS.localstackEndpoint,
+/** Effective endpoint: EMULATOR_ENDPOINT > AWS_ENDPOINT_URL > LOCALSTACK_ENDPOINT. */
+export function resolveEmulatorEndpoint(env: NodeJS.ProcessEnv = process.env): string {
+  const raw = readFirstEnv(env, ['EMULATOR_ENDPOINT', 'AWS_ENDPOINT_URL', 'LOCALSTACK_ENDPOINT']);
+  return normalizeEndpoint(
+    env,
+    raw ?? DEFAULTS.emulatorEndpoint,
+    raw === undefined ? 'EMULATOR_ENDPOINT (default)' : endpointKeyFor(env, raw),
   );
-  const publicEndpointRaw = readEnv(env, 'LOCALSTACK_PUBLIC_ENDPOINT');
+}
+
+function endpointKeyFor(env: NodeJS.ProcessEnv, raw: string): string {
+  if (readEnv(env, 'EMULATOR_ENDPOINT') === raw) return 'EMULATOR_ENDPOINT';
+  if (readEnv(env, 'AWS_ENDPOINT_URL') === raw) return 'AWS_ENDPOINT_URL';
+  return 'LOCALSTACK_ENDPOINT';
+}
+export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
+  const endpoint = resolveEmulatorEndpoint(env);
+  const publicEndpointRaw = readFirstEnv(env, [
+    'EMULATOR_PUBLIC_ENDPOINT',
+    'LOCALSTACK_PUBLIC_ENDPOINT',
+  ]);
   const environment = readEnv(env, 'NODE_ENV') ?? DEFAULTS.environment;
   const isProduction = environment === 'production';
 
@@ -161,36 +250,40 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     isProduction,
     host: readEnv(env, 'HOST') ?? DEFAULTS.host,
     port: parseIntEnv(env, 'PORT', DEFAULTS.port, { min: 1, max: 65_535 }),
-    logLevel: readEnv(env, 'LOG_LEVEL') ?? DEFAULTS.logLevel,
+    logLevel: parseLogLevel(readEnv(env, 'LOG_LEVEL')),
     // A production image has no pino-pretty (devDependency); forcing pretty
     // logging off there keeps LOG_PRETTY=true from breaking startup.
     logPretty: !isProduction && parseBooleanEnv(env, 'LOG_PRETTY', true),
     corsOrigin: parseCorsOrigin(readEnv(env, 'CORS_ORIGIN')),
-    localstackEndpoint: endpoint,
-    localstackPublicEndpoint:
-      publicEndpointRaw === undefined ? endpoint : normalizeEndpoint(publicEndpointRaw),
-    localstackHealthUrl: new URL(LOCALSTACK_HEALTH_PATH, `${endpoint}/`).toString(),
+    emulatorEndpoint: endpoint,
+    emulatorProvider: parseProvider(readEnv(env, 'EMULATOR_PROVIDER')),
+    emulatorPublicEndpoint:
+      publicEndpointRaw === undefined
+        ? endpoint
+        : normalizeEndpoint(env, publicEndpointRaw, 'EMULATOR_PUBLIC_ENDPOINT'),
     region: readEnv(env, 'AWS_REGION') ?? DEFAULTS.region,
-    localstackTimeoutMs: parseIntEnv(env, 'LOCALSTACK_TIMEOUT_MS', DEFAULTS.localstackTimeoutMs, {
-      min: 100,
-      max: 120_000,
-    }),
-    localstackConnectionTimeoutMs: parseIntEnv(
+    emulatorTimeoutMs: parseIntEnvAliases(
       env,
-      'LOCALSTACK_CONNECTION_TIMEOUT_MS',
-      DEFAULTS.localstackConnectionTimeoutMs,
+      ['EMULATOR_TIMEOUT_MS', 'LOCALSTACK_TIMEOUT_MS'],
+      DEFAULTS.emulatorTimeoutMs,
       { min: 100, max: 120_000 },
     ),
-    localstackRequestTimeoutMs: parseIntEnv(
+    emulatorConnectionTimeoutMs: parseIntEnvAliases(
       env,
-      'LOCALSTACK_REQUEST_TIMEOUT_MS',
-      DEFAULTS.localstackRequestTimeoutMs,
+      ['EMULATOR_CONNECTION_TIMEOUT_MS', 'LOCALSTACK_CONNECTION_TIMEOUT_MS'],
+      DEFAULTS.emulatorConnectionTimeoutMs,
+      { min: 100, max: 120_000 },
+    ),
+    emulatorRequestTimeoutMs: parseIntEnvAliases(
+      env,
+      ['EMULATOR_REQUEST_TIMEOUT_MS', 'LOCALSTACK_REQUEST_TIMEOUT_MS'],
+      DEFAULTS.emulatorRequestTimeoutMs,
       { min: 100, max: 600_000 },
     ),
-    localstackHealthCacheMs: parseIntEnv(
+    emulatorHealthCacheMs: parseIntEnvAliases(
       env,
-      'LOCALSTACK_HEALTH_CACHE_MS',
-      DEFAULTS.localstackHealthCacheMs,
+      ['EMULATOR_HEALTH_CACHE_MS', 'LOCALSTACK_HEALTH_CACHE_MS'],
+      DEFAULTS.emulatorHealthCacheMs,
       { min: 0, max: 60_000 },
     ),
     shutdownTimeoutMs: parseIntEnv(env, 'SHUTDOWN_TIMEOUT_MS', DEFAULTS.shutdownTimeoutMs, {
@@ -203,6 +296,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       DEFAULTS.statusPollIntervalMs,
       { min: 1_000, max: 600_000 },
     ),
+    consoleContractMode: parseBooleanEnv(env, 'LOCALDECK_CONSOLE_CONTRACT', false),
   };
 }
 
