@@ -73,9 +73,14 @@ export interface SecurityGroupRulesTableProps {
   /** `Inbound` or `Outbound`; labels the Source/Destination column. */
   direction: 'inbound' | 'outbound';
   loading?: boolean;
-  /** When provided, every rule gets a Revoke action (inbound rules only). */
-  onRevoke?: (rule: Ec2SecurityGroupRule) => void;
-  revoking?: boolean;
+  /**
+   * When provided, every rule gets a Revoke action (inbound rules only). The
+   * row id is passed along so the caller can track one in-flight revoke
+   * without a shared boolean that would load every row at once.
+   */
+  onRevoke?: (rule: Ec2SecurityGroupRule, rowId: string) => void;
+  /** Row id of the revoke in flight; only that row shows a loading button. */
+  revokingRowId?: string | null;
 }
 
 /**
@@ -88,7 +93,7 @@ export function SecurityGroupRulesTable({
   direction,
   loading = false,
   onRevoke,
-  revoking = false,
+  revokingRowId = null,
 }: SecurityGroupRulesTableProps): ReactElement {
   const rows = useMemo(() => toRows(rules), [rules]);
   const sourceHeader = direction === 'inbound' ? 'Source' : 'Destination';
@@ -125,9 +130,9 @@ export function SecurityGroupRulesTable({
         cell: (row) => (
           <Button
             variant="inline-link"
-            loading={revoking}
+            loading={row.rowId === revokingRowId}
             onClick={() => {
-              onRevoke(row.rule);
+              onRevoke(row.rule, row.rowId);
             }}
           >
             Revoke
@@ -136,7 +141,7 @@ export function SecurityGroupRulesTable({
       });
     }
     return base;
-  }, [onRevoke, revoking, sourceHeader]);
+  }, [onRevoke, revokingRowId, sourceHeader]);
 
   return (
     <Table<RuleRow>

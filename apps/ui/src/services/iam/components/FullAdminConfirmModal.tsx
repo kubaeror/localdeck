@@ -42,7 +42,8 @@ export function FullAdminConfirmModal({
             <Button variant="link" disabled={busy} onClick={onDismiss}>
               Go back
             </Button>
-            <Button variant="primary" loading={busy} onClick={onConfirm}>
+            {/* Disabled while saving so a second click cannot create a duplicate. */}
+            <Button variant="primary" loading={busy} disabled={busy} onClick={onConfirm}>
               Save anyway
             </Button>
           </SpaceBetween>

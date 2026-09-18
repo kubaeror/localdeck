@@ -81,11 +81,11 @@ describe('buildKubeconfig', () => {
     certificateAuthorityData: 'bG9jYWxkZWNrLWNh',
   };
 
-  it('renders the AWS CLI kubeconfig shape with the LocalStack endpoint', () => {
+  it('renders the AWS CLI kubeconfig shape with the emulator endpoint', () => {
     const yaml = buildKubeconfig({
       cluster,
       region: 'us-east-1',
-      localstackEndpoint: 'http://localhost:4566',
+      emulatorEndpoint: 'http://localhost:4566',
     });
 
     expect(yaml).toContain('apiVersion: v1');
@@ -106,7 +106,7 @@ describe('buildKubeconfig', () => {
     const yaml = buildKubeconfig({
       cluster,
       region: 'eu-central-1',
-      localstackEndpoint: 'http://127.0.0.1:4566',
+      emulatorEndpoint: 'http://127.0.0.1:4566',
       profile: 'localstack',
     });
     expect(yaml).toContain('name: AWS_PROFILE');
@@ -117,7 +117,7 @@ describe('buildKubeconfig', () => {
     const yaml = buildKubeconfig({
       cluster: { ...cluster, endpoint: 'https://weird"host' },
       region: 'us-east-1',
-      localstackEndpoint: 'http://localhost:4566',
+      emulatorEndpoint: 'http://localhost:4566',
     });
     expect(yaml).toContain('server: "https://weird\\"host"');
   });

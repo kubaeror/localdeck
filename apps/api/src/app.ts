@@ -1,7 +1,12 @@
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
-import { ApiErrorCodes, type ApiErrorResponse } from '@localdeck/shared';
-import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastify';
+import { ApiErrorCodes, getEmulatorProvider, type ApiErrorResponse } from '@localdeck/shared';
+import Fastify, {
+  type FastifyInstance,
+  type FastifyReply,
+  type FastifyRequest,
+  type FastifyServerOptions,
+} from 'fastify';
 import { getConfig, type AppConfig } from './config.js';
 import { toApiError } from './lib/errors.js';
 import { registerConfigRoutes } from './routes/config.js';
@@ -14,6 +19,11 @@ import { registerServiceRoutes } from './routes/services.js';
 export interface BuildAppOptions {
   config?: AppConfig;
   logger?: FastifyServerOptions['logger'];
+  /**
+   * Replaces the default 404/405 handler. The console sidecar uses it to serve
+   * the SPA's index.html for non-api routes; the api keeps its JSON contract.
+   */
+  notFoundHandler?: (request: FastifyRequest, reply: FastifyReply) => void;
 }
 
 /**
@@ -58,20 +68,39 @@ export function createLoggerOptions(config: AppConfig): FastifyServerOptions['lo
   };
 }
 
+/**
+ * Error context shared by every route: the endpoint, plus the provider label
+ * when one is pinned. In auto mode the label is unknown until the health probe
+ * runs, so error copy falls back to "the local emulator".
+ */
+export function errorContext(config: AppConfig): {
+  endpoint: string;
+  emulatorLabel?: string;
+} {
+  return config.emulatorProvider === 'auto'
+    ? { endpoint: config.emulatorEndpoint }
+    : {
+        endpoint: config.emulatorEndpoint,
+        emulatorLabel: getEmulatorProvider(config.emulatorProvider).displayName,
+      };
+}
+
 export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyInstance> {
   const config = options.config ?? getConfig();
   const logger: FastifyServerOptions['logger'] = options.logger ?? createLoggerOptions(config);
 
   const app = Fastify({
     logger,
-    trustProxy: true,
+    trustProxy: false,
     bodyLimit: 5 * 1024 * 1024,
     // The SDK clients carry their own request timeout; Fastify's handler
     // timeout is the last line of defense for a handler that never settles.
-    handlerTimeout: config.localstackRequestTimeoutMs + 1_000,
-    // Shutdown must not wait for idle keep-alive sockets; in-flight requests
-    // still get to finish (or hit handlerTimeout/the drain deadline).
-    forceCloseConnections: true,
+    // Streaming routes (S3 upload/download) override it with a long budget.
+    handlerTimeout: config.emulatorRequestTimeoutMs + 1_000,
+    // Shutdown must not wait for idle keep-alive sockets, but in-flight
+    // requests get to finish: 'idle' closes only keep-alive connections, so a
+    // running upload/download is not destroyed at SIGTERM.
+    forceCloseConnections: 'idle',
     ajv: {
       // A proxy must reject unknown request properties instead of silently
       // dropping them (Fastify strips them by default).
@@ -80,6 +109,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   });
 
   await app.register(cors, {
+    // Default is same-origin only: LocalDeck is an unauthenticated management
+    // proxy, so reflecting arbitrary origins would let any website drive the
+    // user's emulator. CORS_ORIGIN=* is an explicit opt-in.
     origin: config.corsOrigin,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     maxAge: 600,
@@ -108,7 +140,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
 
   // One place where every thrown value becomes the shared ApiError contract.
   app.setErrorHandler((error, request, reply) => {
-    const apiError = toApiError(error, { endpoint: config.localstackEndpoint });
+    const apiError = toApiError(error, errorContext(config));
 
     if (apiError.statusCode >= 500) {
       request.log.error({ err: error, code: apiError.code }, 'request failed');
@@ -142,45 +174,48 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     });
   });
 
-  app.setNotFoundHandler((request, reply) => {
-    const path = request.raw.url?.split('?')[0] ?? request.url;
-    const allowed = new Set<string>();
-    for (const route of registeredRoutes) {
-      if (!routePatternMatches(route.url, path)) continue;
-      for (const method of route.methods) {
-        if (method !== request.method) allowed.add(method);
-      }
-    }
+  app.setNotFoundHandler(
+    options.notFoundHandler ??
+      ((request, reply) => {
+        const path = request.raw.url?.split('?')[0] ?? request.url;
+        const allowed = new Set<string>();
+        for (const route of registeredRoutes) {
+          if (!routePatternMatches(route.url, path)) continue;
+          for (const method of route.methods) {
+            if (method !== request.method) allowed.add(method);
+          }
+        }
 
-    if (allowed.size > 0) {
-      // The path exists for another method: 405, not "route not found".
-      const allowHeader = [...allowed].join(', ');
-      void reply.header('allow', allowHeader);
-      void reply.code(405).send({
-        error: {
-          code: ApiErrorCodes.methodNotAllowed,
-          message: `${request.method} is not allowed for ${path}. Allowed: ${allowHeader}.`,
-          statusCode: 405,
-          details: { allowed: [...allowed] },
-        },
-      } satisfies ApiErrorResponse);
-      return;
-    }
+        if (allowed.size > 0) {
+          // The path exists for another method: 405, not "route not found".
+          const allowHeader = [...allowed].join(', ');
+          void reply.header('allow', allowHeader);
+          void reply.code(405).send({
+            error: {
+              code: ApiErrorCodes.methodNotAllowed,
+              message: `${request.method} is not allowed for ${path}. Allowed: ${allowHeader}.`,
+              statusCode: 405,
+              details: { allowed: [...allowed] },
+            },
+          } satisfies ApiErrorResponse);
+          return;
+        }
 
-    void reply.code(404).send({
-      error: {
-        code: ApiErrorCodes.notFound,
-        message: `No LocalDeck api route matches ${request.method} ${request.url}.`,
-        statusCode: 404,
-      },
-    } satisfies ApiErrorResponse);
-  });
+        void reply.code(404).send({
+          error: {
+            code: ApiErrorCodes.notFound,
+            message: `No LocalDeck api route matches ${request.method} ${request.url}.`,
+            statusCode: 404,
+          },
+        } satisfies ApiErrorResponse);
+      }),
+  );
 
   const clientOverrides = {
-    endpoint: config.localstackEndpoint,
+    endpoint: config.emulatorEndpoint,
     region: config.region,
-    connectionTimeoutMs: config.localstackConnectionTimeoutMs,
-    requestTimeoutMs: config.localstackRequestTimeoutMs,
+    connectionTimeoutMs: config.emulatorConnectionTimeoutMs,
+    requestTimeoutMs: config.emulatorRequestTimeoutMs,
   };
 
   registerHealthRoutes(app, config);
@@ -190,7 +225,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   registerS3Routes(app, clientOverrides);
   registerEksRoutes(app, {
     ...clientOverrides,
-    publicEndpoint: config.localstackPublicEndpoint,
+    publicEndpoint: config.emulatorPublicEndpoint,
   });
 
   return app;

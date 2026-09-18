@@ -10,7 +10,7 @@ interface Call {
   input: Record<string, unknown>;
 }
 
-function stubIam(handler: (operation: string) => unknown): Call[] {
+function stubIam(handler: (operation: string, input: Record<string, unknown>) => unknown): Call[] {
   const calls: Call[] = [];
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -21,11 +21,12 @@ function stubIam(handler: (operation: string) => unknown): Call[] {
       init?.body === undefined
         ? {}
         : (JSON.parse(String(init.body)) as { input?: Record<string, unknown> });
-    calls.push({ operation, input: body.input ?? {} });
-    return new Response(JSON.stringify({ service: 'iam', operation, result: handler(operation) }), {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-    });
+    const operationInput = body.input ?? {};
+    calls.push({ operation, input: operationInput });
+    return new Response(
+      JSON.stringify({ service: 'iam', operation, result: handler(operation, operationInput) }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
   });
   vi.stubGlobal('fetch', fetchMock);
   return calls;
@@ -71,6 +72,34 @@ describe('IAM GroupMembersTab', () => {
       UserName: 'bob',
       GroupName: 'developers',
     });
+  });
+
+  it('walks GetGroup pages so members beyond the first page stay members', async () => {
+    const calls = stubIam((operation, input) => {
+      if (operation === 'GetGroup') {
+        return input.Marker === undefined
+          ? {
+              Group: { GroupName: 'developers' },
+              Users: [{ UserName: 'bob' }],
+              IsTruncated: true,
+              Marker: 'members-2',
+            }
+          : { Users: [{ UserName: 'carol' }], IsTruncated: false };
+      }
+      if (operation === 'ListUsers') {
+        return { Users: [{ UserName: 'bob' }, { UserName: 'carol' }, { UserName: 'dave' }] };
+      }
+      return {};
+    });
+    renderTab();
+
+    const table = await screen.findByRole('table', { name: 'Group members' });
+    expect(within(table).getByRole('link', { name: 'bob' })).toBeDefined();
+    expect(within(table).getByRole('link', { name: 'carol' })).toBeDefined();
+
+    const pageCalls = calls.filter((call) => call.operation === 'GetGroup');
+    expect(pageCalls).toHaveLength(2);
+    expect(pageCalls[1]?.input).toMatchObject({ GroupName: 'developers', Marker: 'members-2' });
   });
 
   it('opens the add-users modal with the account users that are not members', async () => {

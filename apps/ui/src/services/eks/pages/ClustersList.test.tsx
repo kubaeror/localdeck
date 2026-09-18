@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
-import type { ServiceDescriptor } from '@localdeck/shared';
+import type { HealthResponse, ServiceDescriptor } from '@localdeck/shared';
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FlashbarProvider } from '../../../contexts/FlashbarProvider';
-import { LocalStackStatusProvider } from '../../../contexts/LocalStackStatusProvider';
+import { EmulatorStatusProvider } from '../../../contexts/EmulatorStatusProvider';
 import { TEST_HEALTH, stubApiFetch } from '../../../test/fixtures';
 import { ClustersListPage } from './ClustersList';
 
@@ -19,12 +19,12 @@ const EKS_DESCRIPTOR: ServiceDescriptor = {
   summary: 'Managed Kubernetes clusters and node groups.',
 };
 
-/** The health document LocalStack sends when EKS is emulated. */
-const HEALTH_WITH_EKS = {
+/** The health document the emulator sends when EKS is enabled. */
+const HEALTH_WITH_EKS: HealthResponse = {
   ...TEST_HEALTH,
-  localstack: {
-    ...TEST_HEALTH.localstack,
-    services: { ...TEST_HEALTH.localstack.services, eks: 'available' as const },
+  emulator: {
+    ...TEST_HEALTH.emulator,
+    services: { ...TEST_HEALTH.emulator.services, eks: 'enabled' },
   },
 };
 
@@ -47,13 +47,13 @@ const DESCRIBE_CLUSTER = {
 
 function renderList(): void {
   render(
-    <LocalStackStatusProvider>
+    <EmulatorStatusProvider>
       <FlashbarProvider>
         <MemoryRouter initialEntries={['/console/eks']}>
           <ClustersListPage descriptor={EKS_DESCRIPTOR} />
         </MemoryRouter>
       </FlashbarProvider>
-    </LocalStackStatusProvider>,
+    </EmulatorStatusProvider>,
   );
 }
 
@@ -108,6 +108,56 @@ describe('EKS ClustersListPage', () => {
         .mock.calls.filter(([input]) => String(input).includes('/api/services/eks/'));
       expect(calls).toHaveLength(0);
     });
+  });
+
+  it('names the active provider in the "not enabled" empty state', async () => {
+    const providerLabel = 'MiniStack';
+    stubApiFetch({
+      health: {
+        ...TEST_HEALTH,
+        provider: { ...TEST_HEALTH.provider, providerLabel },
+        emulator: { ...TEST_HEALTH.emulator, providerLabel },
+      },
+    });
+
+    renderList();
+
+    expect(
+      await screen.findByText(`EKS is not enabled in this ${providerLabel} instance`),
+    ).toBeDefined();
+    expect(screen.getByText(new RegExp(`${providerLabel} at`))).toBeDefined();
+  });
+
+  it('keeps polling after the list deletes a cluster (DELETING is transitional)', async () => {
+    stubApiFetch({
+      health: HEALTH_WITH_EKS,
+      operations: {
+        'eks/ListClusters': {
+          service: 'eks',
+          operation: 'ListClusters',
+          result: { clusters: ['going-away'] },
+        },
+        'eks/DescribeCluster': {
+          service: 'eks',
+          operation: 'DescribeCluster',
+          result: {
+            cluster: {
+              name: 'going-away',
+              arn: 'arn:aws:eks:us-east-1:000000000000:cluster/going-away',
+              status: 'DELETING',
+              version: '1.36',
+              roleArn: '',
+              resourcesVpcConfig: { endpointPublicAccess: true, endpointPrivateAccess: false },
+            },
+          },
+        },
+      },
+    });
+
+    renderList();
+
+    expect(await screen.findByText('Deleting')).toBeDefined();
+    expect(await screen.findByText(/Refreshing automatically every 10 seconds/)).toBeDefined();
   });
 
   it('shows the auto-refresh hint while a cluster is being created', async () => {

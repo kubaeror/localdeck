@@ -77,11 +77,51 @@ describe('IAM AccessKeysPanel', () => {
 
     // Closing the ceremony never shows the secret again: the list read returns
     // metadata only and the panel re-renders the table.
+    fireEvent.click(
+      within(dialog).getByRole('checkbox', { name: 'I have copied the secret access key' }),
+    );
     fireEvent.click(within(dialog).getByRole('button', { name: 'Done' }));
     await waitFor(() => {
       expect(screen.queryByText('s3cret-value')).toBeNull();
     });
     expect(screen.getByText('AKIA1')).toBeDefined();
+  });
+
+  it('requires the copied-secret acknowledgment before the ceremony can close', async () => {
+    stubIam((operation) =>
+      operation === 'CreateAccessKey'
+        ? {
+            AccessKey: {
+              AccessKeyId: 'AKIA2',
+              SecretAccessKey: 's3cret-value',
+              Status: 'Active',
+              UserName: 'alice',
+            },
+          }
+        : { AccessKeyMetadata: [] },
+    );
+    renderPanel();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Create access key' }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Create access key' }));
+    await screen.findByText('s3cret-value');
+
+    // Done is disabled and the X/close path is ignored until the box is ticked.
+    const done = within(dialog).getByRole('button', { name: 'Done' });
+    expect(done.hasAttribute('disabled')).toBe(true);
+    fireEvent.click(done);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close create access key' }));
+
+    expect(screen.getByText('s3cret-value')).toBeDefined();
+
+    fireEvent.click(
+      within(dialog).getByRole('checkbox', { name: 'I have copied the secret access key' }),
+    );
+    fireEvent.click(done);
+    await waitFor(() => {
+      expect(screen.queryByText('s3cret-value')).toBeNull();
+    });
   });
 
   it('disables creation at the two-key limit with an explanation', async () => {

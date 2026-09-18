@@ -29,7 +29,12 @@ export type EksClusterStatus =
 export type EksNodegroupStatus =
   'CREATING' | 'ACTIVE' | 'UPDATING' | 'DELETING' | 'CREATE_FAILED' | 'DELETE_FAILED' | 'DEGRADED';
 
-const CLUSTER_TRANSITIONAL: ReadonlySet<string> = new Set(['CREATING', 'UPDATING', 'PENDING']);
+const CLUSTER_TRANSITIONAL: ReadonlySet<string> = new Set([
+  'CREATING',
+  'UPDATING',
+  'DELETING',
+  'PENDING',
+]);
 const NODEGROUP_TRANSITIONAL: ReadonlySet<string> = new Set(['CREATING', 'UPDATING', 'DELETING']);
 
 /** True while the cluster is still settling and the pages should poll. */
@@ -640,45 +645,114 @@ export async function deleteNodegroup(clusterName: string, nodegroupName: string
 
 // ------------------------------------------------------------ nodegroup EC2
 
+/** The tag EKS sets on every managed node with the owning cluster's name. */
+const CLUSTER_NAME_TAG = 'eks:cluster-name';
+
 /**
- * The emulated EC2 instance(s) LocalStack provisions for a managed node group.
+ * True when `key` looks like one of the node group ownership tags LocalStack
+ * emits. `Name` is deliberately not one: it is user-controlled metadata, so
+ * matching on it alone would link unrelated instances.
+ */
+function isNodegroupTagKey(key: string): boolean {
+  const lower = key.toLowerCase();
+  return lower.includes('nodegroup') || lower.includes('node-group');
+}
+
+/** True when the instance carries either half of the EKS ownership tag pair. */
+function hasEksOwnershipTags(instance: Pick<Ec2Instance, 'tags'>): boolean {
+  return instance.tags.some(
+    (tag) => isNodegroupTagKey(tag.Key) || tag.Key.toLowerCase() === CLUSTER_NAME_TAG,
+  );
+}
+
+export interface NodegroupInstanceMatchOptions {
+  /**
+   * LocalStack builds that do not tag the emulated instances with the EKS
+   * ownership tags name each instance after its node group instead. The caller
+   * enables this fallback only when the whole instance list carries no
+   * ownership tags, so a `Name` can never override real tag data.
+   */
+  allowNameFallback?: boolean;
+}
+
+/**
+ * True when the emulated EC2 instance behind a managed node group belongs to
+ * `nodegroupName` of `clusterName`.
  *
- * LocalStack materialises one mocked EC2 instance per desired node, tagged the
- * way real EKS managed nodes are (`eks:nodegroup-name`, `eks:cluster-name`).
- * The matching is deliberately forgiving because tag keys differ between
- * LocalStack builds: any tag whose value is the node group name counts when
- * its key looks like a node group tag (or is the instance `Name`). When
- * nothing matches, the Compute tab links to the EC2 console instead of
- * pretending an instance exists.
+ * EKS tags managed nodes with `eks:nodegroup-name` and `eks:cluster-name`;
+ * both must match. Two clusters commonly run a node group with the same name
+ * (e.g. "workers"), so a matching node group tag alone would cross-link them.
+ * A missing ownership tag on either side is not a match either. The `Name`
+ * fallback only applies when the caller passes `allowNameFallback` (see
+ * {@link filterNodegroupInstances}); an instance tagged for a different
+ * cluster never falls through to it.
  */
 export function instanceBelongsToNodegroup(
   instance: Pick<Ec2Instance, 'name' | 'tags'>,
+  clusterName: string,
   nodegroupName: string,
+  options: NodegroupInstanceMatchOptions = {},
 ): boolean {
-  const name = nodegroupName.toLowerCase();
-  const tagMatch = instance.tags.some((tag) => {
-    if (tag.Value.toLowerCase() !== name) return false;
-    const key = tag.Key.toLowerCase();
-    return key === 'name' || key.includes('nodegroup') || key.includes('node-group');
-  });
-  return tagMatch || instance.name?.toLowerCase() === name;
+  const cluster = clusterName.trim().toLowerCase();
+  const nodegroup = nodegroupName.trim().toLowerCase();
+
+  const ownership = instance.tags.find((tag) => isNodegroupTagKey(tag.Key));
+  const clusterTag = instance.tags.find((tag) => tag.Key.toLowerCase() === CLUSTER_NAME_TAG);
+
+  if (ownership !== undefined || clusterTag !== undefined) {
+    // Both halves of the ownership pair must exist and match. This is what
+    // keeps two clusters with a "workers" node group from cross-linking.
+    if (ownership === undefined || clusterTag === undefined) return false;
+    return (
+      ownership.Value.trim().toLowerCase() === nodegroup &&
+      clusterTag.Value.trim().toLowerCase() === cluster
+    );
+  }
+
+  if (options.allowNameFallback !== true) return false;
+  return instance.name?.trim().toLowerCase() === nodegroup;
 }
 
-/** Fetches the emulated EC2 instances behind one node group. */
+/**
+ * Filters an already-fetched instance list down to one node group's nodes.
+ * Shared by {@link listNodegroupInstances} and the Compute tab, which fetches
+ * the catalogue once and filters it per row.
+ *
+ * The `Name` fallback is only used when *no* instance in the list carries an
+ * EKS ownership tag, so it applies to old LocalStack builds without ever
+ * matching a `Name` that belongs to another cluster.
+ */
+export function filterNodegroupInstances<T extends Pick<Ec2Instance, 'name' | 'tags'>>(
+  instances: readonly T[],
+  clusterName: string,
+  nodegroupName: string,
+): readonly T[] {
+  const matched = instances.filter((instance) =>
+    instanceBelongsToNodegroup(instance, clusterName, nodegroupName),
+  );
+  if (matched.length > 0) return matched;
+  if (instances.some(hasEksOwnershipTags)) return [];
+  return instances.filter((instance) =>
+    instanceBelongsToNodegroup(instance, clusterName, nodegroupName, { allowNameFallback: true }),
+  );
+}
+
+/**
+ * Fetches the emulated EC2 instances behind one node group. The EC2 deep link
+ * is informational, so a failure to list instances yields an empty list; the
+ * Compute tab tracks that failure separately and offers a retry.
+ */
 export async function listNodegroupInstances(
+  clusterName: string,
   nodegroup: Pick<EksNodegroup, 'nodegroupName'>,
 ): Promise<readonly Ec2Instance[]> {
   let instances: readonly Ec2Instance[];
   try {
     instances = await listAllInstances();
   } catch {
-    // The EC2 deep link is informational; a failure to list instances must not
-    // break the node group tab.
     return [];
   }
-  return instances.filter((instance) =>
-    instanceBelongsToNodegroup(instance, nodegroup.nodegroupName),
-  );
+  return filterNodegroupInstances(instances, clusterName, nodegroup.nodegroupName);
 }
 
 // ---------------------------------------------------------------- tags

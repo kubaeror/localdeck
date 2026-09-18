@@ -1,6 +1,10 @@
-import { GetObjectCommand, type S3Client } from '@aws-sdk/client-s3';
+import {
+  DeleteObjectCommand,
+  GetObjectCommand,
+  type GetObjectCommandOutput,
+  type S3Client,
+} from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import {
   ApiErrorCodes,
   S3_BUCKET_NAME_MAX_LENGTH,
@@ -20,8 +24,8 @@ import {
   sdkAbortSignal,
   type AwsClientConfigOverrides,
 } from '../lib/awsClients.js';
-import { ApiProblem } from '../lib/errors.js';
-import { clientDisconnectSignal, readCappedText } from '../lib/http.js';
+import { ApiProblem, asApiProblem } from '../lib/errors.js';
+import { clientDisconnectSignal } from '../lib/http.js';
 
 /**
  * Dedicated S3 object proxy routes.
@@ -33,12 +37,12 @@ import { clientDisconnectSignal, readCappedText } from '../lib/http.js';
  *   `multipart/form-data` file part and writes it with PutObject, switching to
  *   the S3 multipart upload API for files above `MULTIPART_THRESHOLD_BYTES`
  *   through `@aws-sdk/lib-storage` (bounded-concurrency parts, automatic abort
- *   on failure).
- * - `GET /api/services/s3/objects/download?bucket&key[&versionId]` presigns a
- *   GetObject URL against the configured LocalStack endpoint and streams the
- *   response through the api ("presigned-URL proxy"): the browser receives the
- *   bytes from the same origin it talks to for everything else, and no
- *   credentials or signatures reach the page.
+ *   on failure). A part truncated by the request size limit aborts the upload
+ *   with a clean 413 instead of storing a silently truncated object.
+ * - `GET /api/services/s3/objects/download?bucket&key[&versionId]` streams the
+ *   object straight from the SDK through the api: bytes, content-encoding and
+ *   content-length are the stored ones (no transparent decompression), and the
+ *   SDK does not rewrite dot-segments in the key.
  *
  * Both use the single client factory in `lib/awsClients.ts`, so they inherit
  * path-style addressing, endpoint, region, credentials and outbound timeouts
@@ -49,8 +53,14 @@ import { clientDisconnectSignal, readCappedText } from '../lib/http.js';
 const MULTIPART_THRESHOLD_BYTES = 8 * 1024 * 1024;
 /** Size of each UploadPart once multipart upload is in use (S3 minimum: 5 MiB). */
 const PART_SIZE_BYTES = 8 * 1024 * 1024;
-/** How long the presigned download URL stays valid. */
-const PRESIGN_TTL_SECONDS = 300;
+/** S3's single-object maximum; @fastify/multipart truncates the part here. */
+const MAX_OBJECT_BYTES = 5 * 1024 * 1024 * 1024;
+/**
+ * Streaming routes must not inherit the 31 s JSON handler timeout: a 5 GiB
+ * upload or a slow download legitimately outlives it. Six hours is a hard
+ * ceiling; the SDK request timeout and client disconnect govern the rest.
+ */
+const STREAMING_HANDLER_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 
 interface UploadQuery {
   bucket: string;
@@ -97,6 +107,11 @@ const downloadQuerystringSchema = {
 /**
  * S3's key limit is 1024 UTF-8 bytes; JSON-schema `maxLength` counts UTF-16
  * code units, so multi-byte keys need this explicit check (shared with the ui).
+ *
+ * Dot segments are refused: a key like `../other-bucket/secret` would be
+ * normalized away by any URL-based hop (the previous presigned-URL download
+ * could read outside the requested bucket on emulators that do not verify
+ * signatures), and `a/./b` silently addresses a different object.
  */
 function requireValidKey(key: string): void {
   if (!isS3KeyWithinLimit(key)) {
@@ -108,6 +123,17 @@ function requireValidKey(key: string): void {
         `${utf8ByteLength(key)} bytes.`,
       service: 's3',
       details: { maxBytes: 1024, actualBytes: utf8ByteLength(key) },
+    });
+  }
+  if (key.split('/').some((segment) => segment === '.' || segment === '..')) {
+    throw new ApiProblem({
+      code: ApiErrorCodes.validationFailed,
+      statusCode: 400,
+      message:
+        'Object keys must not contain "." or ".." path segments; URL normalization would ' +
+        'silently address a different object or escape the bucket.',
+      service: 's3',
+      details: { key: key.slice(0, 200) },
     });
   }
 }
@@ -128,6 +154,31 @@ export function rejectUploadPart(
     message: `Expected the file part to be named "file", received "${part.fieldname}".`,
     service: 's3',
     details: { bucket: query.bucket, key: query.key, fieldname: part.fieldname },
+  });
+}
+
+/** Raised when @fastify/multipart truncated the part at the size limit. */
+class UploadTruncatedError extends Error {
+  constructor() {
+    super(`The upload exceeded the ${MAX_OBJECT_BYTES} byte single-object limit.`);
+    this.name = 'UploadTruncatedError';
+  }
+}
+
+/**
+ * Passes bytes through and fails the upload when busboy truncated the source
+ * stream. Without this, lib-storage completes a PutObject with the truncated
+ * bytes and reports success. Exported for the truncation unit test.
+ */
+export function truncationGuard(source: Readable): Transform {
+  const truncated = (): boolean => (source as { truncated?: boolean }).truncated === true;
+  return new Transform({
+    transform(chunk, _encoding, callback) {
+      callback(null, chunk);
+    },
+    flush(callback) {
+      callback(truncated() ? new UploadTruncatedError() : null);
+    },
   });
 }
 
@@ -164,7 +215,7 @@ async function uploadStream(
     params: {
       Bucket: bucket,
       Key: key,
-      Body: stream.pipe(counter),
+      Body: stream.pipe(truncationGuard(stream)).pipe(counter),
       ...(contentType === undefined ? {} : { ContentType: contentType }),
     },
     partSize: PART_SIZE_BYTES,
@@ -191,6 +242,19 @@ async function uploadStream(
       ...(done.VersionId === undefined ? {} : { versionId: done.VersionId }),
     };
   } catch (error) {
+    if (
+      error instanceof UploadTruncatedError ||
+      (stream as { truncated?: boolean }).truncated === true
+    ) {
+      throw new ApiProblem({
+        code: ApiErrorCodes.payloadTooLarge,
+        statusCode: 413,
+        message: `The upload exceeded the ${MAX_OBJECT_BYTES} byte single-object limit and was not stored.`,
+        service: 's3',
+        details: { bucket, key, limitBytes: MAX_OBJECT_BYTES, bytesReceived: size },
+        cause: error,
+      });
+    }
     if (signal.aborted) {
       throw new ApiProblem({
         code: ApiErrorCodes.requestAborted,
@@ -207,16 +271,6 @@ async function uploadStream(
   }
 }
 
-/** Minimal S3 XML error document reader for presigned-URL failures. */
-function parseS3ErrorXml(body: string): { code?: string; message?: string } {
-  const code = /<Code>([^<]*)<\/Code>/i.exec(body)?.[1]?.trim();
-  const message = /<Message>([^<]*)<\/Message>/i.exec(body)?.[1]?.trim();
-  return {
-    ...(code === undefined || code.length === 0 ? {} : { code }),
-    ...(message === undefined || message.length === 0 ? {} : { message }),
-  };
-}
-
 /** `Content-Disposition` for the downloaded object's file name. */
 function contentDispositionFor(key: string): string {
   const name =
@@ -231,75 +285,72 @@ function contentDispositionFor(key: string): string {
 }
 
 /**
- * Streams one presigned LocalStack response to the LocalDeck client. Error
- * bodies are read with a 64 KiB cap (API-008); success bodies stream through.
+ * Streams one object through the api with GetObjectCommand. Using the SDK
+ * instead of fetching a presigned URL keeps the stored bytes intact: no
+ * transparent decompression, no URL dot-segment rewriting, and content-length
+ * matches the body exactly.
  */
-async function proxyPresignedDownload(
+async function streamObjectDownload(
   client: S3Client,
   query: DownloadQuery,
+  endpoint: string | undefined,
+  range: string | undefined,
   reply: FastifyReply,
 ): Promise<void> {
   const command = new GetObjectCommand({
     Bucket: query.bucket,
     Key: query.key,
     ...(query.versionId === undefined ? {} : { VersionId: query.versionId }),
-  });
-  const presignedUrl = await getSignedUrl(client, command, { expiresIn: PRESIGN_TTL_SECONDS });
-  const upstream = await fetch(presignedUrl, {
-    headers: { accept: '*/*' },
-    // A browser that goes away cancels the upstream fetch instead of holding
-    // the socket open; the request timeout is applied by the SDK helper.
-    signal: sdkAbortSignal(clientDisconnectSignal(reply)),
+    ...(range === undefined ? {} : { Range: range }),
   });
 
-  if (!upstream.ok) {
-    const body = await readCappedText(upstream);
-    const parsed = parseS3ErrorXml(body);
-    const statusCode = upstream.status >= 400 && upstream.status < 500 ? upstream.status : 502;
-    throw new ApiProblem({
-      code: parsed.code ?? ApiErrorCodes.badGateway,
-      statusCode,
-      message:
-        parsed.message ??
-        `LocalStack returned HTTP ${upstream.status} for the presigned download of ` +
-          `${query.bucket}/${query.key}.`,
+  let output: GetObjectCommandOutput;
+  try {
+    output = await client.send(command, {
+      abortSignal: sdkAbortSignal(clientDisconnectSignal(reply)),
+    });
+  } catch (error) {
+    throw asApiProblem(error, {
+      ...(endpoint === undefined ? {} : { endpoint }),
       service: 's3',
-      details: {
-        bucket: query.bucket,
-        key: query.key,
-        upstreamStatusCode: upstream.status,
-        mode: 'presigned-proxy',
-      },
     });
   }
 
-  if (upstream.body === null) {
+  const body = output.Body;
+  if (body === undefined || body === null || !(body instanceof Readable)) {
     throw new ApiProblem({
       code: ApiErrorCodes.badGateway,
       statusCode: 502,
-      message: 'The presigned download returned no body.',
+      message: 'The object download returned no streamable body.',
       service: 's3',
       details: { bucket: query.bucket, key: query.key },
     });
   }
 
-  const passThrough = ['content-type', 'content-length', 'etag', 'last-modified', 'accept-ranges'];
-  for (const header of passThrough) {
-    const value = upstream.headers.get(header);
-    if (value !== null) void reply.header(header, value);
-  }
+  const headers: [string, string][] = [];
+  if (output.ContentType !== undefined) headers.push(['content-type', output.ContentType]);
+  if (output.ContentLength !== undefined)
+    headers.push(['content-length', String(output.ContentLength)]);
+  if (output.ContentEncoding !== undefined)
+    headers.push(['content-encoding', output.ContentEncoding]);
+  if (output.ETag !== undefined) headers.push(['etag', output.ETag]);
+  if (output.LastModified !== undefined)
+    headers.push(['last-modified', output.LastModified.toUTCString()]);
+  if (output.AcceptRanges !== undefined) headers.push(['accept-ranges', output.AcceptRanges]);
+  if (output.ContentRange !== undefined) headers.push(['content-range', output.ContentRange]);
+  for (const [name, value] of headers) void reply.header(name, value);
   void reply.header('content-disposition', contentDispositionFor(query.key));
   // Provenance for the console and the live verification script.
-  void reply.header('x-localdeck-download-mode', 'presigned-proxy');
-  void reply.header('x-localdeck-presigned-expires', String(PRESIGN_TTL_SECONDS));
+  void reply.header('x-localdeck-download-mode', 'sdk-stream');
+  if (output.ContentRange !== undefined) void reply.code(206);
 
-  await reply.send(Readable.from(upstream.body as AsyncIterable<Uint8Array>));
+  await reply.send(body);
 }
 
 /**
  * Registers the S3 object proxy routes. `clientOverrides` carries the
  * endpoint/region/timeouts the running app was configured with, so the proxy
- * talks to the same LocalStack as `/api/health`.
+ * talks to the same emulator as `/api/health`.
  */
 export function registerS3Routes(
   app: FastifyInstance,
@@ -307,7 +358,10 @@ export function registerS3Routes(
 ): void {
   app.post<{ Querystring: UploadQuery }>(
     S3_PROXY_PATHS.upload,
-    { schema: { querystring: uploadQuerystringSchema } },
+    {
+      schema: { querystring: uploadQuerystringSchema },
+      handlerTimeout: STREAMING_HANDLER_TIMEOUT_MS,
+    },
     async (request, reply): Promise<S3UploadResponse> => {
       const { bucket, key } = request.query;
       requireValidKey(key);
@@ -328,13 +382,32 @@ export function registerS3Routes(
         rejectUploadPart(part, { bucket, key });
       }
 
-      const upload = await uploadStream(getS3ClientFor(clientOverrides), {
+      const client = getS3ClientFor(clientOverrides);
+      const upload = await uploadStream(client, {
         bucket,
         key,
         ...(part.mimetype.length === 0 ? {} : { contentType: part.mimetype }),
         stream: part.file,
         signal: clientDisconnectSignal(reply),
       });
+
+      // A part truncated by busboy is rejected inside uploadStream, which
+      // aborts before storing anything; this is the belt-and-braces check for
+      // the case where the stream ended after the guard ran.
+      if ((part.file as { truncated?: boolean }).truncated === true) {
+        await client
+          .send(new DeleteObjectCommand({ Bucket: bucket, Key: key }), {
+            abortSignal: AbortSignal.timeout(10_000),
+          })
+          .catch(() => undefined);
+        throw new ApiProblem({
+          code: ApiErrorCodes.payloadTooLarge,
+          statusCode: 413,
+          message: `The upload exceeded the ${MAX_OBJECT_BYTES} byte single-object limit and was not stored.`,
+          service: 's3',
+          details: { bucket, key, limitBytes: MAX_OBJECT_BYTES },
+        });
+      }
 
       request.log.info(
         { bucket, key, size: upload.size, multipart: upload.multipart },
@@ -347,12 +420,15 @@ export function registerS3Routes(
 
   app.get<{ Querystring: DownloadQuery }>(
     S3_PROXY_PATHS.download,
-    { schema: { querystring: downloadQuerystringSchema } },
+    {
+      schema: { querystring: downloadQuerystringSchema },
+      handlerTimeout: STREAMING_HANDLER_TIMEOUT_MS,
+    },
     async (request, reply): Promise<void> => {
       const { bucket, key, versionId } = request.query;
       requireValidKey(key);
       request.log.info(
-        { bucket, key, mode: 'presigned-proxy' },
+        { bucket, key, mode: 'sdk-stream' },
         's3 object downloaded through the LocalDeck proxy',
       );
       const query: DownloadQuery = {
@@ -360,7 +436,14 @@ export function registerS3Routes(
         key,
         ...(versionId === undefined ? {} : { versionId }),
       };
-      await proxyPresignedDownload(getS3ClientFor(clientOverrides), query, reply);
+      const rangeHeader = request.headers.range;
+      await streamObjectDownload(
+        getS3ClientFor(clientOverrides),
+        query,
+        clientOverrides.endpoint,
+        typeof rangeHeader === 'string' && rangeHeader.length > 0 ? rangeHeader : undefined,
+        reply,
+      );
     },
   );
 }

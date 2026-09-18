@@ -80,6 +80,50 @@ function renderModal(): { onUpdated: ReturnType<typeof vi.fn> } {
   return { onUpdated };
 }
 
+/**
+ * Answers UpdateNodegroupConfig only after `release()` is called, so a test
+ * can click Save while the first request is still in flight.
+ */
+function stubDeferredUpdate(): { calls: Call[]; release: () => void } {
+  const calls: Call[] = [];
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let held = false;
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const match = /\/api\/services\/eks\/([^/?]+)/.exec(url);
+    if (match === null) return new Response('{}', { status: 404 });
+    const operation = match[1] ?? '';
+    const body =
+      init?.body === undefined
+        ? {}
+        : (JSON.parse(String(init.body)) as { input?: Record<string, unknown> });
+    calls.push({ operation, input: body.input ?? {} });
+    if (operation === 'UpdateNodegroupConfig' && !held) {
+      held = true;
+      await gate;
+    }
+    return new Response(
+      JSON.stringify({
+        service: 'eks',
+        operation,
+        result: {
+          nodegroup: {
+            ...NODEGROUP.raw,
+            nodegroupName: 'ng-workers',
+            scalingConfig: { minSize: 1, maxSize: 5, desiredSize: 2 },
+          },
+        },
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  return { calls, release };
+}
+
 describe('EKS UpdateScalingModal', () => {
   afterEach(() => {
     cleanup();
@@ -129,5 +173,22 @@ describe('EKS UpdateScalingModal', () => {
     expect(screen.getByRole('button', { name: 'Save changes' }).hasAttribute('disabled')).toBe(
       true,
     );
+  });
+
+  it('dispatches one update when Save changes is double-clicked', async () => {
+    const { calls, release } = stubDeferredUpdate();
+    const { onUpdated } = renderModal();
+
+    fireEvent.change(screen.getByLabelText('Maximum size'), { target: { value: '5' } });
+    fireEvent.change(screen.getByLabelText('Desired size'), { target: { value: '2' } });
+    const save = screen.getByRole('button', { name: 'Save changes' });
+    fireEvent.click(save);
+    fireEvent.click(save);
+
+    expect(calls).toHaveLength(1);
+    release();
+    await waitFor(() => {
+      expect(onUpdated).toHaveBeenCalledTimes(1);
+    });
   });
 });

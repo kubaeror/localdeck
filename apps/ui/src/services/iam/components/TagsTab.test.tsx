@@ -75,6 +75,34 @@ describe('IAM TagsTab', () => {
     expect(untagCall?.input).toEqual({ UserName: 'alice', TagKeys: ['drop'] });
   });
 
+  it('shows the normalized tag set after saving so whitespace is not left changed', async () => {
+    const calls = stubIam((operation) =>
+      operation === 'ListUserTags' ? { Tags: [{ Key: 'team', Value: 'old' }] } : {},
+    );
+    renderTab();
+
+    const keyInput = await screen.findByDisplayValue('team');
+    fireEvent.change(keyInput, { target: { value: ' team ' } });
+    fireEvent.change(screen.getByDisplayValue('old'), { target: { value: 'core' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    await waitFor(() => {
+      expect(calls.some((call) => call.operation === 'TagUser')).toBe(true);
+    });
+    expect(calls.find((call) => call.operation === 'TagUser')?.input).toEqual({
+      UserName: 'alice',
+      Tags: [{ Key: 'team', Value: 'core' }],
+    });
+
+    // The editor holds the normalized key, so the form reports no change.
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('team')).toBeDefined();
+    });
+    expect(screen.getByRole('button', { name: 'Save changes' }).hasAttribute('disabled')).toBe(
+      true,
+    );
+  });
+
   it('blocks saving a tag row without a key', async () => {
     stubIam(() => ({ Tags: [] }));
     renderTab();

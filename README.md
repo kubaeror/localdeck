@@ -4,12 +4,20 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node.js 22](https://img.shields.io/badge/node-22-brightgreen.svg?logo=node.js)](https://nodejs.org/)
 
-An open-source web console for [LocalStack](https://docs.localstack.cloud/), the
-local cloud emulator. LocalDeck looks and behaves like the cloud console people
-already know (Cloudscape Design System), but it is an independent project:
-**LocalStack is managed by you, outside this repository.** LocalDeck never
-starts, stops, reconfigures or wipes it — when the emulator is unreachable, the
-console reports that clearly instead of trying to fix it.
+An open-source web console for local AWS emulators —
+[LocalStack](https://docs.localstack.cloud/), [MiniStack](https://ministack.org/),
+[Floci](https://floci.io/), or any endpoint that speaks the AWS wire protocol.
+LocalDeck looks and behaves like the cloud console people already know
+(Cloudscape Design System), but it is an independent project: **the emulator is
+managed by you, outside this repository.** LocalDeck never starts, stops,
+reconfigures or wipes it — when the emulator is unreachable, the console reports
+that clearly instead of trying to fix it.
+
+The active provider is auto-detected from its health document
+(`/_floci/health`, `/_ministack/health`, `/_localstack/health`, or an STS probe
+for generic endpoints) and can be pinned with `EMULATOR_PROVIDER`. Each
+provider's status vocabulary is normalized before the console renders it —
+Floci's `available` means _disabled_, the opposite of LocalStack's wording.
 
 ## What it looks like
 
@@ -37,34 +45,56 @@ the `docs-screens` artifact.
 ## Repository layout
 
 ```
-apps/api           Fastify 5 proxy — the only process that talks to LocalStack
+apps/api           Fastify 5 proxy — the only process that talks to the emulator
 apps/ui            React 18 + Vite + Cloudscape single-page console
-packages/shared    Shared DTO types and the ApiError contract
-docker-compose.yml local api + ui only (never LocalStack)
+apps/console       optional single-container sidecar (api + ui; Floci contract v1)
+packages/shared    Shared DTO types, the provider descriptors and the ApiError contract
+docker-compose.yml local api + ui only (never an emulator)
 ```
+
+## Supported emulators
+
+| Emulator       | Health document                                                                                    | Service status vocabulary                       | Notes                                                                                                                                                                                |
+| -------------- | -------------------------------------------------------------------------------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **LocalStack** | `GET /_localstack/health` (`features` + `services` + `version`)                                    | `available`/`running` = enabled                 | 2026.03+ needs an auth token to start; set it in your LocalStack env.                                                                                                                |
+| **MiniStack**  | `GET /_ministack/health`, `/_localstack/health`, `/health` (`ready_scripts`, `edition` light/full) | `available` = enabled                           | MIT, no token. `SERVICES` filters handlers; real Docker for RDS/ElastiCache/ECS/EKS/Lambda.                                                                                          |
+| **Floci**      | `GET /_floci/health` and `/_localstack/health` (`original_edition`)                                | **`running` = enabled, `available` = disabled** | MIT, no token. Real Docker for Lambda/RDS/EKS/ECS/OpenSearch and more.                                                                                                               |
+| **Generic**    | none                                                                                               | unknown until called                            | Any AWS-compatible endpoint (Moto, LocalEmu, fakecloud, …): reachability via STS `GetCallerIdentity`; services are "unverified" and unsupported operations are learned and disabled. |
+
+`GET /api/health` returns `provider` (id, label, version, edition, docs URL) and
+`emulator` (canonical service states, counts, readiness) regardless of which
+emulator answered, and `GET /api/config` reports the effective provider and
+endpoint. Setting `EMULATOR_PROVIDER` skips fingerprinting.
 
 ## Prerequisites
 
-- **A LocalStack instance you manage yourself**, already running
+- **A local emulator you manage yourself**, already running
   (`http://localhost:4566` by default). LocalDeck never starts, stops or
   reconfigures it.
+  - Supported and tested: **LocalStack**, **MiniStack** (`ministackorg/ministack`,
+    MIT, no token) and **Floci** (`floci/floci:latest`, MIT, no token).
+    Moto, LocalEmu, fakecloud and other AWS-compatible endpoints work through
+    the generic fallback (STS probe, no service inventory).
   - Current LocalStack releases (2026.03+) require an auth token to start; set
     `LOCALSTACK_AUTH_TOKEN` in _your_ LocalStack environment, never here.
-  - **EKS** additionally needs a LocalStack entitlement that includes EKS
-    (the Ultimate plan) **and** the Docker socket mounted into _your_ LocalStack
-    container, because its k3d provider starts real Kubernetes containers:
+  - **EKS** needs a provider that starts real Kubernetes containers (LocalStack
+    with an EKS entitlement, Floci's real mode, MiniStack's k3s) **and** the
+    Docker socket mounted into _your_ emulator container:
     `-v /var/run/docker.sock:/var/run/docker.sock`.
 - **Node.js 22** (CI version) or Node 20.19+ (see `.nvmrc`), and pnpm 10
   (`corepack enable pnpm`) — for the no-container quick start.
 - **Docker with Compose 2.24+** — for the container quick start. The loopback
   override uses the `!reset` tag introduced in Compose 2.24.
 
-## Quick start — your LocalStack, Docker Compose (under 5 minutes)
+## Quick start — your emulator, Docker Compose (under 5 minutes)
 
 ```bash
-# 1. Start your own LocalStack and export the endpoint LocalDeck should use.
-#    (This step is YOURS: LocalDeck never starts or manages LocalStack.)
-export LOCALSTACK_ENDPOINT=http://host.docker.internal:4566
+# 1. Start your own emulator and export the endpoint LocalDeck should use.
+#    (This step is YOURS: LocalDeck never starts or manages the emulator.)
+#      LocalStack: docker run --rm -p 4566:4566 localstack/localstack
+#      MiniStack:  docker run --rm -p 4566:4566 ministackorg/ministack
+#      Floci:      docker run --rm -p 4566:4566 floci/floci:latest
+export EMULATOR_ENDPOINT=http://host.docker.internal:4566
 
 # 2. Start the LocalDeck api and ui.
 docker compose up --build
@@ -72,13 +102,19 @@ docker compose up --build
 
 Then open <http://localhost:8080>. The api is on <http://localhost:3001>.
 
-- `LOCALSTACK_ENDPOINT` defaults to `http://host.docker.internal:4566` (the
+- `EMULATOR_ENDPOINT` defaults to `http://host.docker.internal:4566` (the
   Docker host) and is only ever an env var — never hardcoded in an image.
-- LocalStack published on the host loopback only (typical WSL2 + local Docker
+  `LOCALSTACK_ENDPOINT` and `AWS_ENDPOINT_URL` are still honoured as aliases.
+- `EMULATOR_PROVIDER` defaults to `auto`; pin it
+  (`localstack` | `ministack` | `floci` | `generic`) when auto-detection is not
+  wanted.
+- Emulator published on the host loopback only (typical WSL2 + local Docker
   engine)? Use
   `docker compose -f docker-compose.yml -f docker-compose.loopback.yml up`
   (requires Compose 2.24+).
-- Only `api` and `ui` are defined in `docker-compose.yml`. LocalStack is not.
+- Only `api` and `ui` are defined in `docker-compose.yml`. No emulator is.
+  The optional single-container sidecar image (`apps/console/Dockerfile`) is
+  documented under [Sidecar mode](#sidecar-mode-floci-console-contract-v1).
 - Copy `.env.example` to `.env` to override endpoints, ports and credentials.
 - **Uploads above 1 MiB work through the container.** nginx streams request
   bodies straight to the api (`client_max_body_size 5120m`,
@@ -116,10 +152,12 @@ The ui is an AWS-console-style shell built from Cloudscape components:
   anywhere, fuzzy-matches the whole registry (names, ids, categories, summaries
   and whitelisted operations) and routes with Enter.
 - **Side navigation** — every service in the registry grouped by the console
-  categories (Compute, Storage, Database, …). Entries that `GET /api/health`
-  does not report are greyed out and carry the tooltip "Not emulated locally";
-  they are never hidden, and clicking one explains the situation instead of
-  failing. A filter box at the top narrows the list.
+  categories (Compute, Storage, Database, …). Entries the active emulator does
+  not report (or reports as disabled) are greyed out with provider-aware
+  wording — "Not reported by LocalStack", "Disabled in Floci", "unverified"
+  for endpoints without a service inventory; they are never hidden, and
+  clicking one explains the situation instead of failing. A filter box at the
+  top narrows the list.
 - **Console Home** — Cloudscape board widgets: _Recently visited_ (per browser,
   in `localStorage`), _Service health_ (live endpoint, region, stack version,
   emulated-service counts and registry coverage) and _Quick actions_. Widgets
@@ -361,13 +399,15 @@ create/authorize/revoke/delete → `TerminateInstances` → delete the released
 volume — and the EKS acceptance flow: supported versions → `CreateCluster` →
 poll to a terminal state → download and validate the kubeconfig →
 `CreateNodegroup` → poll to ACTIVE → `UpdateNodegroupConfig` → delete the node
-group and the cluster. It prints every state transition LocalStack reported and
-every request it performed, and cleans up everything it created. The EKS flow
-depends on LocalStack's k3d provider starting real containers; when that fails
-the check reports the emulator-side error (LocalDeck never repairs LocalStack).
+group and the cluster. It prints the detected provider, every state transition
+it reported and every request it performed, and cleans up everything it created.
+The EKS flow depends on the provider starting real Kubernetes containers; when
+that fails the check reports the emulator-side error (LocalDeck never repairs
+the emulator).
 
 ```bash
-pnpm verify:localstack
+pnpm verify:emulator            # EMULATOR_ENDPOINT, auto-detects the provider
+pnpm verify:localstack          # kept as an alias
 ```
 
 The console can be verified end to end against the same instance — it renders
@@ -392,7 +432,8 @@ generated resource browser. Playwright starts the api and ui itself unless they
 are already running:
 
 ```bash
-LOCALSTACK_ENDPOINT=http://localhost:4566 pnpm test:e2e
+EMULATOR_ENDPOINT=http://localhost:4566 pnpm test:e2e
+# LOCALDECK_E2E_SKIP_EKS=1 skips the Docker-heavy cluster-creation flow
 ```
 
 When LocalStack is unreachable the api stays healthy and answers `503` with the
@@ -415,21 +456,21 @@ shared error contract — no crash, no stack trace:
 
 ## API endpoints
 
-| Method | Path                                  | Purpose                                                                                                                                            |
-| ------ | ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| GET    | `/api/health`                         | Live LocalStack service statuses; `503` + `ApiError` if down.                                                                                      |
-| GET    | `/api/health/live`                    | Process liveness; answers even when LocalStack is down.                                                                                            |
-| GET    | `/api/config`                         | Effective endpoint, region, poll interval and app version.                                                                                         |
-| GET    | `/api/services`                       | The service registry: id, category, SDK package, operations, parity.                                                                               |
-| GET    | `/api/services/:serviceId`            | One registry entry plus the LocalStack health keys that identify it.                                                                               |
-| GET    | `/api/services/:serviceId/operations` | The whitelisted operations plus the generic-browser binding (listOp with required params, describe, delete, tags).                                 |
-| POST   | `/api/services/:service/:operation`   | Dynamic dispatcher: proxies one whitelisted AWS operation.                                                                                         |
-| POST   | `/api/services/s3/objects/upload`     | `multipart/form-data` (one `file` part, `?bucket&key`): streams the object into S3 — PutObject, or the S3 multipart upload API above 8 MiB.        |
-| GET    | `/api/services/s3/objects/download`   | `?bucket&key[&versionId]`: presigns a GetObject URL against LocalStack and streams the bytes through the api ("presigned-URL proxy").              |
-| GET    | `/api/eks/:cluster/kubeconfig`        | Downloads the cluster's kubeconfig (endpoint + CA + `aws eks get-token` plugin), built from DescribeCluster; `409 CLUSTER_NOT_READY` until ACTIVE. |
+| Method | Path                                  | Purpose                                                                                                                                                       |
+| ------ | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/api/health`                         | Live emulator statuses + provider identity (id, label, version, edition); `503` + `ApiError` if down (HTTP 200 `status: unavailable` in Floci contract mode). |
+| GET    | `/api/health/live`                    | Process liveness; answers even when the emulator is down.                                                                                                     |
+| GET    | `/api/config`                         | Effective provider, endpoint, public endpoint, region, poll interval and app version.                                                                         |
+| GET    | `/api/services`                       | The service registry: id, category, SDK package, operations, parity.                                                                                          |
+| GET    | `/api/services/:serviceId`            | One registry entry plus the provider health keys that identify it.                                                                                            |
+| GET    | `/api/services/:serviceId/operations` | The whitelisted operations plus the generic-browser binding (listOp with required params, describe, delete, tags).                                            |
+| POST   | `/api/services/:service/:operation`   | Dynamic dispatcher: proxies one whitelisted AWS operation.                                                                                                    |
+| POST   | `/api/services/s3/objects/upload`     | `multipart/form-data` (one `file` part, `?bucket&key`): streams the object into S3 — PutObject, or the S3 multipart upload API above 8 MiB.                   |
+| GET    | `/api/services/s3/objects/download`   | `?bucket&key[&versionId]`: streams GetObject straight through the api (SDK stream; `Range` supported, `content-encoding` preserved).                          |
+| GET    | `/api/eks/:cluster/kubeconfig`        | Downloads the cluster's kubeconfig (endpoint + CA + `aws eks get-token` plugin), built from DescribeCluster; `409 CLUSTER_NOT_READY` until ACTIVE.            |
 
-The registry routes never call LocalStack, so they answer even while the
-emulator is down. `packages/shared/src/catalog/` is the single catalogue both
+The registry routes never call the emulator, so they answer even while it is
+down. `packages/shared/src/catalog/` is the single catalogue both
 apps consume (one file per console category, re-exported through
 `packages/shared/src/services.ts`); `apps/api/src/registry/services.ts` is the
 api's access layer and `apps/api/src/registry/dispatcher.ts` resolves the SDK
@@ -444,11 +485,17 @@ The two S3 object routes and the EKS kubeconfig route are the only
 service-specific endpoints: they exist because the dispatcher's JSON contract
 cannot carry object bytes or a YAML file. All three build their AWS client
 through the same factory as every other call (`forcePathStyle: true` for S3,
-endpoint/region from env), and none exposes credentials or presigned signatures
-to the browser — the upload body streams straight into S3, the download response
-is the presigned fetch proxied by the api (`x-localdeck-download-mode:
-presigned-proxy`), and the kubeconfig's token plugin reads its endpoint from the
-configured `LOCALSTACK_ENDPOINT`.
+endpoint/region from env), and none exposes credentials or signatures to the
+browser — the upload body streams straight into S3 (a truncated upload is
+rejected with 413, never stored), the download is the SDK's GetObject streamed
+through the api (`x-localdeck-download-mode: sdk-stream`), and the kubeconfig's
+token plugin reads its endpoint from the configured `EMULATOR_PUBLIC_ENDPOINT`
+(falling back to `EMULATOR_ENDPOINT`).
+
+An operation the active emulator does not implement answers
+`501 EMULATOR_OPERATION_UNSUPPORTED`; the api remembers the rejection per
+(endpoint, service, operation) and the ui disables the action instead of
+retrying it.
 
 ## Service parity
 
@@ -456,9 +503,10 @@ The registry is the single source of truth for the sidebar, search and the
 router. "Dedicated" means a hand-written module (list, detail, create wizard),
 "generic browser" is driven by the registry's list/describe/delete/tags
 operations, and "planned" renders the per-service placeholder with the registry
-entry and whitelisted operations. Services the running LocalStack does not
-report are greyed out with the tooltip "Not emulated locally" — never hidden.
-This table is generated:
+entry and whitelisted operations. Services the running emulator does not report
+(or reports as disabled) are greyed out with provider-aware wording — never
+hidden. This table is generated from the LocalStack-keyed catalogue; other
+providers' keys are mapped onto it by `packages/shared/src/providers/aliases.ts`:
 
 ```bash
 pnpm gen:parity        # update the table below
@@ -614,16 +662,26 @@ request and manual dispatches:
    uploads `docs/screens/` as a build artifact (refreshing the committed images
    stays a developer decision).
 
-The smoke jobs' default image is the last release published before LocalStack's
+The smoke job runs as a matrix over the three supported emulators —
+**LocalStack**, **MiniStack** and **Floci** — each as a throwaway service
+container; every leg exercises the health/provider detection, S3, EC2, IAM and
+the generated browser against that emulator's real wire protocol. The LocalStack
+leg's default image is the last release published before LocalStack's
 unified-image licensing change, so a fresh clone's pipeline is green without any
 secret. To smoke-test a current LocalStack image (and licensed services), set
 the repository variable `LOCALSTACK_IMAGE` and the secret
 `LOCALSTACK_AUTH_TOKEN`; `.github/workflows/ci.yml` documents the exact values.
 Pull requests from forks always run on the free default image: repository
 variables are visible to fork builds while secrets are not. `eks` is
-intentionally absent from the workflow's `SERVICES` list, so the licensed EKS
+intentionally absent from the LocalStack `SERVICES` list, so the licensed EKS
 path is exercised only in a maintainer run that adds it (the EKS spec asserts
-the console's honest "not enabled" page otherwise).
+the console's honest "not enabled" page otherwise), and the MiniStack/Floci legs
+set `LOCALDECK_E2E_SKIP_EKS=1` to skip the Docker-heavy k3s creation flow.
+
+A separate **sidecar smoke** job builds `apps/console/Dockerfile`, starts Floci
+plus the console image on one network, and asserts the Floci Console Contract v1
+surface: `/api/health` reports `status: ok`, the `io.floci.console.*` labels are
+present, and an S3 flow plus the SPA load work through the single container.
 
 Releases are cut from semantic version tags. `.github/workflows/release.yml`
 verifies the tagged revision, then publishes both images to GHCR:
@@ -635,8 +693,8 @@ git push origin v1.2.3
 # -> ghcr.io/kubaeror/localdeck/ui:1.2.3,  :1.2, :1, :latest
 ```
 
-Run a released image against your own LocalStack (`LOCALSTACK_ENDPOINT` is the
-only value to change; it is never baked into the image):
+Run a released image against your own emulator (`EMULATOR_ENDPOINT` is the only
+value to change; it is never baked into the image):
 
 ```bash
 docker run --rm -p 8080:80 \
@@ -644,21 +702,43 @@ docker run --rm -p 8080:80 \
   ghcr.io/kubaeror/localdeck/ui:1.2.3
 ```
 
+## Sidecar mode (Floci Console Contract v1)
+
+`apps/console/` bundles the api and the built ui into one image for emulators
+that launch a console container themselves. Floci's contract asks for a process
+that listens on `$PORT` (default 4500), reads `AWS_ENDPOINT_URL`, and answers
+`GET /api/health` with a `status` field that reports emulator reachability
+rather than process liveness. The image declares the `io.floci.console.*` labels
+so Floci can resolve its shape with no configuration:
+
+```bash
+docker run --rm -p 4500:4500 \
+  -e AWS_ENDPOINT_URL=http://host.docker.internal:4566 \
+  ghcr.io/kubaeror/localdeck/console:1.2.3
+```
+
+`LOCALDECK_CONSOLE_CONTRACT=1` (the image default) makes an unreachable
+emulator answer `200 {"status":"unavailable", …}` instead of 503, and a
+reachable one `{"status":"ok", …}` with the rich provider/emulator payload
+still present for the LocalDeck ui. The normal two-container deployment is
+unchanged; the sidecar image is never part of `docker-compose.yml`.
+
 ## Scripts
 
 | Command                   | Description                                                                 |
 | ------------------------- | --------------------------------------------------------------------------- |
 | `pnpm dev`                | Watch mode for every workspace (`turbo run dev`).                           |
-| `pnpm build`              | Build `shared`, `api` and `ui`.                                             |
+| `pnpm build`              | Build `shared`, `api`, `ui` and the sidecar `console`.                      |
 | `pnpm typecheck`          | TypeScript strict check in every workspace.                                 |
 | `pnpm lint`               | ESLint (flat config); `pnpm lint:format` is Prettier.                       |
 | `pnpm test`               | Vitest in every workspace.                                                  |
-| `pnpm test:e2e`           | Playwright smoke tests against your LocalStack.                             |
+| `pnpm test:e2e`           | Playwright smoke tests against your emulator.                               |
 | `pnpm test:e2e:container` | Playwright container spec against `docker compose` (start the stack first). |
 | `pnpm test:e2e:screens`   | Refresh the README screenshots from a running ui.                           |
 | `pnpm gen:parity`         | Regenerate the parity table in this README.                                 |
 | `pnpm verify:repo`        | License, disclaimer, secret and image invariants.                           |
-| `pnpm verify:localstack`  | Live checks against the external LocalStack.                                |
+| `pnpm verify:emulator`    | Live checks against the external emulator (auto-detects the provider).      |
+| `pnpm verify:localstack`  | Alias for `pnpm verify:emulator`.                                           |
 | `pnpm verify:console`     | Console smoke test against a running api + stack.                           |
 | `pnpm turbo gen service`  | Scaffold a new service module.                                              |
 | `pnpm format`             | Prettier write.                                                             |
@@ -669,24 +749,26 @@ terminal if you are changing shared types.
 
 ## Environment variables (api)
 
-| Variable                           | Default                 | Meaning                                                         |
-| ---------------------------------- | ----------------------- | --------------------------------------------------------------- |
-| `LOCALSTACK_ENDPOINT`              | `http://localhost:4566` | External LocalStack base URL (compose: `host.docker.internal`). |
-| `AWS_REGION`                       | `us-east-1`             | Region used by every SDK client.                                |
-| `AWS_ACCESS_KEY_ID`                | `test`                  | LocalStack accepts any non-empty key.                           |
-| `AWS_SECRET_ACCESS_KEY`            | `test`                  | Same as above.                                                  |
-| `AWS_SESSION_TOKEN`                | empty                   | Session token for temporary credentials; empty sends none.      |
-| `HOST` / `PORT`                    | `0.0.0.0` / `3001`      | api listener.                                                   |
-| `CORS_ORIGIN`                      | `*`                     | Comma-separated allow-list, or `*`.                             |
-| `LOG_LEVEL`                        | `info`                  | pino level.                                                     |
-| `LOG_PRETTY`                       | dev only                | `pino-pretty` is a dev dependency, absent in images.            |
-| `LOCALSTACK_TIMEOUT_MS`            | `5000`                  | Health probe timeout.                                           |
-| `LOCALSTACK_CONNECTION_TIMEOUT_MS` | `3000`                  | Outbound SDK connection timeout.                                |
-| `LOCALSTACK_REQUEST_TIMEOUT_MS`    | `30000`                 | Outbound SDK request timeout; slower calls answer 504.          |
-| `LOCALSTACK_HEALTH_CACHE_MS`       | `2000`                  | Health-probe cache/single-flight window (`0` disables).         |
-| `LOCALSTACK_PUBLIC_ENDPOINT`       | = `LOCALSTACK_ENDPOINT` | Endpoint written into generated kubeconfigs (host-reachable).   |
-| `SHUTDOWN_TIMEOUT_MS`              | `10000`                 | Graceful-shutdown deadline before a forced exit.                |
-| `UI_STATUS_POLL_INTERVAL_MS`       | `15000`                 | Status refresh interval reported to the ui.                     |
+| Variable                         | Default                 | Meaning                                                                                                                           |
+| -------------------------------- | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `EMULATOR_ENDPOINT`              | `http://localhost:4566` | Emulator base URL. `AWS_ENDPOINT_URL` and `LOCALSTACK_ENDPOINT` are honoured aliases, in that order.                              |
+| `EMULATOR_PROVIDER`              | `auto`                  | `auto` \| `localstack` \| `ministack` \| `floci` \| `generic`.                                                                    |
+| `AWS_REGION`                     | `us-east-1`             | Region used by every SDK client.                                                                                                  |
+| `AWS_ACCESS_KEY_ID`              | `test`                  | The emulators accept any non-empty key.                                                                                           |
+| `AWS_SECRET_ACCESS_KEY`          | `test`                  | Same as above.                                                                                                                    |
+| `AWS_SESSION_TOKEN`              | empty                   | Session token for temporary credentials; empty sends none.                                                                        |
+| `HOST` / `PORT`                  | `0.0.0.0` / `3001`      | api listener.                                                                                                                     |
+| `CORS_ORIGIN`                    | empty (same-origin)     | Comma-separated allow-list; `*` reflects any origin (explicit opt-in — LocalDeck is an unauthenticated management proxy).         |
+| `LOG_LEVEL`                      | `info`                  | pino level (validated at startup).                                                                                                |
+| `LOG_PRETTY`                     | dev only                | `pino-pretty` is a dev dependency, absent in images.                                                                              |
+| `EMULATOR_TIMEOUT_MS`            | `5000`                  | Health probe timeout. Legacy: `LOCALSTACK_TIMEOUT_MS`.                                                                            |
+| `EMULATOR_CONNECTION_TIMEOUT_MS` | `3000`                  | Outbound SDK connection timeout. Legacy alias accepted.                                                                           |
+| `EMULATOR_REQUEST_TIMEOUT_MS`    | `30000`                 | Outbound SDK request timeout; slower calls answer 504.                                                                            |
+| `EMULATOR_HEALTH_CACHE_MS`       | `2000`                  | Health-probe cache/single-flight window (`0` disables).                                                                           |
+| `EMULATOR_PUBLIC_ENDPOINT`       | = `EMULATOR_ENDPOINT`   | Endpoint written into generated kubeconfigs (host-reachable).                                                                     |
+| `LOCALDECK_CONSOLE_CONTRACT`     | `0`                     | Floci Console Contract v1 mode: unreachable answers 200 `status: unavailable` on `/api/health`. The sidecar image sets it to `1`. |
+| `SHUTDOWN_TIMEOUT_MS`            | `10000`                 | Graceful-shutdown deadline before a forced exit.                                                                                  |
+| `UI_STATUS_POLL_INTERVAL_MS`     | `15000`                 | Status refresh interval reported to the ui.                                                                                       |
 
 The ui has one build-time value: `VITE_API_BASE_URL` is compiled into the
 bundle by Vite (empty means same-origin `/api`). It is not read at runtime — in
@@ -700,7 +782,9 @@ own terms — see [NOTICE](NOTICE).
 
 Amazon Web Services, AWS and the Powered by AWS logo are trademarks of
 Amazon.com, Inc. or its affiliates. LocalDeck is not affiliated with or endorsed
-by Amazon Web Services.
+by Amazon Web Services. LocalDeck is likewise an independent project, not
+affiliated with LocalStack, MiniStack or Floci; those names are used factually
+to describe interoperability.
 
 The repository contains no screenshots of another cloud console: every image
 under `docs/screens/` is captured from LocalDeck's own ui. Contributions follow

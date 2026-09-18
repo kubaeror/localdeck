@@ -146,7 +146,11 @@ export function UserDetailPage({ descriptor }: ServicePageProps): ReactElement {
             content: (
               <SpaceBetween size="l">
                 <AttachedPoliciesPanel entity="user" name={userName} />
-                <PermissionsBoundaryNotice entity="user" name={userName} />
+                <PermissionsBoundaryNotice
+                  entity="user"
+                  name={userName}
+                  boundary={user?.permissionsBoundary}
+                />
               </SpaceBetween>
             ),
           },

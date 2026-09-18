@@ -2,8 +2,8 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FlashbarProvider } from '../../../contexts/FlashbarProvider';
-import { LocalStackStatusProvider } from '../../../contexts/LocalStackStatusProvider';
-import { stubApiFetch } from '../../../test/fixtures';
+import { EmulatorStatusProvider } from '../../../contexts/EmulatorStatusProvider';
+import { TEST_HEALTH, stubApiFetch } from '../../../test/fixtures';
 import type { EksCluster } from '../api';
 import { kubeconfigCommands, shellQuote } from './connectCommands';
 import { ConnectLocally } from './ConnectLocally';
@@ -47,6 +47,13 @@ describe('ConnectLocally shell quoting', () => {
     expect(commands).toContain("export KUBECONFIG=~/Downloads/'kubeconfig-cluster.yaml'");
     expect(commands).toContain("export AWS_ENDPOINT_URL='http://127.0.0.1:4566'");
   });
+
+  it('names the active provider in the command comments', () => {
+    const commands = kubeconfigCommands('c', 'http://localhost:4566', 'us-east-1', 'MiniStack');
+
+    expect(commands).toContain('# your MiniStack endpoint');
+    expect(commands).toContain('# 2. Let the kubeconfig credential plugin reach the emulator');
+  });
 });
 
 describe('ConnectLocally', () => {
@@ -58,11 +65,11 @@ describe('ConnectLocally', () => {
   it('renders the live endpoint and region from the status provider', async () => {
     stubApiFetch();
     render(
-      <LocalStackStatusProvider>
+      <EmulatorStatusProvider>
         <FlashbarProvider>
           <ConnectLocally cluster={CLUSTER} />
         </FlashbarProvider>
-      </LocalStackStatusProvider>,
+      </EmulatorStatusProvider>,
     );
 
     // The status provider resolves /api/config and /api/health on mount; a
@@ -73,5 +80,31 @@ describe('ConnectLocally', () => {
     expect(pre?.textContent ?? '').toContain("export AWS_ENDPOINT_URL='http://localhost:4566'");
     expect(pre?.textContent ?? '').toContain("AWS_REGION='us-east-1'");
     expect(screen.getByRole('button', { name: 'Download kubeconfig' })).toBeDefined();
+  });
+
+  it('uses the provider label from the health document in the copy', async () => {
+    const providerLabel = 'MiniStack';
+    stubApiFetch({
+      health: {
+        ...TEST_HEALTH,
+        provider: { ...TEST_HEALTH.provider, providerLabel },
+        emulator: { ...TEST_HEALTH.emulator, providerLabel },
+      },
+    });
+    render(
+      <EmulatorStatusProvider>
+        <FlashbarProvider>
+          <ConnectLocally cluster={CLUSTER} />
+        </FlashbarProvider>
+      </EmulatorStatusProvider>,
+    );
+
+    expect(
+      await screen.findByText(new RegExp(`${providerLabel} exposes the Kubernetes API`)),
+    ).toBeDefined();
+    expect(screen.getByText(new RegExp(`pinned to your ${providerLabel} endpoint`))).toBeDefined();
+    expect(screen.getByText(`${providerLabel} EKS documentation`)).toBeDefined();
+    const pre = document.querySelector('pre');
+    expect(pre?.textContent ?? '').toContain(`# your ${providerLabel} endpoint`);
   });
 });

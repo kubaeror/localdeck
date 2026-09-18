@@ -3,16 +3,17 @@ import Button from '@cloudscape-design/components/button';
 import Header from '@cloudscape-design/components/header';
 import Pagination from '@cloudscape-design/components/pagination';
 import SpaceBetween from '@cloudscape-design/components/space-between';
+import Spinner from '@cloudscape-design/components/spinner';
 import Table from '@cloudscape-design/components/table';
 import type { TableProps } from '@cloudscape-design/components/table';
-import type { LocalStackServiceStatus } from '@localdeck/shared';
+import type { EmulatorServiceState } from '@localdeck/shared';
 import { useMemo, useState, type ReactElement } from 'react';
 import { formatServiceName } from '../lib/format';
 import { StatusBadge } from './StatusBadge';
 
 interface ServiceRow {
   id: string;
-  status: LocalStackServiceStatus;
+  status: EmulatorServiceState;
 }
 
 const PAGE_SIZE = 20;
@@ -32,20 +33,28 @@ const COLUMN_DEFINITIONS: TableProps.ColumnDefinition<ServiceRow>[] = [
   },
   {
     id: 'status',
-    header: 'LocalStack status',
+    header: 'Provider status',
     sortingField: 'status',
     cell: (row) => <StatusBadge status={row.status} />,
   },
 ];
 
 export interface ServiceAvailabilityTableProps {
-  services: Readonly<Record<string, LocalStackServiceStatus>>;
+  services: Readonly<Record<string, EmulatorServiceState>>;
+  providerLabel: string;
+  /** True while the first health probe is still running. */
+  loading?: boolean;
+  /** False for endpoints with no service inventory (generic fallback). */
+  hasServiceInventory?: boolean;
   onRefresh: () => void;
 }
 
-/** Every service reported by /_localstack/health, with its current status. */
+/** Every service reported by the active emulator's health document. */
 export function ServiceAvailabilityTable({
   services,
+  providerLabel,
+  loading = false,
+  hasServiceInventory = true,
   onRefresh,
 }: ServiceAvailabilityTableProps): ReactElement {
   const [sortingColumn, setSortingColumn] = useState<TableProps.SortingColumn<ServiceRow>>({
@@ -75,6 +84,18 @@ export function ServiceAvailabilityTable({
   const pageIndex = Math.min(currentPageIndex, pagesCount);
   const visibleRows = rows.slice((pageIndex - 1) * PAGE_SIZE, pageIndex * PAGE_SIZE);
 
+  const emptyState = loading ? (
+    <Box textAlign="center" padding="l">
+      <Spinner /> <Box variant="span">Checking {providerLabel}…</Box>
+    </Box>
+  ) : (
+    <Box textAlign="center">
+      {hasServiceInventory
+        ? `No services reported by ${providerLabel}.`
+        : `${providerLabel} does not expose a service inventory; services are verified as they are used.`}
+    </Box>
+  );
+
   return (
     <Table<ServiceRow>
       items={visibleRows}
@@ -90,7 +111,7 @@ export function ServiceAvailabilityTable({
         <Header
           variant="h2"
           counter={`(${rows.length})`}
-          description="Reported live by the LocalStack health endpoint."
+          description={`Reported live by ${providerLabel}'s health endpoint.`}
           actions={
             <SpaceBetween size="xs" direction="horizontal">
               <Button iconName="refresh" onClick={onRefresh}>
@@ -99,7 +120,7 @@ export function ServiceAvailabilityTable({
             </SpaceBetween>
           }
         >
-          Emulated services
+          Reported services
         </Header>
       }
       pagination={
@@ -111,7 +132,7 @@ export function ServiceAvailabilityTable({
           }}
         />
       }
-      empty={<Box textAlign="center">No services reported by LocalStack.</Box>}
+      empty={emptyState}
     />
   );
 }

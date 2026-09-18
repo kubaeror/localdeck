@@ -6,9 +6,9 @@ import { useNavigate } from 'react-router-dom';
 import { GLOBAL_SEARCH_SHORTCUT_LABEL } from '../contexts/global-search-context';
 import { useFlashbar } from '../hooks/useFlashbar';
 import { useGlobalSearch } from '../hooks/useGlobalSearch';
-import { useLocalStackStatus } from '../hooks/useLocalStackStatus';
+import { useEmulatorStatus } from '../hooks/useEmulatorStatus';
 import { useRecentlyVisited } from '../hooks/useRecentlyVisited';
-import { CONSOLE_HOME_PATH, LOCALSTACK_SERVICES_DOCS_URL } from '../services/paths';
+import { CONSOLE_HOME_PATH, DEFAULT_EMULATOR_DOCS_URL } from '../services/paths';
 
 export interface ConsoleTopNavigationProps {
   onOpenHelp: () => void;
@@ -22,16 +22,17 @@ export interface ConsoleTopNavigationProps {
  */
 export function ConsoleTopNavigation({ onOpenHelp }: ConsoleTopNavigationProps): ReactElement {
   const navigate = useNavigate();
-  const status = useLocalStackStatus();
+  const status = useEmulatorStatus();
   const search = useGlobalSearch();
   const recentlyVisited = useRecentlyVisited();
   const flashbar = useFlashbar();
 
-  const region = status.config?.localstack.region ?? null;
-  const endpoint = status.config?.localstack.endpoint ?? null;
-  const stack = status.health?.localstack ?? null;
-  const stackVersion = stack?.version ?? null;
-  const stackEdition = stack?.edition ?? null;
+  const region = status.config?.emulator.region ?? null;
+  const endpoint = status.config?.emulator.endpoint ?? null;
+  const providerLabel = status.health?.provider.providerLabel ?? 'Emulator';
+  const stackVersion = status.health?.provider.version ?? null;
+  const stackEdition = status.health?.provider.edition ?? null;
+  const providerDocsUrl = status.health?.provider.docsUrl ?? DEFAULT_EMULATOR_DOCS_URL;
 
   // Stable handlers, so the utilities memo is not rebuilt every time the
   // status poll produces a new state object.
@@ -45,22 +46,21 @@ export function ConsoleTopNavigation({ onOpenHelp }: ConsoleTopNavigationProps):
       {
         id: 'region',
         text: region === null ? 'Region: loading…' : `Region: ${region}`,
-        description:
-          'One region per instance: LocalStack serves every request from the region the api is configured with.',
+        description: `One region per instance: ${providerLabel} serves every request from the region the api is configured with.`,
         disabled: true,
       },
       {
         id: 'endpoint',
         text: endpoint === null ? 'Endpoint: loading…' : `Endpoint: ${endpoint}`,
-        description: 'LocalStack base URL the LocalDeck api proxies to.',
+        description: `${providerLabel} base URL the LocalDeck api proxies to.`,
         disabled: true,
       },
       {
         id: 'stack',
         text:
           stackVersion === null
-            ? 'LocalStack: unreachable'
-            : `LocalStack ${stackVersion} (${stackEdition ?? 'unknown'})`,
+            ? `${providerLabel}: unreachable`
+            : `${providerLabel} ${stackVersion} (${stackEdition ?? 'unknown'})`,
         disabled: true,
       },
       { id: 'refresh', text: 'Refresh status' },
@@ -70,8 +70,8 @@ export function ConsoleTopNavigation({ onOpenHelp }: ConsoleTopNavigationProps):
       { id: 'about', text: 'About this console' },
       {
         id: 'docs',
-        text: 'LocalStack documentation',
-        href: LOCALSTACK_SERVICES_DOCS_URL,
+        text: `${providerLabel} documentation`,
+        href: providerDocsUrl,
         external: true,
         externalIconAriaLabel: 'Opens in a new tab',
       },
@@ -81,7 +81,8 @@ export function ConsoleTopNavigation({ onOpenHelp }: ConsoleTopNavigationProps):
       {
         id: 'account',
         text: 'Account 000000000000',
-        description: "LocalStack's fixed test account id.",
+        description:
+          'Default account id; MiniStack derives the account from a 12-digit AWS_ACCESS_KEY_ID.',
         disabled: true,
       },
       {
@@ -112,7 +113,7 @@ export function ConsoleTopNavigation({ onOpenHelp }: ConsoleTopNavigationProps):
       text: region === null ? 'Region (local)' : `${region} (local)`,
       ariaLabel: 'Region and stack details',
       disableUtilityCollapse: true,
-      description: 'This console is bound to the LocalStack instance your api is configured with.',
+      description: `This console is bound to the ${providerLabel} instance your api is configured with.`,
       items: regionItems,
       onItemClick: ({ detail }) => {
         if (detail.id === 'refresh') refreshStatus();
@@ -162,15 +163,14 @@ export function ConsoleTopNavigation({ onOpenHelp }: ConsoleTopNavigationProps):
         iconName: 'command-prompt',
         ariaLabel: 'Terminal (not implemented yet)',
         disableUtilityCollapse: true,
-        title: 'LocalStack terminal',
+        title: `${providerLabel} terminal`,
         description:
           'A browser terminal that runs AWS CLI commands against this endpoint is not part of this LocalDeck release yet.',
         items: [
           {
             id: 'terminal-unavailable',
             text: 'Not implemented yet',
-            description:
-              'Until then, run the AWS CLI yourself with --endpoint-url pointing at your LocalStack instance.',
+            description: `Until then, run the AWS CLI yourself with --endpoint-url pointing at your ${providerLabel} instance.`,
             disabled: true,
           },
         ],
@@ -185,6 +185,8 @@ export function ConsoleTopNavigation({ onOpenHelp }: ConsoleTopNavigationProps):
     notify,
     onOpenHelp,
     openSearch,
+    providerDocsUrl,
+    providerLabel,
     refreshStatus,
     region,
     stackEdition,

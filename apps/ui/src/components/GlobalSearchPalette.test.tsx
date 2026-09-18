@@ -4,7 +4,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FlashbarProvider } from '../contexts/FlashbarProvider';
 import { GlobalSearchProvider } from '../contexts/GlobalSearchProvider';
-import { LocalStackStatusProvider } from '../contexts/LocalStackStatusProvider';
+import { EmulatorStatusProvider } from '../contexts/EmulatorStatusProvider';
 import { RecentlyVisitedProvider } from '../contexts/RecentlyVisitedProvider';
 import { ServiceCatalogProvider } from '../contexts/ServiceCatalogProvider';
 import { stubApiFetch } from '../test/fixtures';
@@ -14,7 +14,7 @@ function renderSearchApp(): void {
   render(
     <MemoryRouter initialEntries={['/console/home']}>
       <FlashbarProvider>
-        <LocalStackStatusProvider>
+        <EmulatorStatusProvider>
           <ServiceCatalogProvider>
             <RecentlyVisitedProvider>
               <GlobalSearchProvider>
@@ -26,7 +26,7 @@ function renderSearchApp(): void {
               </GlobalSearchProvider>
             </RecentlyVisitedProvider>
           </ServiceCatalogProvider>
-        </LocalStackStatusProvider>
+        </EmulatorStatusProvider>
       </FlashbarProvider>
     </MemoryRouter>,
   );
@@ -93,6 +93,9 @@ describe('GlobalSearchPalette', () => {
     fireEvent.change(searchBox(), { target: { value: '$$$' } });
 
     expect(await screen.findByText(/No service matches/)).toBeDefined();
+    // There is no listbox to expand, and the polite live region announces it.
+    expect(searchBox().getAttribute('aria-expanded')).toBe('false');
+    expect(screen.getByRole('status').textContent).toBe('0 matches');
   });
 
   it('moves the highlight with the arrow keys', async () => {
@@ -139,6 +142,11 @@ describe('GlobalSearchPalette', () => {
       expect(options[0]?.getAttribute('aria-selected')).toBe('true');
       expect(scrollIntoView).toHaveBeenCalled();
 
+      // The live region announces the result count that the listbox expands to.
+      expect(screen.getByRole('status').textContent).toBe(
+        `${options.length} ${options.length === 1 ? 'match' : 'matches'}`,
+      );
+
       fireEvent.keyDown(combo, { key: 'ArrowDown' });
       expect(options[1]?.id).toBe(combo.getAttribute('aria-activedescendant'));
       expect(options[1]?.getAttribute('aria-selected')).toBe('true');
@@ -153,13 +161,13 @@ describe('GlobalSearchPalette', () => {
     render(
       <MemoryRouter>
         <FlashbarProvider>
-          <LocalStackStatusProvider>
+          <EmulatorStatusProvider>
             <ServiceCatalogProvider>
               <RecentlyVisitedProvider>
                 <GlobalSearchPaletteHarness onDismiss={onDismiss} />
               </RecentlyVisitedProvider>
             </ServiceCatalogProvider>
-          </LocalStackStatusProvider>
+          </EmulatorStatusProvider>
         </FlashbarProvider>
       </MemoryRouter>,
     );

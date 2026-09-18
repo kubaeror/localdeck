@@ -52,11 +52,24 @@ export interface NodegroupScaling {
   desiredSize: number;
 }
 
+export interface ScalingRules {
+  /**
+   * `CreateNodegroup` needs at least one desired node; `UpdateNodegroupConfig`
+   * may scale a node group down to zero.
+   */
+  requireDesired?: boolean;
+}
+
 /**
  * Validates one scaling configuration. Returns the problem message, or `null`
- * when the numbers are consistent (min ≤ desired ≤ max, all positive).
+ * when the numbers are consistent (min ≤ desired ≤ max). `maxSize` is always
+ * at least 1: EKS rejects a node group whose maximum is 0. `minSize` and, for
+ * updates, `desiredSize` may be 0.
  */
-export function validateScaling(scaling: NodegroupScaling): string | null {
+export function validateScaling(
+  scaling: NodegroupScaling,
+  rules: ScalingRules = {},
+): string | null {
   const { minSize, maxSize, desiredSize } = scaling;
   for (const [label, value] of [
     ['Minimum', minSize],
@@ -67,6 +80,10 @@ export function validateScaling(scaling: NodegroupScaling): string | null {
       return `${label} size must be a whole number of nodes (0 or more).`;
     }
     if (value > 1000) return `${label} size is limited to 1000 nodes.`;
+  }
+  if (maxSize < 1) return 'Maximum size must be at least 1 node.';
+  if (rules.requireDesired === true && desiredSize < 1) {
+    return 'Desired size must be at least 1 node when the node group is created.';
   }
   if (minSize > desiredSize) return 'Minimum size cannot be larger than the desired size.';
   if (desiredSize > maxSize) return 'Desired size cannot be larger than the maximum size.';

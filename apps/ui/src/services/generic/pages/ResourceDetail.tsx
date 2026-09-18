@@ -115,6 +115,10 @@ export function GenericResourceDetail({ descriptor }: ServicePageProps): ReactEl
   const browser = descriptor.browser;
 
   const [resource, setResource] = useState<Record<string, unknown> | null>(null);
+  // The id the current `resource` was described for. A deep-link/route change
+  // reaches the tags effect one commit before `resource` is reset, so the
+  // effect also compares this against the route id.
+  const [describedId, setDescribedId] = useState<string | null>(null);
   const [phase, setPhase] = useState<Phase>('loading');
   const [error, setError] = useState<ApiError | null>(null);
   const [tags, setTags] = useState<TagsState>('loading');
@@ -127,9 +131,14 @@ export function GenericResourceDetail({ descriptor }: ServicePageProps): ReactEl
 
   useEffect(() => {
     const controller = new AbortController();
-    // The initial load (and explicit retries) must show the loading state;
-    // every state update after that happens in the fetch continuation.
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- initial data fetch
+    // The previous resource (properties, raw JSON and tags) must not stay on
+    // screen while the new id is described: reset it and show the loading
+    // state. Every state update after this happens in the fetch continuation.
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset + initial data fetch
+    setResource(null);
+    setDescribedId(null);
+    setTags('loading');
+    setTagsError(null);
     setPhase('loading');
 
     void (async () => {
@@ -137,6 +146,7 @@ export function GenericResourceDetail({ descriptor }: ServicePageProps): ReactEl
         const described = await describeGenericResource(descriptor, resourceId, controller.signal);
         if (controller.signal.aborted) return;
         setResource(described);
+        setDescribedId(resourceId);
         setError(null);
         setPhase('ready');
       } catch (caught) {
@@ -153,7 +163,11 @@ export function GenericResourceDetail({ descriptor }: ServicePageProps): ReactEl
 
   // Tags load (and retry) independently of the describe call.
   useEffect(() => {
-    if (resource === null) return undefined;
+    // On an id change this effect runs in the commit where `resource` is still
+    // the previous one; without the described-id guard it would ask for tags
+    // for the new id (or read embedded tags from the old resource) before that
+    // id's describe has completed.
+    if (resource === null || describedId !== resourceId) return undefined;
     const controller = new AbortController();
     // eslint-disable-next-line react-hooks/set-state-in-effect -- tags fetch for the described resource
     setTags('loading');
@@ -179,7 +193,7 @@ export function GenericResourceDetail({ descriptor }: ServicePageProps): ReactEl
     return () => {
       controller.abort();
     };
-  }, [descriptor, resource, resourceId, tagsReloadToken]);
+  }, [describedId, descriptor, resource, resourceId, tagsReloadToken]);
 
   const details = useMemo(() => (resource === null ? [] : flattenDetails(resource)), [resource]);
   const title = resource === null ? resourceId : resourceTitle(resource, browser?.list, resourceId);

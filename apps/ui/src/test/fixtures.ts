@@ -2,11 +2,11 @@ import {
   SERVICE_CATALOG,
   isApiErrorResponse,
   serviceCategories,
-  summarizeServiceAvailability,
+  summarizeServiceStates,
   type ApiConfigResponse,
   type ApiErrorResponse,
   type HealthResponse,
-  type LocalStackServiceStatus,
+  type EmulatorServiceState,
   type ServiceRegistryResponse,
 } from '@localdeck/shared';
 import { vi } from 'vitest';
@@ -16,30 +16,33 @@ import { vi } from 'vitest';
  * Glacier, FSx and friends are missing so tests can assert that unreported
  * registry entries are greyed out instead of hidden.
  */
-export const REPORTED_SERVICES: Record<string, LocalStackServiceStatus> = {
-  s3: 'available',
-  lambda: 'available',
-  dynamodb: 'available',
-  sqs: 'available',
-  sns: 'available',
-  logs: 'available',
-  iam: 'available',
-  ecs: 'available',
-  ecr: 'available',
-  cloudformation: 'available',
-  stepfunctions: 'available',
-  apigateway: 'available',
-  elb: 'available',
-  es: 'available',
+export const REPORTED_SERVICES: Record<string, EmulatorServiceState> = {
+  s3: 'enabled',
+  lambda: 'enabled',
+  dynamodb: 'enabled',
+  sqs: 'enabled',
+  sns: 'enabled',
+  logs: 'enabled',
+  iam: 'enabled',
+  ecs: 'enabled',
+  ecr: 'enabled',
+  cloudformation: 'enabled',
+  stepfunctions: 'enabled',
+  apigateway: 'enabled',
+  elbv2: 'enabled',
+  opensearch: 'enabled',
   secretsmanager: 'starting',
 };
 
 export const TEST_CONFIG: ApiConfigResponse = {
   application: { name: 'LocalDeck', version: '0.1.0', environment: 'test' },
-  localstack: {
+  emulator: {
+    provider: 'localstack',
+    providerLabel: 'LocalStack',
     endpoint: 'http://localhost:4566',
+    publicEndpoint: 'http://localhost:4566',
     region: 'us-east-1',
-    healthPath: '/_localstack/health',
+    healthPaths: ['/_localstack/health'],
   },
   ui: { statusPollIntervalMs: 60_000 },
 };
@@ -50,12 +53,24 @@ export const TEST_HEALTH: HealthResponse = {
   latencyMs: 21,
   endpoint: 'http://localhost:4566',
   region: 'us-east-1',
-  localstack: {
+  provider: {
+    provider: 'localstack',
+    providerLabel: 'LocalStack',
     version: '2026.8.2',
     edition: 'pro',
+    docsUrl: 'https://docs.localstack.cloud/aws/services/',
+  },
+  emulator: {
+    provider: 'localstack',
+    providerLabel: 'LocalStack',
+    version: '2026.8.2',
+    edition: 'pro',
+    hasServiceInventory: true,
     services: REPORTED_SERVICES,
+    rawServices: REPORTED_SERVICES,
     features: { persistence: 'disabled' },
-    counts: summarizeServiceAvailability(REPORTED_SERVICES),
+    counts: summarizeServiceStates(REPORTED_SERVICES),
+    ready: null,
   },
 };
 
@@ -71,15 +86,18 @@ export function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-export const LOCALSTACK_UNREACHABLE: ApiErrorResponse = {
+export const EMULATOR_UNREACHABLE: ApiErrorResponse = {
   error: {
-    code: 'LOCALSTACK_UNREACHABLE',
+    code: 'EMULATOR_UNREACHABLE',
     statusCode: 503,
     message:
       'LocalDeck api is running, but LocalStack is unreachable at http://localhost:4566 (ECONNREFUSED).',
     details: { endpoint: 'http://localhost:4566', reason: 'ECONNREFUSED' },
   },
 };
+
+/** @deprecated Renamed to EMULATOR_UNREACHABLE. */
+export const LOCALSTACK_UNREACHABLE = EMULATOR_UNREACHABLE;
 
 /** Results the stubbed dispatcher answers with, per `service/operation`. */
 export const TEST_OPERATION_RESULTS: Readonly<Record<string, unknown>> = {
@@ -196,7 +214,7 @@ export function stubApiFetch(options: StubApiOptions = {}): void {
 
     if (url.includes('/api/services')) return jsonResponse(TEST_REGISTRY);
     if (url.includes('/api/health')) {
-      if (options.unreachable === true) return jsonResponse(LOCALSTACK_UNREACHABLE, 503);
+      if (options.unreachable === true) return jsonResponse(EMULATOR_UNREACHABLE, 503);
       return jsonResponse(options.health ?? TEST_HEALTH);
     }
     return new Response('{}', { status: 404 });

@@ -23,11 +23,13 @@ import {
   deleteFolder,
   deleteObjects,
   downloadObjectUrl,
+  getBucketVersioning,
   listObjects,
   triggerDownload,
   type S3Bucket,
   type S3ObjectEntry,
   type S3ObjectPage,
+  type S3VersioningStatus,
 } from '../api';
 import { toFriendlyS3Error } from '../errors';
 import { BucketListPanel } from './BucketListPanel';
@@ -77,6 +79,35 @@ function sortEntries(
 }
 
 /**
+ * Confirmation wording for a folder delete. In a versioned bucket a plain
+ * DeleteObjects only adds delete markers, so the copy must say that prior
+ * versions survive instead of claiming the folder is permanently erased.
+ */
+function folderDeleteDescription(versioning: S3VersioningStatus | null): string {
+  if (versioning === 'Enabled') {
+    return (
+      'Deleting a folder adds delete markers for every object under it. Because versioning ' +
+      'is enabled on this bucket, previous versions remain and DeleteBucket will still fail ' +
+      'with "BucketNotEmpty" until those versions are permanently deleted. This action cannot ' +
+      'be undone.'
+    );
+  }
+  if (versioning === 'Suspended') {
+    return (
+      'Deleting a folder adds delete markers for every object under it. Versioning was ' +
+      'enabled on this bucket before, so older versions can remain and DeleteBucket may ' +
+      'still fail with "BucketNotEmpty". This action cannot be undone.'
+    );
+  }
+  if (versioning === 'Unversioned') {
+    return 'Deleting a folder permanently deletes every object under it. This action cannot be undone.';
+  }
+  // Versioning is unknown (the read failed or is still in flight): do not claim
+  // the objects are removed for good.
+  return 'Deleting a folder deletes the objects under it. This action cannot be undone.';
+}
+
+/**
  * The bucket's Objects tab: the console's two-panel browser. The left panel
  * lists buckets, the right panel browses one prefix at a time with
  * `Delimiter: '/'`, so S3 reports folders as common prefixes and objects as
@@ -112,8 +143,15 @@ export function ObjectsTab({
   const [deleteTargets, setDeleteTargets] = useState<readonly S3ObjectEntry[] | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  /**
+   * The bucket's versioning as of opening the delete confirmation; `null`
+   * until it is known (or when the read failed). A versioned bucket gets the
+   * version-retention wording instead of "every object under it".
+   */
+  const [bucketVersioning, setBucketVersioning] = useState<S3VersioningStatus | null>(null);
 
   const inFlight = useRef<AbortController | null>(null);
+  const versioningAbort = useRef<AbortController | null>(null);
   // Bumped whenever the folder (or bucket) changes; a "load more" response that
   // belongs to a previous generation must never be appended to the new page.
   const requestGeneration = useRef(0);
@@ -160,6 +198,7 @@ export function ObjectsTab({
     void loadObjects();
     return () => {
       inFlight.current?.abort();
+      versioningAbort.current?.abort();
       requestGeneration.current += 1;
     };
   }, [loadObjects]);
@@ -220,9 +259,39 @@ export function ObjectsTab({
     setMetadataEntry(entry);
   }, []);
 
-  const download = (entry: S3ObjectEntry): void => {
-    triggerDownload(downloadObjectUrl({ bucket, key: entry.key }));
-  };
+  const download = useCallback(
+    (entry: S3ObjectEntry): void => {
+      triggerDownload(downloadObjectUrl({ bucket, key: entry.key }));
+    },
+    [bucket],
+  );
+
+  /**
+   * Opens the delete confirmation and resolves the bucket's versioning state,
+   * which decides whether DeleteObjects removes objects or only adds delete
+   * markers; the confirmation copy and the post-delete caveat depend on it.
+   */
+  const requestDelete = useCallback(
+    (targets: readonly S3ObjectEntry[]): void => {
+      setDeleteTargets(targets);
+      setDeleteError(null);
+      setBucketVersioning(null);
+      versioningAbort.current?.abort();
+      const controller = new AbortController();
+      versioningAbort.current = controller;
+      void getBucketVersioning(bucket, controller.signal).then(
+        (result) => {
+          if (!controller.signal.aborted) setBucketVersioning(result.status);
+        },
+        () => {
+          // An unknown status must not block the delete; the copy stays
+          // neutral and the retention caveat is only shown when it is known.
+          if (!controller.signal.aborted) setBucketVersioning(null);
+        },
+      );
+    },
+    [bucket],
+  );
 
   const confirmDelete = async (): Promise<void> => {
     const targets = deleteTargets ?? [];
@@ -235,24 +304,26 @@ export function ObjectsTab({
       const folders = targets.filter((entry) => entry.kind === 'folder').map((entry) => entry.key);
 
       let deleted = 0;
-      const failures: string[] = [];
+      const failures: { key: string; detail: string }[] = [];
 
       if (objects.length > 0) {
         const result = await deleteObjects({ bucket, keys: objects });
         deleted += result.deleted.length;
         failures.push(
-          ...result.failures.map(
-            (failure) => `${failure.key}: ${failure.message ?? failure.code ?? 'failed'}`,
-          ),
+          ...result.failures.map((failure) => ({
+            key: failure.key,
+            detail: failure.message ?? failure.code ?? 'failed',
+          })),
         );
       }
       for (const folder of folders) {
         const result = await deleteFolder({ bucket, prefix: folder });
         deleted += result.deleted.length;
         failures.push(
-          ...result.failures.map(
-            (failure) => `${failure.key}: ${failure.message ?? failure.code ?? 'failed'}`,
-          ),
+          ...result.failures.map((failure) => ({
+            key: failure.key,
+            detail: failure.message ?? failure.code ?? 'failed',
+          })),
         );
       }
 
@@ -265,9 +336,31 @@ export function ObjectsTab({
             .join(', ')
             .slice(0, 200),
         });
+        if (bucketVersioning === 'Enabled' || bucketVersioning === 'Suspended') {
+          // The delete markers hide the objects from ListObjectsV2 but the
+          // versions stay, so DeleteBucket will still answer BucketNotEmpty.
+          flashbar.notify({
+            type: 'warning',
+            header:
+              bucketVersioning === 'Enabled'
+                ? 'Object versions remain'
+                : 'Object versions may remain',
+            content:
+              bucketVersioning === 'Enabled'
+                ? 'Versioning is enabled on this bucket, so the deleted objects left prior versions behind. DeleteBucket will fail with "BucketNotEmpty" until every object version is permanently deleted.'
+                : 'Versioning was enabled on this bucket before, so older object versions can remain after this delete. DeleteBucket can still fail with "BucketNotEmpty" until every version is removed.',
+          });
+        }
       }
       for (const failure of failures) {
-        flashbar.notify({ type: 'error', header: 'Could not delete an object', content: failure });
+        // The key belongs in the header: the FlashbarProvider coalesces
+        // identical type+header messages, and a generic header would hide
+        // every failure after the first.
+        flashbar.notify({
+          type: 'error',
+          header: `Could not delete an object: ${failure.key}`,
+          content: failure.detail,
+        });
       }
       setDeleteTargets(null);
     } catch (caught) {
@@ -365,15 +458,14 @@ export function ObjectsTab({
               if (detail.id === 'download') download(entry);
               if (detail.id === 'copy') setCopyMove({ mode: 'copy', entry });
               if (detail.id === 'move') setCopyMove({ mode: 'move', entry });
-              if (detail.id === 'delete') setDeleteTargets([entry]);
+              if (detail.id === 'delete') requestDelete([entry]);
             }}
           />
         ),
       },
     ],
-    // openEntry/download only close over setState and the bucket prop.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [openEntry, bucket],
+    // The callbacks carry every captured value (bucket included).
+    [openEntry, download, requestDelete],
   );
 
   const selectionActions =
@@ -401,7 +493,7 @@ export function ObjectsTab({
           ]}
           onItemClick={({ detail }) => {
             const entry = selected[0];
-            if (detail.id === 'delete') setDeleteTargets([...selected]);
+            if (detail.id === 'delete') requestDelete([...selected]);
             if (entry === undefined) return;
             if (detail.id === 'download') download(entry);
             if (detail.id === 'copy') setCopyMove({ mode: 'copy', entry });
@@ -427,7 +519,7 @@ export function ObjectsTab({
         Upload
       </Button>
       <Button onClick={() => setCreateFolderVisible(true)}>Create folder</Button>
-      <InfoTooltip content="Version history requires ListObjectVersions, which is not enabled in the LocalDeck registry yet.">
+      <InfoTooltip content="Version history needs the ListObjectVersions operation, which is not whitelisted for this LocalDeck build, so this action stays disabled.">
         <Button disabled>Show versions</Button>
       </InfoTooltip>
       <Button iconName="refresh" ariaLabel="Refresh objects" loading={loading} onClick={reload} />
@@ -620,7 +712,7 @@ export function ObjectsTab({
           subjects={deleteTargets.map((entry) => entry.key)}
           description={
             deleteTargets.some((entry) => entry.kind === 'folder')
-              ? 'Deleting a folder also deletes every object under it. This action cannot be undone.'
+              ? folderDeleteDescription(bucketVersioning)
               : 'This action cannot be undone.'
           }
           confirmationText="delete"

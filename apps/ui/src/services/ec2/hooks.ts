@@ -15,7 +15,21 @@ export interface Ec2Resource<T> {
   /** True while a later reload is in flight (the data stays on screen). */
   refreshing: boolean;
   error: ApiError | null;
-  reload: () => Promise<void>;
+  /**
+   * Reloads the resource. A polling caller passes `{ silent: true }` so a
+   * transient failure keeps the last known data on screen; the initial load
+   * and explicit retries clear it.
+   */
+  reload: (options?: Ec2ReloadOptions) => Promise<void>;
+}
+
+export interface Ec2ReloadOptions {
+  /**
+   * A background refresh: on failure the previous data stays (with the error)
+   * instead of blanking the page. Polling must keep observing the last known
+   * state, so it cannot be stopped by a dropped connection.
+   */
+  silent?: boolean;
 }
 
 /**
@@ -37,7 +51,7 @@ export function useEc2Resource<T>(loader: () => Promise<T>): Ec2Resource<T> {
     loaderRef.current = loader;
   }, [loader]);
 
-  const reload = useCallback(async (): Promise<void> => {
+  const reload = useCallback(async (options?: Ec2ReloadOptions): Promise<void> => {
     const id = requestId.current + 1;
     requestId.current = id;
     if (firstLoadDone.current) setRefreshing(true);
@@ -48,7 +62,10 @@ export function useEc2Resource<T>(loader: () => Promise<T>): Ec2Resource<T> {
       setError(null);
     } catch (caught) {
       if (requestId.current !== id) return;
-      setData(null);
+      // A silent (polling) failure keeps the last known data: the resource
+      // page must keep observing a transitional state instead of blanking out
+      // and stopping the poll. The initial load and explicit retries clear it.
+      if (options?.silent !== true) setData(null);
       setError(toApiError(caught));
     } finally {
       if (requestId.current === id) {

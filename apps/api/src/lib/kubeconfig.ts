@@ -34,7 +34,7 @@ export interface BuildKubeconfigInput {
    * AWS CLI v1 ignores it and would sign against real AWS with the caller's
    * credentials, so the console documents CLI v2 as a requirement.
    */
-  localstackEndpoint: string;
+  emulatorEndpoint: string;
   /**
    * The CLI profile the token plugin should use, when the caller has one.
    * Without it `aws eks get-token` uses the default credential chain.
@@ -42,9 +42,14 @@ export interface BuildKubeconfigInput {
   profile?: string;
 }
 
-/** YAML double-quoted scalar: escape backslashes and quotes. */
+/**
+ * YAML double-quoted scalar. JSON.stringify is used deliberately: its output
+ * is a valid YAML double-quoted scalar and it escapes control characters
+ * (newlines, tabs) that a hand-rolled backslash/quote escape would let through,
+ * which could otherwise corrupt or inject into the generated document.
+ */
 function quote(value: string): string {
-  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  return JSON.stringify(value);
 }
 
 /** `kubeconfig-<cluster>.yaml`, safe for a Content-Disposition header. */
@@ -59,7 +64,7 @@ export function kubeconfigFileName(clusterName: string): string {
  * region and LocalStack endpoint.
  */
 export function buildKubeconfig(input: BuildKubeconfigInput): string {
-  const { cluster, region, localstackEndpoint, profile } = input;
+  const { cluster, region, emulatorEndpoint, profile } = input;
   const contextName = cluster.arn.length > 0 ? cluster.arn : cluster.name;
   const lines: string[] = [
     'apiVersion: v1',
@@ -93,7 +98,7 @@ export function buildKubeconfig(input: BuildKubeconfigInput): string {
     '          - json',
     '        env:',
     '          - name: AWS_ENDPOINT_URL',
-    '            value: ' + quote(localstackEndpoint),
+    '            value: ' + quote(emulatorEndpoint),
     '          - name: AWS_DEFAULT_REGION',
     '            value: ' + quote(region),
     ...(profile === undefined || profile.length === 0

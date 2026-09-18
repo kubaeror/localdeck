@@ -96,19 +96,84 @@ function toPage<T>(items: readonly T[], result: MarkerPage): Paginated<T> {
   };
 }
 
-/** Walks `Marker` pages until the service is done or the cap is reached. */
+/**
+ * Upper bound on the `Marker` pages one walk may fetch. A LocalStack that
+ * never stops sending new markers cannot hang the console: the walk fails with
+ * `unexpectedResponse` instead of looping forever.
+ */
+const MAX_MARKER_PAGES = 1000;
+
+/** One page of a `Marker` walk: its items plus the next continuation marker. */
+interface MarkerPageResult<T> {
+  items: readonly T[];
+  nextToken?: string;
+}
+
+/** Builds a {@link MarkerPageResult} from a raw SDK result. */
+function markerPage<T>(items: readonly T[] | undefined, result: MarkerPage): MarkerPageResult<T> {
+  const marker = nextMarker(result);
+  return {
+    items: items ?? [],
+    ...(marker === undefined ? {} : { nextToken: marker }),
+  };
+}
+
+function markerNoProgress(marker: string): ApiClientError {
+  return unexpectedResponse(
+    `LocalStack kept returning the continuation marker "${marker}" without new items; LocalDeck stopped the walk instead of looping forever.`,
+  );
+}
+
+function markerPageLimit(): ApiClientError {
+  return unexpectedResponse(
+    `LocalStack returned more than ${MAX_MARKER_PAGES} continuation pages; LocalDeck stopped the walk instead of looping forever.`,
+  );
+}
+
+/**
+ * Walks `Marker` pages until the service is done or the item cap is reached.
+ * Guards against a service that never makes progress: a repeated marker or
+ * more than {@link MAX_MARKER_PAGES} pages throws `unexpectedResponse` instead
+ * of looping forever.
+ */
+async function collectMarkerPages<T>(
+  fetchPage: (nextToken: string | undefined) => Promise<MarkerPageResult<T>>,
+  limit = Number.POSITIVE_INFINITY,
+): Promise<readonly T[]> {
+  const items: T[] = [];
+  const seenMarkers = new Set<string>();
+  let nextToken: string | undefined;
+  let pages = 0;
+  for (;;) {
+    const page = await fetchPage(nextToken);
+    pages += 1;
+    items.push(...page.items);
+    const marker = page.nextToken;
+    // The old stop condition: no marker, or the caller's item cap was reached.
+    if (marker === undefined || items.length >= limit) break;
+    if (seenMarkers.has(marker)) throw markerNoProgress(marker);
+    seenMarkers.add(marker);
+    if (pages >= MAX_MARKER_PAGES) throw markerPageLimit();
+    nextToken = marker;
+  }
+  return items;
+}
+
+/**
+ * Walks `Paginated` pages until the service is done or the cap is reached.
+ * See {@link collectMarkerPages} for the no-progress guard.
+ */
 async function collectAll<T>(
   fetchPage: (nextToken?: string) => Promise<Paginated<T>>,
   limit = COLLECT_LIMIT,
 ): Promise<readonly T[]> {
-  const items: T[] = [];
-  let nextToken: string | undefined;
-  do {
+  return collectMarkerPages(async (nextToken) => {
     const page = await fetchPage(nextToken);
-    items.push(...page.items);
-    nextToken = page.nextToken;
-  } while (nextToken !== undefined && items.length < limit);
-  return items;
+    return {
+      items: page.items,
+      ...(page.nextToken === undefined ? {} : { nextToken: page.nextToken }),
+    };
+  }, limit);
 }
 
 /**
@@ -180,6 +245,40 @@ async function writeTagDiff(input: {
 
 // ----------------------------------------------------------------- users
 
+/** Which collection a policy ARN belongs to; `Get*` reports only the ARN. */
+function policyScopeFromArn(arn: string): IamPolicyScope {
+  return arn.startsWith('arn:aws:iam::aws:policy/') ? 'AWS' : 'Local';
+}
+
+/**
+ * The managed policy that bounds an identity's effective permissions. The SDK
+ * reports an `AttachedPermissionsBoundary` object; the policy's managed type is
+ * derived from the ARN, exactly the way {@link IamPolicy.scope} is.
+ */
+export interface IamPermissionsBoundary {
+  arn: string;
+  /** `AWS` for AWS managed policies, `Local` otherwise. */
+  scope: IamPolicyScope;
+}
+
+/** The SDK's `AttachedPermissionsBoundary` (`GetUser`/`GetRole`). */
+interface RawPermissionsBoundary {
+  PermissionsBoundaryType?: string;
+  PermissionsBoundaryArn?: string;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Maps the raw `PermissionsBoundary` object; never fabricated when absent. */
+function toPermissionsBoundary(value: unknown): IamPermissionsBoundary | undefined {
+  if (!isRecord(value)) return undefined;
+  const arn = value['PermissionsBoundaryArn'];
+  if (typeof arn !== 'string' || arn.length === 0) return undefined;
+  return { arn, scope: policyScopeFromArn(arn) };
+}
+
 export interface IamUser {
   userName: string;
   userId?: string;
@@ -188,6 +287,8 @@ export interface IamUser {
   path?: string;
   createDate?: string;
   passwordLastUsed?: string;
+  /** The boundary `GetUser` reported, when one is set. */
+  permissionsBoundary?: IamPermissionsBoundary;
   tags: readonly AwsTag[];
   /** The raw SDK object, for JSON views. */
   raw: Record<string, unknown>;
@@ -200,6 +301,7 @@ interface RawUser {
   Path?: string;
   CreateDate?: Date | string;
   PasswordLastUsed?: Date | string;
+  PermissionsBoundary?: RawPermissionsBoundary;
   Tags?: AwsTag[];
 }
 
@@ -208,6 +310,7 @@ function toIamUser(raw: RawUser): IamUser | null {
   const createDate = toIso(raw.CreateDate);
   const passwordLastUsed = toIso(raw.PasswordLastUsed);
   const arn = typeof raw.Arn === 'string' && raw.Arn.length > 0 ? raw.Arn : undefined;
+  const permissionsBoundary = toPermissionsBoundary(raw.PermissionsBoundary);
   return {
     userName: raw.UserName,
     ...(raw.UserId === undefined ? {} : { userId: raw.UserId }),
@@ -215,6 +318,7 @@ function toIamUser(raw: RawUser): IamUser | null {
     ...(raw.Path === undefined ? {} : { path: raw.Path }),
     ...(createDate === undefined ? {} : { createDate }),
     ...(passwordLastUsed === undefined ? {} : { passwordLastUsed }),
+    ...(permissionsBoundary === undefined ? {} : { permissionsBoundary }),
     tags: raw.Tags ?? [],
     raw: raw as Record<string, unknown>,
   };
@@ -376,7 +480,9 @@ export async function createAccessKey(userName: string): Promise<CreatedAccessKe
   if (
     key === undefined ||
     typeof key.AccessKeyId !== 'string' ||
-    typeof key.SecretAccessKey !== 'string'
+    key.AccessKeyId.length === 0 ||
+    typeof key.SecretAccessKey !== 'string' ||
+    key.SecretAccessKey.length === 0
   ) {
     throw unexpectedResponse(`LocalStack returned no access key for "${userName}".`);
   }
@@ -475,23 +581,51 @@ export async function listAllGroups(options: IamCollectOptions = {}): Promise<re
   );
 }
 
-/** `GetGroup`; also returns the members, which the console's Users tab shows. */
+/**
+ * `GetGroup`; also returns the members, which the console's Users tab and the
+ * add-members picker use. IAM pages the member list at `MaxItems`, so every
+ * `Marker` page is walked: a group with more members than one page must not
+ * show a truncated membership or treat members on later pages as non-members.
+ */
 export async function getGroup(
   groupName: string,
 ): Promise<{ group: IamGroup; users: readonly IamUser[] }> {
-  const result = await callServiceOperation<{ Group?: RawGroup; Users?: RawUser[] }>(
-    SERVICE_ID,
-    'GetGroup',
-    { GroupName: groupName },
+  const pages = await collectMarkerPages<{ group?: RawGroup; users: readonly RawUser[] }>(
+    async (nextToken) => {
+      const result = await callServiceOperation<{
+        Group?: RawGroup;
+        Users?: RawUser[];
+        IsTruncated?: boolean;
+        Marker?: string;
+      }>(SERVICE_ID, 'GetGroup', {
+        GroupName: groupName,
+        MaxItems: COMPLETE_PAGE_SIZE,
+        ...(nextToken === undefined ? {} : { Marker: nextToken }),
+      });
+      const page = markerPage(result.Users, result);
+      return {
+        items: [
+          {
+            ...(result.Group === undefined ? {} : { group: result.Group }),
+            users: page.items,
+          },
+        ],
+        ...(page.nextToken === undefined ? {} : { nextToken: page.nextToken }),
+      };
+    },
   );
-  const group = result.Group === undefined ? null : toIamGroup(result.Group);
+
+  const first = pages[0];
+  const group = first?.group === undefined ? null : toIamGroup(first.group);
   if (group === null) {
     throw unexpectedResponse(`LocalStack returned no group for "${groupName}".`);
   }
-  const users = (result.Users ?? []).flatMap((raw): IamUser[] => {
-    const user = toIamUser(raw);
-    return user === null ? [] : [user];
-  });
+  const users = pages
+    .flatMap((page) => page.users)
+    .flatMap((raw): IamUser[] => {
+      const user = toIamUser(raw);
+      return user === null ? [] : [user];
+    });
   return { group, users };
 }
 
@@ -519,9 +653,7 @@ export async function listGroupsForUser(
   userName: string,
   signal?: AbortSignal,
 ): Promise<readonly IamGroup[]> {
-  const raws: RawGroup[] = [];
-  let nextToken: string | undefined;
-  do {
+  const raws = await collectMarkerPages<RawGroup>(async (nextToken) => {
     const result = await callServiceOperation<{ Groups?: RawGroup[] } & MarkerPage>(
       SERVICE_ID,
       'ListGroupsForUser',
@@ -532,9 +664,8 @@ export async function listGroupsForUser(
       },
       signal,
     );
-    raws.push(...(result.Groups ?? []));
-    nextToken = nextMarker(result);
-  } while (nextToken !== undefined);
+    return markerPage(result.Groups, result);
+  });
 
   return raws.flatMap((raw): IamGroup[] => {
     const group = toIamGroup(raw);
@@ -575,6 +706,8 @@ export interface IamRole {
   maxSessionDuration?: number;
   /** The trust policy, decoded to JSON text. */
   assumeRolePolicyDocument?: string;
+  /** The boundary `GetRole` reported, when one is set. */
+  permissionsBoundary?: IamPermissionsBoundary;
   tags: readonly AwsTag[];
   raw: Record<string, unknown>;
 }
@@ -588,6 +721,7 @@ interface RawRole {
   Description?: string;
   MaxSessionDuration?: number;
   AssumeRolePolicyDocument?: unknown;
+  PermissionsBoundary?: RawPermissionsBoundary;
   Tags?: AwsTag[];
 }
 
@@ -596,6 +730,7 @@ function toIamRole(raw: RawRole): IamRole | null {
   const createDate = toIso(raw.CreateDate);
   const assumeRolePolicyDocument = decodePolicyDocument(raw.AssumeRolePolicyDocument);
   const arn = typeof raw.Arn === 'string' && raw.Arn.length > 0 ? raw.Arn : undefined;
+  const permissionsBoundary = toPermissionsBoundary(raw.PermissionsBoundary);
   return {
     roleName: raw.RoleName,
     ...(raw.RoleId === undefined ? {} : { roleId: raw.RoleId }),
@@ -605,6 +740,7 @@ function toIamRole(raw: RawRole): IamRole | null {
     ...(raw.Description === undefined ? {} : { description: raw.Description }),
     ...(raw.MaxSessionDuration === undefined ? {} : { maxSessionDuration: raw.MaxSessionDuration }),
     ...(assumeRolePolicyDocument === undefined ? {} : { assumeRolePolicyDocument }),
+    ...(permissionsBoundary === undefined ? {} : { permissionsBoundary }),
     tags: raw.Tags ?? [],
     raw: raw as Record<string, unknown>,
   };
@@ -726,7 +862,8 @@ export type IamPolicyScope = 'Local' | 'AWS';
 export interface IamPolicy {
   policyName: string;
   policyId?: string;
-  arn: string;
+  /** Absent when LocalStack does not report an ARN; never fabricated. */
+  arn?: string;
   path?: string;
   defaultVersionId?: string;
   attachmentCount: number;
@@ -752,16 +889,14 @@ interface RawPolicy {
 
 function toIamPolicy(raw: RawPolicy, scope?: IamPolicyScope): IamPolicy | null {
   if (typeof raw.PolicyName !== 'string' || raw.PolicyName.length === 0) return null;
-  const arn = raw.Arn ?? '';
+  const arn = typeof raw.Arn === 'string' && raw.Arn.length > 0 ? raw.Arn : undefined;
   const createDate = toIso(raw.CreateDate);
   const updateDate = toIso(raw.UpdateDate);
-  const resolvedScope =
-    scope ??
-    (arn.startsWith('arn:aws:iam::aws:policy/') ? 'AWS' : arn.length > 0 ? 'Local' : undefined);
+  const resolvedScope = scope ?? (arn === undefined ? undefined : policyScopeFromArn(arn));
   return {
     policyName: raw.PolicyName,
     ...(raw.PolicyId === undefined ? {} : { policyId: raw.PolicyId }),
-    arn,
+    ...(arn === undefined ? {} : { arn }),
     ...(raw.Path === undefined ? {} : { path: raw.Path }),
     ...(raw.DefaultVersionId === undefined ? {} : { defaultVersionId: raw.DefaultVersionId }),
     attachmentCount: typeof raw.AttachmentCount === 'number' ? raw.AttachmentCount : 0,
@@ -956,12 +1091,11 @@ export async function listEntitiesForPolicy(
   policyArn: string,
   signal?: AbortSignal,
 ): Promise<IamPolicyEntities> {
-  const users: { UserName?: string; UserId?: string }[] = [];
-  const groups: { GroupName?: string; GroupId?: string }[] = [];
-  const roles: { RoleName?: string; RoleId?: string }[] = [];
-  let nextToken: string | undefined;
-
-  do {
+  const pages = await collectMarkerPages<{
+    users: readonly { UserName?: string; UserId?: string }[];
+    groups: readonly { GroupName?: string; GroupId?: string }[];
+    roles: readonly { RoleName?: string; RoleId?: string }[];
+  }>(async (nextToken) => {
     const result = await callServiceOperation<
       {
         PolicyUsers?: { UserName?: string; UserId?: string }[];
@@ -978,11 +1112,22 @@ export async function listEntitiesForPolicy(
       },
       signal,
     );
-    users.push(...(result.PolicyUsers ?? []));
-    groups.push(...(result.PolicyGroups ?? []));
-    roles.push(...(result.PolicyRoles ?? []));
-    nextToken = nextMarker(result);
-  } while (nextToken !== undefined);
+    const marker = nextMarker(result);
+    return {
+      items: [
+        {
+          users: result.PolicyUsers ?? [],
+          groups: result.PolicyGroups ?? [],
+          roles: result.PolicyRoles ?? [],
+        },
+      ],
+      ...(marker === undefined ? {} : { nextToken: marker }),
+    };
+  });
+
+  const users = pages.flatMap((page) => page.users);
+  const groups = pages.flatMap((page) => page.groups);
+  const roles = pages.flatMap((page) => page.roles);
 
   const nameOf = (value: string | undefined): string | null =>
     typeof value === 'string' && value.length > 0 ? value : null;
@@ -1066,9 +1211,7 @@ export async function listAttachedPolicies(
   signal?: AbortSignal,
 ): Promise<readonly IamAttachedPolicy[]> {
   const target = ATTACHED_OPERATIONS[entity];
-  const raws: RawAttachedPolicy[] = [];
-  let nextToken: string | undefined;
-  do {
+  const raws = await collectMarkerPages<RawAttachedPolicy>(async (nextToken) => {
     const result = await callServiceOperation<
       { AttachedPolicies?: RawAttachedPolicy[] } & MarkerPage
     >(
@@ -1081,9 +1224,8 @@ export async function listAttachedPolicies(
       },
       signal,
     );
-    raws.push(...(result.AttachedPolicies ?? []));
-    nextToken = nextMarker(result);
-  } while (nextToken !== undefined);
+    return markerPage(result.AttachedPolicies, result);
+  });
 
   return raws.flatMap((raw): IamAttachedPolicy[] => {
     if (typeof raw.PolicyName !== 'string' || typeof raw.PolicyArn !== 'string') return [];
@@ -1091,7 +1233,7 @@ export async function listAttachedPolicies(
       {
         policyName: raw.PolicyName,
         policyArn: raw.PolicyArn,
-        scope: raw.PolicyArn.startsWith('arn:aws:iam::aws:policy/') ? 'AWS' : 'Local',
+        scope: policyScopeFromArn(raw.PolicyArn),
         raw: raw as Record<string, unknown>,
       },
     ];

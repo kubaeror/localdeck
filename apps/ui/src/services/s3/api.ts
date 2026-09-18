@@ -19,8 +19,8 @@ import { LIST_OPERATION, SERVICE_ID } from './spec';
  *
  * Everything that fits the api's JSON dispatcher goes through
  * `callServiceOperation`; object bytes use the two dedicated proxy routes
- * (`postMultipart` for uploads, a same-origin link for downloads). The browser
- * never sees credentials and never talks to LocalStack.
+ * (`postMultipart` for uploads, a same-origin url opened in a new tab for
+ * downloads). The browser never sees credentials and never talks to LocalStack.
  */
 
 // ---------------------------------------------------------------- buckets
@@ -381,7 +381,16 @@ export async function moveObject(input: CopyObjectInput): Promise<void> {
   if (input.sourceBucket === input.destinationBucket && input.sourceKey === input.destinationKey) {
     return;
   }
-  await deleteObject({ bucket: input.sourceBucket, key: input.sourceKey });
+  try {
+    await deleteObject({ bucket: input.sourceBucket, key: input.sourceKey });
+  } catch (error) {
+    // The copy already happened, so a delete failure must not read as "the
+    // move did nothing": the destination object exists.
+    throw annotateS3Error(
+      error,
+      `Object "${input.destinationKey}" was copied, but deleting the source object failed.`,
+    );
+  }
 }
 
 /**
@@ -396,6 +405,14 @@ export async function deleteFolder(input: {
   prefix: string;
   signal?: AbortSignal;
 }): Promise<DeleteObjectsResult> {
+  // An empty (or root-only) prefix means "the whole bucket": ListingObjectsV2
+  // would return every key and the deletes would empty the bucket. The console
+  // only ever deletes a named folder, so refuse rather than surprise the user.
+  if (input.prefix.trim().length === 0 || /^\/+$/.test(input.prefix)) {
+    throw new Error(
+      'Refusing to delete an empty or bucket-root folder prefix; select a folder instead.',
+    );
+  }
   const deleted: string[] = [];
   const failures: DeleteObjectsFailure[] = [];
   let continuationToken: string | undefined;
@@ -547,18 +564,12 @@ export function downloadObjectUrl(input: {
 }
 
 /**
- * Starts a browser download for a same-origin url. An anchor click is used
- * (instead of `window.open`) so the browser keeps it in the current tab and a
- * popup blocker never interferes.
+ * Starts a browser download for a same-origin url in a new tab. A failed
+ * download (404, AccessDenied, …) renders the api's JSON error in that tab
+ * instead of replacing the console, so the SPA state is never navigated away.
  */
 export function triggerDownload(url: string): void {
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.rel = 'noopener';
-  anchor.style.display = 'none';
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
+  window.open(url, '_blank', 'noopener');
 }
 
 // ------------------------------------------------------------- versioning
@@ -672,7 +683,12 @@ export interface S3PublicAccessState extends S3PublicAccessBlock {
   configured: boolean;
 }
 
-const NO_PUBLIC_ACCESS: Omit<S3PublicAccessState, 'configured'> = {
+/**
+ * Every setting off: the state a bucket is in when it has no explicit
+ * configuration. Shared with the Permissions tab so "not configured" never
+ * renders (or saves) the console's partially-blocked defaults.
+ */
+export const S3_PUBLIC_ACCESS_NONE: Omit<S3PublicAccessState, 'configured'> = {
   BlockPublicAcls: false,
   IgnorePublicAcls: false,
   BlockPublicPolicy: false,
@@ -689,7 +705,7 @@ export async function getPublicAccessBlock(
     }>(SERVICE_ID, 'GetPublicAccessBlock', { Bucket: bucket }, signal);
     const configuration = result.PublicAccessBlockConfiguration;
     if (configuration === undefined) {
-      return { ...NO_PUBLIC_ACCESS, configured: false };
+      return { ...S3_PUBLIC_ACCESS_NONE, configured: false };
     }
     return {
       BlockPublicAcls: configuration.BlockPublicAcls === true,
@@ -700,7 +716,7 @@ export async function getPublicAccessBlock(
     };
   } catch (error) {
     if (isS3Code(error, 'NoSuchPublicAccessBlockConfiguration')) {
-      return { ...NO_PUBLIC_ACCESS, configured: false };
+      return { ...S3_PUBLIC_ACCESS_NONE, configured: false };
     }
     throw error;
   }

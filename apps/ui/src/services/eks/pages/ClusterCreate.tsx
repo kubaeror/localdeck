@@ -57,6 +57,29 @@ const ENDPOINT_ACCESS_OPTIONS: readonly {
 
 const CIDR_LABEL = '0.0.0.0/0';
 
+/**
+ * A subnet choice. The availability zone is kept on the option so validation
+ * can require two distinct zones, which is what the EKS API requires.
+ */
+interface SubnetOption extends MultiselectProps.Option {
+  availabilityZone?: string;
+}
+
+/**
+ * Picks the subnets to preselect for a VPC: two subnets in different
+ * Availability Zones when the catalogue offers them, because EKS rejects a
+ * cluster whose subnets all live in one zone.
+ */
+function defaultSubnetSelection(options: readonly SubnetOption[]): readonly string[] {
+  const [first, ...rest] = options;
+  if (first === undefined) return [];
+  const second =
+    rest.find((option) => option.availabilityZone !== first.availabilityZone) ?? rest[0];
+  return [first, second]
+    .flatMap((option) => (option === undefined ? [] : [option.value ?? '']))
+    .filter((value) => value.length > 0);
+}
+
 /** Splits the CIDR textarea on commas, spaces and newlines. */
 function parseCidrs(value: string): readonly string[] {
   return value
@@ -102,7 +125,7 @@ export function ClusterCreatePage({ descriptor }: ServicePageProps): ReactElemen
     readonly { vpcId: string; cidrBlock?: string; isDefault: boolean }[]
   >([]);
   const [vpcId, setVpcId] = useState<string | null>(null);
-  const [subnetOptions, setSubnetOptions] = useState<readonly MultiselectProps.Option[]>([]);
+  const [subnetOptions, setSubnetOptions] = useState<readonly SubnetOption[]>([]);
   const [subnetIds, setSubnetIds] = useState<readonly string[]>([]);
   const [securityGroupOptions, setSecurityGroupOptions] = useState<
     readonly MultiselectProps.Option[]
@@ -164,18 +187,21 @@ export function ClusterCreatePage({ descriptor }: ServicePageProps): ReactElemen
         ),
       ]);
       if (signal.aborted) return;
-      const options = subnets.map((subnet) => ({
+      const options: readonly SubnetOption[] = subnets.map((subnet) => ({
         label: `${subnet.subnetId}${subnet.availabilityZone === undefined ? '' : ` · ${subnet.availabilityZone}`}`,
         value: subnet.subnetId,
+        ...(subnet.availabilityZone === undefined
+          ? {}
+          : { availabilityZone: subnet.availabilityZone }),
       }));
       setSubnetOptions(options);
       setSubnetIds((current) => {
         const available = new Set(options.map((option) => option.value ?? ''));
         const kept = current.filter((id) => available.has(id));
-        // EKS wants subnets in at least two Availability Zones; preselect the
-        // first two LocalStack offers so the default flow just works.
+        // EKS wants subnets in at least two Availability Zones; preselect two
+        // in distinct zones so the default flow is valid from the start.
         if (kept.length >= 2) return kept;
-        return options.slice(0, 2).map((option) => option.value ?? '');
+        return defaultSubnetSelection(options);
       });
       setSecurityGroupOptions(
         groups.items.map((group) => ({
@@ -268,8 +294,18 @@ export function ClusterCreatePage({ descriptor }: ServicePageProps): ReactElemen
   const nameProblem = name.length > 0 ? validateClusterName(name) : null;
   const versionProblem = version.length > 0 ? validateKubernetesVersion(version) : null;
   const roleProblem = roleArn.length > 0 ? validateRoleArn(roleArn) : null;
+  // EKS requires at least two subnets in *different* Availability Zones: two
+  // subnets in the same zone are rejected even though the count is fine.
+  const selectedSubnets = subnetOptions.filter((option) => subnetIds.includes(option.value ?? ''));
+  const selectedZones = new Set(
+    selectedSubnets.flatMap((option) =>
+      option.availabilityZone === undefined ? [] : [option.availabilityZone],
+    ),
+  );
   const subnetProblem =
-    subnetIds.length < 2 ? 'Select at least two subnets in different Availability Zones.' : null;
+    subnetIds.length < 2 || selectedZones.size < 2
+      ? 'Select at least two subnets in different Availability Zones.'
+      : null;
 
   const selectedVpc = vpcs.find((vpc) => vpc.vpcId === vpcId);
 
@@ -279,6 +315,9 @@ export function ClusterCreatePage({ descriptor }: ServicePageProps): ReactElemen
     tagProblems.length === 0 ? null : tagProblems.map((problem) => problem.message).join(' ');
 
   const submit = async (): Promise<void> => {
+    // CreateCluster has no idempotency token: a second submit would start a
+    // second (k3d) cluster, so an in-flight submit must never run twice.
+    if (submitting) return;
     setSubmitting(true);
     setError(null);
     try {
@@ -426,7 +465,7 @@ export function ClusterCreatePage({ descriptor }: ServicePageProps): ReactElemen
 
         <FormField
           label="Subnets"
-          description="The cluster's control plane networking. Select at least two subnets."
+          description="The cluster's control plane networking. Select at least two subnets in different Availability Zones."
           errorText={subnetProblem ?? undefined}
         >
           <Multiselect
@@ -590,12 +629,7 @@ export function ClusterCreatePage({ descriptor }: ServicePageProps): ReactElemen
           id: 'networking',
           title: 'Networking',
           description: 'VPC, subnets and security groups.',
-          validate: () =>
-            vpcId === null
-              ? 'Select a VPC.'
-              : subnetIds.length < 2
-                ? 'Select at least two subnets in different Availability Zones.'
-                : networkError,
+          validate: () => (vpcId === null ? 'Select a VPC.' : (subnetProblem ?? networkError)),
           content: networkingStep,
         },
         {

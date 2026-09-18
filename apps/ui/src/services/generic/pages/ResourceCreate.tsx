@@ -9,8 +9,8 @@ import SpaceBetween from '@cloudscape-design/components/space-between';
 import type { ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ConsoleBreadcrumbs } from '../../../components/ConsoleBreadcrumbs';
-import { useLocalStackStatus } from '../../../hooks/useLocalStackStatus';
-import { LOCALSTACK_SERVICES_DOCS_URL, serviceConsolePath } from '../../paths';
+import { useEmulatorStatus } from '../../../hooks/useEmulatorStatus';
+import { DEFAULT_EMULATOR_DOCS_URL, serviceConsolePath } from '../../paths';
 import type { ServicePageProps } from '../../types';
 
 /** CreateDBInstance → create-db-instance; the AWS CLI's kebab-case form. */
@@ -33,8 +33,8 @@ function createOperationFor(operations: readonly string[]): string | undefined {
  */
 export function GenericResourceCreate({ descriptor }: ServicePageProps): ReactElement {
   const navigate = useNavigate();
-  const status = useLocalStackStatus();
-  const endpoint = status.config?.localstack.endpoint ?? 'http://localhost:4566';
+  const status = useEmulatorStatus();
+  const endpoint = status.config?.emulator.publicEndpoint ?? 'http://localhost:4566';
   const createOperation = createOperationFor(descriptor.operations);
   const command =
     createOperation === undefined
@@ -115,7 +115,7 @@ export function GenericResourceCreate({ descriptor }: ServicePageProps): ReactEl
         <Box>
           <Button
             variant="link"
-            href={LOCALSTACK_SERVICES_DOCS_URL}
+            href={DEFAULT_EMULATOR_DOCS_URL}
             target="_blank"
             external
             iconAlign="right"

@@ -5,9 +5,12 @@ import {
   attachPolicy,
   createAccessKey,
   decodePolicyDocument,
+  getGroup,
   getPolicyDocument,
+  getRole,
   getUser,
   listAccessKeys,
+  listAllUsers,
   listAttachedPolicies,
   listEntitiesForPolicy,
   listGroupsForUser,
@@ -144,6 +147,39 @@ describe('getUser', () => {
 
     await expect(getUser('missing')).rejects.toThrow('LocalStack returned no user');
   });
+
+  it('maps the PermissionsBoundary GetUser reports with its policy type', async () => {
+    stubDispatcher(() => ({
+      User: {
+        UserName: 'alice',
+        PermissionsBoundary: {
+          PermissionsBoundaryType: 'Policy',
+          PermissionsBoundaryArn: 'arn:aws:iam::aws:policy/PowerUserAccess',
+        },
+      },
+    }));
+
+    const user = await getUser('alice');
+
+    expect(user.permissionsBoundary).toEqual({
+      arn: 'arn:aws:iam::aws:policy/PowerUserAccess',
+      scope: 'AWS',
+    });
+  });
+
+  it('leaves permissionsBoundary undefined when no boundary is set', async () => {
+    stubDispatcher(() => ({ User: { UserName: 'alice' } }));
+
+    expect((await getUser('alice')).permissionsBoundary).toBeUndefined();
+  });
+
+  it('ignores a boundary payload without an ARN instead of fabricating one', async () => {
+    stubDispatcher(() => ({
+      User: { UserName: 'alice', PermissionsBoundary: { PermissionsBoundaryType: 'Policy' } },
+    }));
+
+    expect((await getUser('alice')).permissionsBoundary).toBeUndefined();
+  });
 });
 
 describe('putUserTags', () => {
@@ -232,6 +268,14 @@ describe('access keys', () => {
 
     await expect(createAccessKey('alice')).rejects.toThrow('LocalStack returned no access key');
   });
+
+  it('fails when the created key has an empty id or secret', async () => {
+    stubDispatcher(() => ({ AccessKey: { AccessKeyId: 'AKIA3', SecretAccessKey: '' } }));
+    await expect(createAccessKey('alice')).rejects.toThrow('LocalStack returned no access key');
+
+    stubDispatcher(() => ({ AccessKey: { AccessKeyId: '', SecretAccessKey: 'secret' } }));
+    await expect(createAccessKey('alice')).rejects.toThrow('LocalStack returned no access key');
+  });
 });
 
 describe('roles and policies', () => {
@@ -244,6 +288,31 @@ describe('roles and policies', () => {
     const page = await listRoles();
 
     expect(page.items[0]?.assumeRolePolicyDocument).toContain('"Version":"2012-10-17"');
+  });
+
+  it('maps the PermissionsBoundary GetRole reports with its policy type', async () => {
+    stubDispatcher(() => ({
+      Role: {
+        RoleName: 'lambda-role',
+        PermissionsBoundary: {
+          PermissionsBoundaryType: 'Policy',
+          PermissionsBoundaryArn: 'arn:aws:iam::000000000000:policy/boundary',
+        },
+      },
+    }));
+
+    const role = await getRole('lambda-role');
+
+    expect(role.permissionsBoundary).toEqual({
+      arn: 'arn:aws:iam::000000000000:policy/boundary',
+      scope: 'Local',
+    });
+  });
+
+  it('leaves permissionsBoundary undefined when GetRole reports none', async () => {
+    stubDispatcher(() => ({ Role: { RoleName: 'lambda-role' } }));
+
+    expect((await getRole('lambda-role')).permissionsBoundary).toBeUndefined();
   });
 
   it('passes the requested scope to ListPolicies and maps the attachment count', async () => {
@@ -267,6 +336,21 @@ describe('roles and policies', () => {
       attachmentCount: 3,
       scope: 'Local',
     });
+  });
+
+  it('keeps the ARN undefined instead of fabricating an empty one', async () => {
+    stubDispatcher(() => ({
+      Policies: [
+        { PolicyName: 'read-only', Arn: 'arn:aws:iam::000000000000:policy/read-only' },
+        { PolicyName: 'no-arn' },
+      ],
+    }));
+
+    const page = await listPolicies({ scope: 'Local' });
+
+    expect(page.items[0]?.arn).toBe('arn:aws:iam::000000000000:policy/read-only');
+    expect(page.items[1]?.arn).toBeUndefined();
+    expect(page.items[1]?.policyName).toBe('no-arn');
   });
 
   it('decodes a policy version document', async () => {
@@ -360,6 +444,32 @@ describe('complete (non-truncated) reads', () => {
     });
   });
 
+  it('walks every Marker page of GetGroup so later members are not lost', async () => {
+    const calls = stubDispatcher((operation, input) => {
+      if (operation !== 'GetGroup') return {};
+      return input.Marker === undefined
+        ? {
+            Group: { GroupName: 'developers' },
+            Users: [{ UserName: 'member-1' }],
+            IsTruncated: true,
+            Marker: 'members-2',
+          }
+        : { Users: [{ UserName: 'member-2' }], IsTruncated: false };
+    });
+
+    const result = await getGroup('developers');
+
+    expect(result.group.groupName).toBe('developers');
+    expect(result.users.map((user) => user.userName)).toEqual(['member-1', 'member-2']);
+    const pageCalls = calls.filter((call) => call.operation === 'GetGroup');
+    expect(pageCalls).toHaveLength(2);
+    expect(pageCalls[1]?.input).toMatchObject({
+      GroupName: 'developers',
+      Marker: 'members-2',
+      MaxItems: 1000,
+    });
+  });
+
   it('walks every Marker page of ListEntitiesForPolicy', async () => {
     const calls = stubDispatcher((operation, input) => {
       if (operation !== 'ListEntitiesForPolicy') return {};
@@ -398,6 +508,59 @@ describe('complete (non-truncated) reads', () => {
 
     expect(attached.map((policy) => policy.policyName)).toEqual(['one', 'two']);
     expect(calls.filter((call) => call.operation === 'ListAttachedUserPolicies')).toHaveLength(2);
+  });
+});
+
+describe('marker walks that never make progress', () => {
+  it('stops collectAll after a repeated marker instead of looping forever', async () => {
+    let calls = 0;
+    stubDispatcher((operation) => {
+      if (operation !== 'ListUsers') return {};
+      calls += 1;
+      return { Users: [{ UserName: `user-${calls}` }], IsTruncated: true, Marker: 'stuck' };
+    });
+
+    await expect(listAllUsers()).rejects.toSatisfy(
+      (caught: unknown) =>
+        caught instanceof ApiClientError &&
+        caught.apiError.code === 'UNEXPECTED_RESPONSE' &&
+        caught.apiError.message.includes('continuation marker'),
+    );
+    // The first page has no marker, the second repeats it and is detected.
+    expect(calls).toBe(2);
+  });
+
+  it('stops a complete Marker walk after a repeated marker', async () => {
+    const calls = stubDispatcher(() => ({
+      Groups: [{ GroupName: 'g1' }],
+      IsTruncated: true,
+      Marker: 'stuck',
+    }));
+
+    await expect(listGroupsForUser('alice')).rejects.toSatisfy(
+      (caught: unknown) =>
+        caught instanceof ApiClientError &&
+        caught.apiError.code === 'UNEXPECTED_RESPONSE' &&
+        caught.apiError.message.includes('continuation marker'),
+    );
+    expect(calls.filter((call) => call.operation === 'ListGroupsForUser')).toHaveLength(2);
+  });
+
+  it('stops a walk that exceeds the page cap', async () => {
+    let pages = 0;
+    stubDispatcher((operation) => {
+      if (operation !== 'ListGroupsForUser') return {};
+      pages += 1;
+      return { Groups: [], IsTruncated: true, Marker: `page-${pages}` };
+    });
+
+    await expect(listGroupsForUser('alice')).rejects.toSatisfy(
+      (caught: unknown) =>
+        caught instanceof ApiClientError &&
+        caught.apiError.code === 'UNEXPECTED_RESPONSE' &&
+        caught.apiError.message.includes('continuation pages'),
+    );
+    expect(pages).toBe(1000);
   });
 });
 

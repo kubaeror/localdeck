@@ -60,9 +60,9 @@ describe('outbound SDK request timeouts (API-002 / LD-05)', () => {
       config: loadConfig({
         ...process.env,
         NODE_ENV: 'test',
-        LOCALSTACK_ENDPOINT: stub.url,
-        LOCALSTACK_CONNECTION_TIMEOUT_MS: '500',
-        LOCALSTACK_REQUEST_TIMEOUT_MS: '400',
+        EMULATOR_ENDPOINT: stub.url,
+        EMULATOR_CONNECTION_TIMEOUT_MS: '500',
+        EMULATOR_REQUEST_TIMEOUT_MS: '400',
         AWS_REGION: 'us-east-1',
       }),
       logger: false,
@@ -76,7 +76,7 @@ describe('outbound SDK request timeouts (API-002 / LD-05)', () => {
     await stub.close();
   });
 
-  it('aborts a hung SDK call and answers 504 LOCALSTACK_TIMEOUT', async () => {
+  it('aborts a hung SDK call and answers 504 EMULATOR_TIMEOUT', async () => {
     const startedAt = Date.now();
     const response = await app.inject({
       method: 'POST',
@@ -87,7 +87,7 @@ describe('outbound SDK request timeouts (API-002 / LD-05)', () => {
 
     expect(response.statusCode).toBe(504);
     const body = response.json<ApiErrorResponse>();
-    expect(body.error.code).toBe('LOCALSTACK_TIMEOUT');
+    expect(body.error.code).toBe('EMULATOR_TIMEOUT');
     expect(body.error.statusCode).toBe(504);
     expect(body.error.service).toBe('s3');
     // The route settled because of the timeout, not because LocalStack answered.

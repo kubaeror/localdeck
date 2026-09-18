@@ -45,6 +45,9 @@ export function ClusterTagsTab({
   const arn = cluster.arn;
 
   const save = async (): Promise<void> => {
+    // EKS exposes no request token for tagging: a second save while the first
+    // is in flight would replay the same diff and race the first response.
+    if (saving) return;
     if (arn === undefined) {
       setSaveError(
         'LocalStack did not report an ARN for this cluster, so LocalDeck cannot tag it.',
@@ -104,7 +107,7 @@ export function ClusterTagsTab({
           <Button
             variant="primary"
             loading={saving}
-            disabled={!changed || problems.length > 0 || arn === undefined}
+            disabled={saving || !changed || problems.length > 0 || arn === undefined}
             onClick={() => {
               void save();
             }}

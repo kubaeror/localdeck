@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiClientError } from '../../lib/apiClient';
 import {
   clusterStatusName,
+  filterNodegroupInstances,
   fromAwsTags,
   instanceBelongsToNodegroup,
   isClusterTransitional,
@@ -10,6 +11,7 @@ import {
   kubeconfigFileName,
   kubeconfigPath,
   listClusterSummaries,
+  listNodegroupInstances,
   listNodegroups,
   nodegroupStatusName,
   normalizeTags,
@@ -117,8 +119,13 @@ describe('EKS api mappers', () => {
   it('knows which states should keep polling', () => {
     expect(isClusterTransitional('CREATING')).toBe(true);
     expect(isClusterTransitional('UPDATING')).toBe(true);
+    // The list polls right after its own delete action, so DELETING counts as
+    // transitional too.
+    expect(isClusterTransitional('DELETING')).toBe(true);
+    expect(isClusterTransitional('PENDING')).toBe(true);
     expect(isClusterTransitional('ACTIVE')).toBe(false);
     expect(isNodegroupTransitional('UPDATING')).toBe(true);
+    expect(isNodegroupTransitional('DELETING')).toBe(true);
     expect(isNodegroupTransitional('CREATE_FAILED')).toBe(false);
   });
 
@@ -134,7 +141,7 @@ describe('EKS api mappers', () => {
     ]);
   });
 
-  it('matches emulated EC2 instances to their node group by tag', () => {
+  it('matches emulated EC2 instances by the EKS ownership tag pair', () => {
     const instance = {
       name: 'i-1',
       tags: [
@@ -142,16 +149,66 @@ describe('EKS api mappers', () => {
         { Key: 'eks:cluster-name', Value: 'c' },
       ],
     };
-    expect(instanceBelongsToNodegroup(instance, 'ng-1')).toBe(true);
-    expect(instanceBelongsToNodegroup(instance, 'NG-1')).toBe(true);
-    expect(instanceBelongsToNodegroup(instance, 'ng-2')).toBe(false);
-    expect(instanceBelongsToNodegroup({ name: 'ng-1', tags: [] }, 'ng-1')).toBe(true);
+    expect(instanceBelongsToNodegroup(instance, 'c', 'ng-1')).toBe(true);
+    expect(instanceBelongsToNodegroup(instance, 'c', 'NG-1')).toBe(true);
+    expect(instanceBelongsToNodegroup(instance, 'c', 'ng-2')).toBe(false);
+    // Missing either half of the ownership pair is not a match.
     expect(
       instanceBelongsToNodegroup(
-        { name: 'unrelated', tags: [{ Key: 'Name', Value: 'unrelated' }] },
+        { name: 'i-1', tags: [{ Key: 'eks:nodegroup-name', Value: 'ng-1' }] },
+        'c',
         'ng-1',
       ),
     ).toBe(false);
+    expect(
+      instanceBelongsToNodegroup(
+        { name: 'i-1', tags: [{ Key: 'eks:cluster-name', Value: 'c' }] },
+        'c',
+        'ng-1',
+      ),
+    ).toBe(false);
+  });
+
+  it('never links instances named after a node group in another cluster', () => {
+    const instance = {
+      name: 'workers',
+      tags: [
+        { Key: 'Name', Value: 'workers' },
+        { Key: 'eks:nodegroup-name', Value: 'workers' },
+        { Key: 'eks:cluster-name', Value: 'other-cluster' },
+      ],
+    };
+
+    expect(instanceBelongsToNodegroup(instance, 'localdeck-cluster', 'workers')).toBe(false);
+    expect(filterNodegroupInstances([instance], 'localdeck-cluster', 'workers')).toEqual([]);
+  });
+
+  it('only falls back to the instance Name when no EKS ownership tags exist', () => {
+    const nameOnly = { name: 'ng-1', tags: [{ Key: 'Name', Value: 'ng-1' }] };
+    expect(instanceBelongsToNodegroup(nameOnly, 'c', 'ng-1')).toBe(false);
+    expect(instanceBelongsToNodegroup(nameOnly, 'c', 'ng-1', { allowNameFallback: true })).toBe(
+      true,
+    );
+
+    const tagged = {
+      name: 'ng-1-node',
+      tags: [
+        { Key: 'eks:nodegroup-name', Value: 'ng-2' },
+        { Key: 'eks:cluster-name', Value: 'c' },
+      ],
+    };
+    // Ownership tags exist, so the Name of an unrelated instance is ignored
+    // even when it equals the requested node group.
+    expect(filterNodegroupInstances([tagged, nameOnly], 'c', 'ng-1')).toEqual([]);
+    // A matching tag always wins over a Name-only instance.
+    expect(filterNodegroupInstances([tagged, nameOnly], 'c', 'ng-2')).toEqual([tagged]);
+
+    // An instance tagged for a different cluster never falls through to Name.
+    const otherCluster = {
+      name: 'ng-1',
+      tags: [{ Key: 'eks:cluster-name', Value: 'other' }],
+    };
+    expect(filterNodegroupInstances([otherCluster], 'c', 'ng-1')).toEqual([]);
   });
 
   it('builds the kubeconfig download path and file name', () => {
@@ -290,5 +347,49 @@ describe('EKS list helpers error handling', () => {
 
     const page = await listNodegroups('cluster');
     expect(page.items).toEqual([]);
+  });
+
+  it('listNodegroupInstances keeps only the requested cluster + node group', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (!url.includes('/api/services/ec2/DescribeInstances')) {
+        return new Response('{}', { status: 404 });
+      }
+      return new Response(
+        JSON.stringify({
+          service: 'ec2',
+          operation: 'DescribeInstances',
+          result: {
+            Reservations: [
+              {
+                Instances: [
+                  {
+                    InstanceId: 'i-1',
+                    State: { Name: 'running' },
+                    Tags: [
+                      { Key: 'eks:nodegroup-name', Value: 'workers' },
+                      { Key: 'eks:cluster-name', Value: 'cluster-a' },
+                    ],
+                  },
+                  {
+                    InstanceId: 'i-2',
+                    State: { Name: 'running' },
+                    Tags: [
+                      { Key: 'eks:nodegroup-name', Value: 'workers' },
+                      { Key: 'eks:cluster-name', Value: 'cluster-b' },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const instances = await listNodegroupInstances('cluster-a', { nodegroupName: 'workers' });
+    expect(instances.map((instance) => instance.instanceId)).toEqual(['i-1']);
   });
 });

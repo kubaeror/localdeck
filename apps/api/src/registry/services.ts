@@ -1,9 +1,11 @@
 import {
   ApiErrorCodes,
+  EMULATOR_PROVIDER_IDS,
   SERVICE_CATALOG,
   findService,
-  localStackKeysFor,
   serviceCategories,
+  serviceHealthKeys,
+  type EmulatorProviderId,
   type ServiceDescriptor,
   type ServiceOperationsResponse,
   type ServiceRegistryResponse,
@@ -69,7 +71,18 @@ export function getServiceOperations(id: string): ServiceOperationsResponse {
   };
 }
 
-/** LocalStack health keys that identify a registered service. */
-export function localStackKeysOf(id: string): readonly string[] {
-  return localStackKeysFor(requireServiceById(id));
+/** Provider health keys that identify a registered service. */
+export function healthKeysOf(
+  id: string,
+  provider: EmulatorProviderId | 'auto' = 'auto',
+): readonly string[] {
+  const service = requireServiceById(id);
+  if (provider !== 'auto') return serviceHealthKeys(service, provider);
+  // Auto mode: every provider's keys, so the ui can resolve the service once
+  // the health document identifies the provider.
+  return [
+    ...new Set(
+      EMULATOR_PROVIDER_IDS.flatMap((providerId) => serviceHealthKeys(service, providerId)),
+    ),
+  ];
 }

@@ -44,19 +44,27 @@ export class ApiProblem extends Error {
   }
 }
 
-/** LocalStack could not be reached at all (stopped, wrong host/port, timeout). */
-export class LocalStackUnreachableProblem extends ApiProblem {
-  constructor(args: { endpoint: string; reason: string; hint?: string; cause?: unknown }) {
+/** The configured local emulator could not be reached at all. */
+export class EmulatorUnreachableProblem extends ApiProblem {
+  constructor(args: {
+    endpoint: string;
+    reason: string;
+    providerLabel?: string;
+    hint?: string;
+    cause?: unknown;
+  }) {
+    const label = args.providerLabel ?? 'the local emulator';
     super({
-      code: ApiErrorCodes.localstackUnreachable,
+      code: ApiErrorCodes.emulatorUnreachable,
       statusCode: 503,
       message:
-        `LocalDeck api is running, but LocalStack is unreachable at ${args.endpoint} ` +
-        `(${args.reason}). Start LocalStack, or point LOCALSTACK_ENDPOINT at the ` +
+        `LocalDeck api is running, but ${label} is unreachable at ${args.endpoint} ` +
+        `(${args.reason}). Start the emulator, or point EMULATOR_ENDPOINT at the ` +
         'instance you want this console to manage.',
       details: {
         endpoint: args.endpoint,
         reason: args.reason,
+        ...(args.providerLabel === undefined ? {} : { provider: args.providerLabel }),
         ...(args.hint === undefined ? {} : { hint: args.hint }),
       },
       cause: args.cause,
@@ -64,14 +72,19 @@ export class LocalStackUnreachableProblem extends ApiProblem {
   }
 }
 
-/** LocalStack answered, but not with a health document we understand. */
-export class LocalStackInvalidResponseProblem extends ApiProblem {
-  constructor(args: { endpoint: string; reason: string; cause?: unknown }) {
+/** The emulator answered, but not with a health document we understand. */
+export class EmulatorInvalidResponseProblem extends ApiProblem {
+  constructor(args: { endpoint: string; reason: string; providerLabel?: string; cause?: unknown }) {
+    const label = args.providerLabel ?? 'The emulator';
     super({
-      code: ApiErrorCodes.localstackInvalidResponse,
+      code: ApiErrorCodes.emulatorInvalidResponse,
       statusCode: 502,
-      message: `LocalStack at ${args.endpoint} returned an unexpected health response (${args.reason}).`,
-      details: { endpoint: args.endpoint, reason: args.reason },
+      message: `${label} at ${args.endpoint} returned an unexpected health response (${args.reason}).`,
+      details: {
+        endpoint: args.endpoint,
+        reason: args.reason,
+        ...(args.providerLabel === undefined ? {} : { provider: args.providerLabel }),
+      },
       cause: args.cause,
     });
   }
@@ -252,11 +265,34 @@ function asAwsSdkError(error: unknown): AwsSdkErrorLike | null {
 
 function mapAwsSdkError(error: AwsSdkErrorLike, context: ErrorContext): ApiError {
   const upstream = error.httpStatusCode ?? 500;
-  // 4xx from LocalStack is the caller's problem; 5xx is an upstream failure.
+  const service = error.service ?? context.service;
+
+  // Emulators implement different operation subsets. Surface "this emulator
+  // does not implement it" instead of an opaque upstream 5xx; the ui turns
+  // this code into a disabled action with an explanation.
+  if (isUnsupportedOperationError(error)) {
+    const subject = service === undefined ? 'This service' : `"${service}"`;
+    const operation = context.operation === undefined ? 'this operation' : `"${context.operation}"`;
+    return {
+      code: ApiErrorCodes.emulatorOperationUnsupported,
+      statusCode: 501,
+      message:
+        `${subject} does not implement ${operation} on the active local emulator. ` +
+        'Open the service console for supported actions, or use the provider-specific docs.',
+      details: {
+        upstreamStatusCode: upstream,
+        ...(service === undefined ? {} : { service }),
+        ...(context.operation === undefined ? {} : { operation: context.operation }),
+        reason: error.name,
+        upstreamMessage: error.message.slice(0, 500),
+      },
+    };
+  }
+
+  // 4xx from the emulator is the caller's problem; 5xx is an upstream failure.
   const statusCode = upstream >= 400 && upstream < 500 ? upstream : 502;
   // Smithy never writes `$service`; fall back to the registry descriptor id the
   // dispatcher passed in, so `ApiError.service` is populated for real errors.
-  const service = error.service ?? context.service;
   const apiError: ApiError = {
     code: error.name.length > 0 ? error.name : ApiErrorCodes.awsSdkError,
     message: error.message.length > 0 ? error.message : `AWS SDK call failed with ${error.name}.`,
@@ -269,6 +305,38 @@ function mapAwsSdkError(error: AwsSdkErrorLike, context: ErrorContext): ApiError
     ...(context.endpoint === undefined ? {} : { endpoint: context.endpoint }),
   };
   return apiError;
+}
+
+const UNSUPPORTED_OPERATION_NAMES = new Set([
+  'NotImplemented',
+  'NotImplementedException',
+  'UnsupportedOperation',
+  'UnsupportedOperationException',
+  'UnknownOperationException',
+  'UnknownOperation',
+]);
+
+const UNSUPPORTED_OPERATION_MESSAGE =
+  /not (?:yet )?(?:implemented|supported)|unsupported operation|unknown operation|operation .* is not (?:available|implemented|supported)|service .*?(?:is )?(?:disabled|not enabled)/i;
+
+/**
+ * True when an SDK failure means "this emulator does not implement the
+ * operation" rather than a transient or configuration problem.
+ */
+export function isUnsupportedOperationError(error: unknown): boolean {
+  if (typeof error === 'object' && error !== null) {
+    const record = error as Record<string, unknown>;
+    const httpStatusCode = record.httpStatusCode;
+    if (httpStatusCode === 501) return true;
+    const metadata = record.$metadata;
+    if (typeof metadata === 'object' && metadata !== null) {
+      const metadataStatus = (metadata as Record<string, unknown>).httpStatusCode;
+      if (metadataStatus === 501) return true;
+    }
+  }
+  if (error instanceof Error && UNSUPPORTED_OPERATION_NAMES.has(error.name)) return true;
+  const message = error instanceof Error ? error.message : undefined;
+  return message !== undefined && message.length > 0 && UNSUPPORTED_OPERATION_MESSAGE.test(message);
 }
 
 interface FastifyLikeError {
@@ -330,6 +398,15 @@ export interface ErrorContext {
   endpoint?: string;
   /** Registry service id, used when a real SDK error carries no `$service`. */
   service?: string;
+  /** Registry operation name, used for unsupported-operation messages. */
+  operation?: string;
+  /** Display name of the active emulator ("LocalStack", "MiniStack", "Floci"). */
+  emulatorLabel?: string;
+}
+
+/** Copy used for network failures when no provider has been identified yet. */
+function emulatorLabelOf(context: ErrorContext): string {
+  return context.emulatorLabel ?? 'the local emulator';
 }
 
 /**
@@ -344,13 +421,14 @@ export function toApiError(error: unknown, context: ErrorContext = {}): ApiError
     const multipartError = MULTIPART_ERRORS[asRecord.code];
     if (multipartError !== undefined) return { ...multipartError };
     // Fastify's handlerTimeout aborts request.signal and sends this error; it
-    // means LocalStack never answered, not that the api crashed.
+    // means the emulator never answered, not that the api crashed.
     if (asRecord.code === 'FST_ERR_HANDLER_TIMEOUT') {
+      const label = emulatorLabelOf(context);
       return {
-        code: ApiErrorCodes.localstackTimeout,
+        code: ApiErrorCodes.emulatorTimeout,
         statusCode: 504,
         message:
-          `LocalStack did not answer the operation within the configured timeout` +
+          `${label} did not answer the operation within the configured timeout` +
           `${context.endpoint === undefined ? '' : ` at ${context.endpoint}`}.`,
         details: {
           endpoint: context.endpoint ?? null,
@@ -361,15 +439,16 @@ export function toApiError(error: unknown, context: ErrorContext = {}): ApiError
   }
 
   // Timeouts and client aborts are request-level outcomes: classify them before
-  // the network mapping so they are never reported as "LocalStack is down".
+  // the network mapping so they are never reported as "the emulator is down".
   const requestFailure = classifyRequestFailure(error);
   if (requestFailure === 'timeout') {
     const reason = describeNetworkFailure(error);
+    const label = emulatorLabelOf(context);
     return {
-      code: ApiErrorCodes.localstackTimeout,
+      code: ApiErrorCodes.emulatorTimeout,
       statusCode: 504,
       message:
-        `LocalStack accepted the connection but did not finish the operation in time` +
+        `${label} accepted the connection but did not finish the operation in time` +
         `${context.endpoint === undefined ? '' : ` at ${context.endpoint}`}` +
         `${reason === undefined ? '' : ` (${reason})`}.`,
       details: {
@@ -383,32 +462,34 @@ export function toApiError(error: unknown, context: ErrorContext = {}): ApiError
     return {
       code: ApiErrorCodes.requestAborted,
       statusCode: 408,
-      message: 'The request was aborted before LocalStack answered.',
+      message: 'The request was aborted before the emulator answered.',
       details: { endpoint: context.endpoint ?? null, reason: 'request-aborted' },
       ...(context.service === undefined ? {} : { service: context.service }),
     };
   }
   if (requestFailure === 'connection-timeout') {
-    const endpoint = context.endpoint ?? 'the configured LocalStack endpoint';
+    const endpoint = context.endpoint ?? 'the configured emulator endpoint';
+    const label = emulatorLabelOf(context);
     return {
-      code: ApiErrorCodes.localstackUnreachable,
+      code: ApiErrorCodes.emulatorUnreachable,
       statusCode: 503,
       message:
-        `LocalDeck api is running, but LocalStack is unreachable at ${endpoint} (connection timeout). ` +
-        'Start LocalStack, or point LOCALSTACK_ENDPOINT at the instance you want to manage.',
+        `LocalDeck api is running, but ${label} is unreachable at ${endpoint} (connection timeout). ` +
+        'Start the emulator, or point EMULATOR_ENDPOINT at the instance you want to manage.',
       details: { endpoint: context.endpoint ?? null, reason: 'connection-timeout' },
     };
   }
 
   const networkCode = findNetworkErrorCode(error);
   if (networkCode !== undefined) {
-    const endpoint = context.endpoint ?? 'the configured LocalStack endpoint';
+    const endpoint = context.endpoint ?? 'the configured emulator endpoint';
+    const label = emulatorLabelOf(context);
     return {
-      code: ApiErrorCodes.localstackUnreachable,
+      code: ApiErrorCodes.emulatorUnreachable,
       statusCode: 503,
       message:
-        `LocalDeck api is running, but LocalStack is unreachable at ${endpoint} (${networkCode}). ` +
-        'Start LocalStack, or point LOCALSTACK_ENDPOINT at the instance you want to manage.',
+        `LocalDeck api is running, but ${label} is unreachable at ${endpoint} (${networkCode}). ` +
+        'Start the emulator, or point EMULATOR_ENDPOINT at the instance you want to manage.',
       details: { endpoint: context.endpoint ?? null, reason: networkCode },
     };
   }

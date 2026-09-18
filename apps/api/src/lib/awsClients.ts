@@ -87,7 +87,7 @@ export function buildAwsClientConfig(overrides: AwsClientConfigOverrides = {}): 
 
   return {
     region: overrides.region ?? config.region,
-    endpoint: overrides.endpoint ?? config.localstackEndpoint,
+    endpoint: overrides.endpoint ?? config.emulatorEndpoint,
     credentials: {
       accessKeyId: accessKeyId !== undefined && accessKeyId.length > 0 ? accessKeyId : 'test',
       secretAccessKey:
@@ -98,8 +98,8 @@ export function buildAwsClientConfig(overrides: AwsClientConfigOverrides = {}): 
     requestChecksumCalculation: 'WHEN_REQUIRED',
     responseChecksumValidation: 'WHEN_REQUIRED',
     requestHandler: {
-      connectionTimeout: overrides.connectionTimeoutMs ?? config.localstackConnectionTimeoutMs,
-      requestTimeout: overrides.requestTimeoutMs ?? config.localstackRequestTimeoutMs,
+      connectionTimeout: overrides.connectionTimeoutMs ?? config.emulatorConnectionTimeoutMs,
+      requestTimeout: overrides.requestTimeoutMs ?? config.emulatorRequestTimeoutMs,
       throwOnRequestTimeout: true,
     },
   };
@@ -194,7 +194,7 @@ export function getS3ClientFor(overrides: AwsClientConfigOverrides = {}): S3Clie
  * derived from the same config the client's request handler uses.
  */
 export function sdkAbortSignal(signal?: AbortSignal, requestTimeoutMs?: number): AbortSignal {
-  const timeout = AbortSignal.timeout(requestTimeoutMs ?? getConfig().localstackRequestTimeoutMs);
+  const timeout = AbortSignal.timeout(requestTimeoutMs ?? getConfig().emulatorRequestTimeoutMs);
   return signal === undefined ? timeout : AbortSignal.any([signal, timeout]);
 }
 

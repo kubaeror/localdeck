@@ -1,5 +1,5 @@
 import type { AwsTag, Paginated } from '@localdeck/shared';
-import { ApiClientError } from '../../lib/apiClient';
+import { ApiClientError, toApiError } from '../../lib/apiClient';
 import { callServiceOperation } from '../../lib/serviceOperations';
 import { SERVICE_ID } from './spec';
 
@@ -71,10 +71,12 @@ export interface Ec2Count {
   hasMore: boolean;
 }
 
-function toCount(page: Paginated<unknown>, limit: number): Ec2Count {
+function toCount(page: Paginated<unknown>): Ec2Count {
+  // A full page is not proof of more results: LocalStack can answer exactly
+  // `MaxResults` items with no NextToken. Only a token means there is more.
   return {
     count: page.items.length,
-    hasMore: page.nextToken !== undefined || page.items.length >= limit,
+    hasMore: page.nextToken !== undefined,
   };
 }
 
@@ -346,7 +348,7 @@ export async function listAllInstances(): Promise<readonly Ec2Instance[]> {
 
 /** Dashboard count: one page, with `hasMore` when the service had more. */
 export async function countInstances(): Promise<Ec2Count> {
-  return toCount(await listInstances(), PAGE_SIZE);
+  return toCount(await listInstances());
 }
 
 /** `DescribeInstances` for one id; throws a readable error when it is gone. */
@@ -554,7 +556,7 @@ export async function listAllImages(options: ImageListOptions = {}): Promise<rea
 
 /** Dashboard count: one page, with `hasMore` when the service had more. */
 export async function countImages(): Promise<Ec2Count> {
-  return toCount(await listImages(), PAGE_SIZE);
+  return toCount(await listImages());
 }
 
 /** `DescribeImages` for one id; throws a readable error when it is gone. */
@@ -892,7 +894,7 @@ export async function listAllSecurityGroups(): Promise<readonly Ec2SecurityGroup
 
 /** Dashboard count: one page, with `hasMore` when the service had more. */
 export async function countSecurityGroups(): Promise<Ec2Count> {
-  return toCount(await listSecurityGroups(), PAGE_SIZE);
+  return toCount(await listSecurityGroups());
 }
 
 /** `DescribeSecurityGroups` for one id. */
@@ -902,10 +904,14 @@ export async function getSecurityGroup(groupId: string): Promise<Ec2SecurityGrou
     'DescribeSecurityGroups',
     { GroupIds: [groupId] },
   );
-  const group = (result.SecurityGroups ?? []).flatMap((raw): Ec2SecurityGroup[] => {
-    const mapped = toEc2SecurityGroup(raw);
-    return mapped === null ? [] : [mapped];
-  })[0];
+  // The id filter is not a guarantee: LocalStack has ignored it in the past, so
+  // only an exact id match is acceptable.
+  const group = (result.SecurityGroups ?? [])
+    .flatMap((raw): Ec2SecurityGroup[] => {
+      const mapped = toEc2SecurityGroup(raw);
+      return mapped === null ? [] : [mapped];
+    })
+    .find((entry) => entry.groupId === groupId);
   if (group === undefined) {
     throw notFound(`LocalStack returned no security group for "${groupId}".`);
   }
@@ -1181,13 +1187,15 @@ export async function listAllVolumes(): Promise<readonly Ec2Volume[]> {
 
 /** Dashboard count: one page, with `hasMore` when the service had more. */
 export async function countVolumes(): Promise<Ec2Count> {
-  return toCount(await listVolumes(), PAGE_SIZE);
+  return toCount(await listVolumes());
 }
 
 /** `DescribeVolumes` for one id. */
 export async function getVolume(volumeId: string): Promise<Ec2Volume> {
   const page = await listVolumes({ volumeIds: [volumeId] });
-  const volume = page.items[0];
+  // LocalStack can ignore the id filter; matching exactly keeps the detail page
+  // from rendering an unrelated volume as the requested one.
+  const volume = page.items.find((entry) => entry.volumeId === volumeId);
   if (volume === undefined) {
     throw notFound(`LocalStack returned no volume for "${volumeId}".`);
   }
@@ -1462,8 +1470,6 @@ export interface RunInstancesInput {
   availabilityZone?: string;
   /** Idempotency token, so a retried submit cannot launch a second instance. */
   clientToken?: string;
-  /** Additional tags applied to the volumes the launch creates. */
-  volumeTags?: readonly AwsTag[];
   blockDevices?: readonly {
     deviceName: string;
     sizeGiB: number;
@@ -1476,8 +1482,10 @@ export interface RunInstancesInput {
 }
 
 /**
- * `RunInstances`, exactly the way the launch wizard submits it: one instance,
- * tags applied to the instance and its volumes in the same call.
+ * `RunInstances`, exactly the way the launch wizard submits it. Only the
+ * instance tags travel in this call: AWS applies one `Tags` list to every
+ * volume the launch creates, so the wizard names the volumes with `CreateTags`
+ * after the launch instead (see {@link tagLaunchedVolumes}).
  */
 export async function runInstances(input: RunInstancesInput): Promise<Ec2Instance> {
   const result = await callServiceOperation<{ Instances?: RawInstance[] }>(
@@ -1517,17 +1525,10 @@ export async function runInstances(input: RunInstancesInput): Promise<Ec2Instanc
               },
             })),
           }),
-      ...(input.tags.length === 0 && (input.volumeTags ?? []).length === 0
+      ...(input.tags.length === 0
         ? {}
         : {
-            TagSpecifications: [
-              ...(input.tags.length === 0
-                ? []
-                : [{ ResourceType: 'instance', Tags: [...input.tags] }]),
-              ...((input.volumeTags ?? []).length === 0
-                ? []
-                : [{ ResourceType: 'volume', Tags: [...(input.volumeTags ?? [])] }]),
-            ],
+            TagSpecifications: [{ ResourceType: 'instance', Tags: [...input.tags] }],
           }),
     },
   );
@@ -1537,4 +1538,83 @@ export async function runInstances(input: RunInstancesInput): Promise<Ec2Instanc
     throw notFound('LocalStack returned no instance for RunInstances.');
   }
   return instance;
+}
+
+/** One additional EBS volume from the launch wizard, for post-launch tagging. */
+export interface LaunchAdditionalVolume {
+  deviceName: string;
+  /** User-provided `Name`; falls back to `<instanceName>-<deviceName>`. */
+  name?: string;
+}
+
+/** One volume whose post-launch `Name` tag could not be applied. */
+export interface LaunchVolumeTagFailure {
+  deviceName: string;
+  volumeId: string;
+  message: string;
+}
+
+/**
+ * Applies the `Name` tag to each EBS volume a launch created. `RunInstances`
+ * can only carry one volume `Tags` list for every device, so the wizard calls
+ * this after the response: the root device becomes `<instanceName>-root` and
+ * each additional volume gets its user-provided name or
+ * `<instanceName>-<deviceName>`.
+ *
+ * Volumes are matched through the returned `BlockDeviceMappings`, so a device
+ * the emulator did not report is left untagged instead of guessing. Tagging is
+ * best-effort: every failure is returned for the caller to report, and the
+ * launch itself is never failed by a tagging error.
+ */
+export async function tagLaunchedVolumes(input: {
+  instance: Pick<Ec2Instance, 'blockDevices' | 'rootDeviceName'>;
+  instanceName: string;
+  additionalVolumes: readonly LaunchAdditionalVolume[];
+}): Promise<readonly LaunchVolumeTagFailure[]> {
+  const trimmedName = input.instanceName.trim();
+  const prefix = trimmedName.length === 0 ? 'instance' : trimmedName;
+
+  const volumesByDevice = new Map<string, string>();
+  for (const mapping of input.instance.blockDevices) {
+    if (mapping.deviceName !== undefined && mapping.volumeId !== undefined) {
+      volumesByDevice.set(mapping.deviceName, mapping.volumeId);
+    }
+  }
+
+  const targets: { deviceName: string; volumeId: string; name: string }[] = [];
+  const rootDeviceName =
+    input.instance.rootDeviceName ?? input.instance.blockDevices[0]?.deviceName;
+  if (rootDeviceName !== undefined) {
+    const rootVolumeId = volumesByDevice.get(rootDeviceName);
+    if (rootVolumeId !== undefined) {
+      targets.push({ deviceName: rootDeviceName, volumeId: rootVolumeId, name: `${prefix}-root` });
+    }
+  }
+  for (const volume of input.additionalVolumes) {
+    const volumeId = volumesByDevice.get(volume.deviceName);
+    if (volumeId === undefined) continue;
+    const providedName = volume.name?.trim();
+    targets.push({
+      deviceName: volume.deviceName,
+      volumeId,
+      name:
+        providedName === undefined || providedName.length === 0
+          ? `${prefix}-${volume.deviceName}`
+          : providedName,
+    });
+  }
+
+  const failures: LaunchVolumeTagFailure[] = [];
+  for (const target of targets) {
+    try {
+      await createTags([target.volumeId], [{ Key: 'Name', Value: target.name }]);
+    } catch (caught) {
+      failures.push({
+        deviceName: target.deviceName,
+        volumeId: target.volumeId,
+        message: toApiError(caught).message,
+      });
+    }
+  }
+  return failures;
 }

@@ -163,4 +163,30 @@ describe('EC2 VolumeCreatePage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Next' }));
     expect(await screen.findByRole('heading', { level: 2, name: 'Tags' })).toBeDefined();
   }, 15_000);
+
+  it('blocks the tags step while a tag row is invalid', async () => {
+    renderCreate();
+    await screen.findByRole('heading', { level: 1, name: 'Create volume' });
+    await waitFor(() => {
+      expect(document.body.textContent).toContain('us-east-1a');
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    await screen.findByRole('heading', { level: 2, name: 'Tags' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add new tag' }));
+    fireEvent.change(screen.getByLabelText('Tag value 1'), { target: { value: 'oops' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+    expect(
+      (await screen.findAllByText(/Tag keys cannot be empty or whitespace/)).length,
+    ).toBeGreaterThan(0);
+    expect(screen.queryByRole('heading', { level: 2, name: 'Review and create' })).toBeNull();
+
+    fireEvent.change(screen.getByLabelText('Tag key 1'), { target: { value: 'env' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    expect(
+      await screen.findByRole('heading', { level: 2, name: 'Review and create' }),
+    ).toBeDefined();
+  }, 15_000);
 });

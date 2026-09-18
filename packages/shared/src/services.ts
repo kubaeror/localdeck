@@ -1,4 +1,5 @@
-import type { LocalStackServiceStatus } from './health.js';
+import type { EmulatorProviderId, EmulatorServiceState } from './providers/index.js';
+import { providerKeysForCanonical } from './providers/index.js';
 import { SERVICE_CATALOG, SERVICE_CATEGORIES } from './catalog/index.js';
 import type {
   ServiceBrowserOperations,
@@ -26,8 +27,8 @@ export interface ServiceRegistryResponse {
 /** Shape served by GET /api/services/:serviceId. */
 export interface ServiceDetailResponse {
   service: ServiceDescriptor;
-  /** LocalStack health keys that identify this service, primary key first. */
-  localStackKeys: readonly string[];
+  /** Provider health keys that identify this service, primary key first. */
+  healthKeys: readonly string[];
 }
 
 /**
@@ -55,31 +56,43 @@ export function findService(id: string): ServiceDescriptor | undefined {
   return SERVICE_BY_ID.get(id);
 }
 
-/** LocalStack health keys that identify this service, primary key first. */
-export function localStackKeysFor(service: ServiceDescriptor): readonly string[] {
-  return service.healthKeys === undefined ? [service.id] : [service.id, ...service.healthKeys];
+/**
+ * Health keys that can carry this service's state for a provider, primary key
+ * first: the registry id and its declared aliases, plus the provider-specific
+ * mappings from `HEALTH_KEY_ALIASES`.
+ */
+export function serviceHealthKeys(
+  service: ServiceDescriptor,
+  provider: EmulatorProviderId,
+): readonly string[] {
+  const base =
+    service.healthKeys === undefined ? [service.id] : [service.id, ...service.healthKeys];
+  const extra = providerKeysForCanonical(provider, service.id);
+  return [...new Set([...base, ...extra])];
 }
 
 /**
- * Live status of a registry service, or `undefined` when LocalStack does not
+ * Live status of a registry service, or `undefined` when the provider does not
  * report it — which is how the console knows to grey the entry out.
  */
 export function resolveServiceStatus(
   service: ServiceDescriptor,
-  services: Readonly<Record<string, LocalStackServiceStatus>>,
-): LocalStackServiceStatus | undefined {
-  for (const key of localStackKeysFor(service)) {
+  services: Readonly<Record<string, EmulatorServiceState>>,
+  provider: EmulatorProviderId = 'localstack',
+): EmulatorServiceState | undefined {
+  for (const key of serviceHealthKeys(service, provider)) {
     const status = services[key];
     if (status !== undefined) return status;
   }
   return undefined;
 }
 
-export function isServiceEmulated(
+export function isServiceEnabled(
   service: ServiceDescriptor,
-  services: Readonly<Record<string, LocalStackServiceStatus>>,
+  services: Readonly<Record<string, EmulatorServiceState>>,
+  provider: EmulatorProviderId = 'localstack',
 ): boolean {
-  return resolveServiceStatus(service, services) !== undefined;
+  return resolveServiceStatus(service, services, provider) === 'enabled';
 }
 
 /** Flat text a fuzzy matcher can score: name, id, category, summary and ops. */
@@ -123,15 +136,18 @@ export function browserOperationsFor(service: ServiceDescriptor): readonly strin
   ];
 }
 
-/** How the registry lines up with what LocalStack actually reports. */
+/** How the registry lines up with what the active emulator actually reports. */
 export interface RegistryCoverage {
+  provider: EmulatorProviderId;
   /** Services in the registry. */
   registered: number;
-  /** Registered services LocalStack reports as emulated. */
+  /** Registered services the provider reports as enabled. */
   emulated: number;
-  /** Registry ids LocalStack does not report at all (as reported). */
+  /** Registered services the provider reports as disabled (Floci). */
+  disabled: number;
+  /** Registry ids the provider does not report at all (as reported). */
   notEmulated: readonly string[];
-  /** LocalStack service keys with no registry entry, so they never reach the ui. */
+  /** Provider service keys with no registry entry, so they never reach the ui. */
   unregistered: readonly string[];
 }
 
@@ -142,18 +158,22 @@ export interface RegistryCoverage {
  * (bundled vs. served by GET /api/services) instead of the module default.
  */
 export function summarizeRegistryCoverage(
-  services: Readonly<Record<string, LocalStackServiceStatus>>,
+  services: Readonly<Record<string, EmulatorServiceState>>,
   catalog: readonly ServiceDescriptor[] = SERVICE_CATALOG,
+  provider: EmulatorProviderId = 'localstack',
 ): RegistryCoverage {
   const claimed = new Set<string>();
   const notEmulated: string[] = [];
   let emulated = 0;
+  let disabled = 0;
 
   for (const service of catalog) {
-    const keys = localStackKeysFor(service);
+    const keys = serviceHealthKeys(service, provider);
     for (const key of keys) claimed.add(key);
-    if (resolveServiceStatus(service, services) === undefined) notEmulated.push(service.id);
-    else emulated += 1;
+    const status = resolveServiceStatus(service, services, provider);
+    if (status === 'enabled') emulated += 1;
+    else if (status === 'disabled') disabled += 1;
+    else if (status === undefined) notEmulated.push(service.id);
   }
 
   const unregistered = Object.keys(services)
@@ -161,8 +181,10 @@ export function summarizeRegistryCoverage(
     .sort((left, right) => left.localeCompare(right));
 
   return {
+    provider,
     registered: catalog.length,
     emulated,
+    disabled,
     notEmulated,
     unregistered,
   };

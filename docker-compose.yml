@@ -26,27 +26,31 @@ services:
       NODE_ENV: production
       HOST: 0.0.0.0
       PORT: '3001'
-      # LocalStack runs on the Docker host, so the default reaches it through
-      # the host gateway. Override for a remote or loopback-bound instance.
-      LOCALSTACK_ENDPOINT: ${LOCALSTACK_ENDPOINT:-http://host.docker.internal:4566}
+      # The emulator (LocalStack, MiniStack, Floci, …) runs on the Docker
+      # host, so the default reaches it through the host gateway. Override for
+      # a remote or loopback-bound instance. LOCALSTACK_ENDPOINT is still
+      # accepted as a legacy alias.
+      EMULATOR_ENDPOINT: ${EMULATOR_ENDPOINT:-${LOCALSTACK_ENDPOINT:-http://host.docker.internal:4566}}
+      EMULATOR_PROVIDER: ${EMULATOR_PROVIDER:-auto}
       # Endpoint written into generated kubeconfigs, which are consumed on the
-      # host (not in this container). Defaults to LOCALSTACK_ENDPOINT.
-      LOCALSTACK_PUBLIC_ENDPOINT: ${LOCALSTACK_PUBLIC_ENDPOINT:-}
+      # host (not in this container). Defaults to EMULATOR_ENDPOINT.
+      EMULATOR_PUBLIC_ENDPOINT: ${EMULATOR_PUBLIC_ENDPOINT:-${LOCALSTACK_PUBLIC_ENDPOINT:-}}
       AWS_REGION: ${AWS_REGION:-us-east-1}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-test}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-test}
       # Temporary credentials for LocalStack deployments that validate the
       # session token; empty means "no token", like the api's own default.
       AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
-      CORS_ORIGIN: '${CORS_ORIGIN:-*}'
+      # Empty means same-origin only; set CORS_ORIGIN=* only for a trusted split deployment.
+      CORS_ORIGIN: '${CORS_ORIGIN:-}'
       LOG_LEVEL: ${LOG_LEVEL:-info}
       LOG_PRETTY: 'false'
       # Release builds stamp the git tag; /api/config reports it.
       APP_VERSION: ${APP_VERSION:-dev}
-      # Outbound LocalStack timeouts and health-cache tuning (ms).
-      LOCALSTACK_CONNECTION_TIMEOUT_MS: ${LOCALSTACK_CONNECTION_TIMEOUT_MS:-3000}
-      LOCALSTACK_REQUEST_TIMEOUT_MS: ${LOCALSTACK_REQUEST_TIMEOUT_MS:-30000}
-      LOCALSTACK_HEALTH_CACHE_MS: ${LOCALSTACK_HEALTH_CACHE_MS:-2000}
+      # Outbound emulator timeouts and health-cache tuning (ms).
+      EMULATOR_CONNECTION_TIMEOUT_MS: ${EMULATOR_CONNECTION_TIMEOUT_MS:-${LOCALSTACK_CONNECTION_TIMEOUT_MS:-3000}}
+      EMULATOR_REQUEST_TIMEOUT_MS: ${EMULATOR_REQUEST_TIMEOUT_MS:-${LOCALSTACK_REQUEST_TIMEOUT_MS:-30000}}
+      EMULATOR_HEALTH_CACHE_MS: ${EMULATOR_HEALTH_CACHE_MS:-${LOCALSTACK_HEALTH_CACHE_MS:-2000}}
       # Graceful-shutdown deadline (ms) before the process exits forcefully.
       SHUTDOWN_TIMEOUT_MS: ${SHUTDOWN_TIMEOUT_MS:-10000}
     extra_hosts:

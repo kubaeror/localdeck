@@ -71,12 +71,17 @@ export default defineConfig(({ mode }) => {
       // imports, and re-transforming them on every run is the slowest part of
       // the suite.
       fsModuleCache: true,
+      // 20-core machines spawn one jsdom worker per core, which thrashes more
+      // than it parallelizes: the service-module transforms are CPU-heavy and
+      // the suite is dominated by a few large files. Four workers keep the
+      // suite stable and roughly as fast.
+      maxWorkers: 4,
       // Service consoles load through dynamic imports, whose first transform
       // can take seconds when the suite runs in parallel. Keep the per-test
-      // budget above Testing Library's async utility timeout (5s) so a slow
+      // budget above Testing Library's async utility timeout (25s) so a slow
       // import fails with a useful assertion instead of a bare timeout.
-      testTimeout: 20_000,
-      hookTimeout: 20_000,
+      testTimeout: 45_000,
+      hookTimeout: 30_000,
     },
   };
 });

@@ -4,6 +4,7 @@ import { destroyAwsClients, type AwsSdkClient } from '../src/lib/awsClients.js';
 import { ApiProblem } from '../src/lib/errors.js';
 import {
   dispatchServiceOperation,
+  resetUnsupportedOperationCache,
   sanitizeDispatcherResult,
   type DispatcherDependencies,
 } from '../src/registry/dispatcher.js';
@@ -203,7 +204,7 @@ describe('dispatcher error mapping (real Smithy shape)', () => {
     expect(apiError.service).toBe('s3');
   });
 
-  it('maps connection failures to 503 LOCALSTACK_UNREACHABLE', async () => {
+  it('maps connection failures to 503 EMULATOR_UNREACHABLE', async () => {
     const refused = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:4566'), {
       code: 'ECONNREFUSED',
     });
@@ -218,7 +219,7 @@ describe('dispatcher error mapping (real Smithy shape)', () => {
         dependencies(module),
       ),
     );
-    expect(problem.code).toBe('LOCALSTACK_UNREACHABLE');
+    expect(problem.code).toBe('EMULATOR_UNREACHABLE');
     expect(problem.statusCode).toBe(503);
   });
 
@@ -234,7 +235,7 @@ describe('dispatcher error mapping (real Smithy shape)', () => {
     const problem = await expectProblem(
       dispatchServiceOperation('s3', 'ListBuckets', {}, {}, dependencies(module)),
     );
-    expect(problem.code).toBe('LOCALSTACK_TIMEOUT');
+    expect(problem.code).toBe('EMULATOR_TIMEOUT');
     expect(problem.statusCode).toBe(504);
   });
 
@@ -361,5 +362,64 @@ describe('dispatcher input passthrough', () => {
     const input = { Bucket: 'b', MaxKeys: 5, Metadata: { a: 'b' } };
     await dispatchServiceOperation('s3', 'ListBuckets', input, {}, dependencies(module));
     expect(state.lastInput).toBe(input);
+  });
+});
+
+describe('dispatcher result sanitization of prototype-shaped keys', () => {
+  it('preserves a __proto__ key as an own property instead of mutating the prototype', () => {
+    const source = JSON.parse('{"__proto__": {"polluted": true}, "ok": 1}') as Record<
+      string,
+      unknown
+    >;
+    const result = sanitizeDispatcherResult(source) as Record<string, unknown>;
+
+    expect(Object.prototype.hasOwnProperty.call(result, '__proto__')).toBe(true);
+    expect(Object.getOwnPropertyDescriptor(result, '__proto__')?.value).toEqual({
+      polluted: true,
+    });
+    expect(result['ok']).toBe(1);
+    // Object.prototype must not be polluted.
+    expect(({} as Record<string, unknown>)['polluted']).toBeUndefined();
+  });
+});
+
+describe('dispatcher learned unsupported operations', () => {
+  afterEach(() => {
+    resetUnsupportedOperationCache();
+  });
+
+  it('answers 501 EMULATOR_OPERATION_UNSUPPORTED after the first rejection', async () => {
+    const state = newState();
+    const Command = commandClass();
+    const module = fakeModule(
+      { ListBucketsCommand: Command },
+      {
+        S3Client: clientClass(
+          'S3Client',
+          async () => {
+            const error = new Error('This operation is not implemented yet');
+            error.name = 'NotImplementedException';
+            Object.assign(error, { $metadata: { httpStatusCode: 501 } });
+            throw error;
+          },
+          state,
+        ),
+      },
+    );
+
+    const first = await dispatchServiceOperation('s3', 'ListBuckets', {}, {}, dependencies(module))
+      .then(() => undefined)
+      .catch((error: unknown) => error as ApiProblem);
+    expect(first?.code).toBe('EMULATOR_OPERATION_UNSUPPORTED');
+    expect(first?.statusCode).toBe(501);
+    expect(state.sends).toBe(1);
+
+    const second = await dispatchServiceOperation('s3', 'ListBuckets', {}, {}, dependencies(module))
+      .then(() => undefined)
+      .catch((error: unknown) => error as ApiProblem);
+    expect(second?.code).toBe('EMULATOR_OPERATION_UNSUPPORTED');
+    expect(second?.details?.['reason']).toBe('learned-unsupported');
+    // The second call was rejected before touching the SDK again.
+    expect(state.sends).toBe(1);
   });
 });

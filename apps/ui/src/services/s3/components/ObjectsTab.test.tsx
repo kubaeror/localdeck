@@ -1,8 +1,11 @@
 // @vitest-environment jsdom
+import Flashbar from '@cloudscape-design/components/flashbar';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import type { ReactElement } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FlashbarProvider } from '../../../contexts/FlashbarProvider';
+import { useFlashbar } from '../../../hooks/useFlashbar';
 import { ObjectsTab } from './ObjectsTab';
 
 interface Call {
@@ -39,6 +42,12 @@ function stubS3(handler: Handler): Call[] {
   return calls;
 }
 
+/** Renders the app-wide flashbar so the tests can assert its messages. */
+function FlashbarProbe(): ReactElement {
+  const { items } = useFlashbar();
+  return <Flashbar items={[...items]} />;
+}
+
 function renderObjectsTab(): void {
   render(
     <FlashbarProvider>
@@ -51,6 +60,7 @@ function renderObjectsTab(): void {
           onRefreshBuckets={() => {}}
         />
       </MemoryRouter>
+      <FlashbarProbe />
     </FlashbarProvider>,
   );
 }
@@ -167,12 +177,103 @@ describe('S3 ObjectsTab', () => {
     expect(screen.getByText('inside.txt')).toBeDefined();
   });
 
+  it('warns that a versioned bucket keeps versions when deleting a folder', async () => {
+    const calls = stubS3((operation, input) => {
+      if (operation === 'GetBucketVersioning') return { Status: 'Enabled' };
+      if (operation === 'ListObjectsV2') {
+        if (input['Prefix'] === 'docs/' && input['Delimiter'] === undefined) {
+          return {
+            Contents: [
+              { Key: 'docs/', Size: 0 },
+              { Key: 'docs/report.txt', Size: 12 },
+            ],
+          };
+        }
+        return { CommonPrefixes: [{ Prefix: 'docs/' }], Contents: [] };
+      }
+      if (operation === 'DeleteObjects') {
+        return { Deleted: (input['Delete'] as { Objects: { Key: string }[] }).Objects };
+      }
+      return {};
+    });
+
+    renderObjectsTab();
+    await screen.findByText('docs/');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for docs/' }));
+    fireEvent.click(await screen.findByText('Delete folder'));
+
+    const modal = (await screen.findAllByRole('dialog')).find(
+      (dialog) => within(dialog).queryAllByText('Delete objects').length > 0,
+    );
+    if (modal === undefined) throw new Error('the delete confirmation modal is missing');
+    expect(within(modal).getByText(/adds delete markers/)).toBeDefined();
+    expect(within(modal).queryByText(/permanently deletes every object under it/)).toBeNull();
+
+    fireEvent.change(within(modal).getByRole('textbox'), { target: { value: 'delete' } });
+    fireEvent.click(within(modal).getByRole('button', { name: 'Delete' }));
+
+    // The delete is not silent about versions that survive it.
+    expect(await screen.findByText('Object versions remain')).toBeDefined();
+    expect(screen.getByText(/DeleteBucket will fail with "BucketNotEmpty"/)).toBeDefined();
+    expect(calls.some((call) => call.operation === 'GetBucketVersioning')).toBe(true);
+  });
+
+  it('keeps one failure message per key when a folder delete fails for two objects', async () => {
+    stubS3((operation, input) => {
+      if (operation === 'ListObjectsV2') {
+        if (input['Delimiter'] === undefined) {
+          return {
+            Contents: [
+              { Key: 'docs/a.txt', Size: 1 },
+              { Key: 'docs/b.txt', Size: 2 },
+            ],
+          };
+        }
+        return {
+          CommonPrefixes: [{ Prefix: 'docs/' }],
+          Contents: [],
+        };
+      }
+      if (operation === 'DeleteObjects') {
+        return {
+          Deleted: [],
+          Errors: [
+            { Key: 'docs/a.txt', Code: 'AccessDenied', Message: 'denied a' },
+            { Key: 'docs/b.txt', Code: 'AccessDenied', Message: 'denied b' },
+          ],
+        };
+      }
+      return {};
+    });
+
+    renderObjectsTab();
+    await screen.findByText('docs/');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for docs/' }));
+    fireEvent.click(await screen.findByText('Delete folder'));
+
+    const modal = (await screen.findAllByRole('dialog')).find(
+      (dialog) => within(dialog).queryAllByText('Delete objects').length > 0,
+    );
+    if (modal === undefined) throw new Error('the delete confirmation modal is missing');
+    fireEvent.change(within(modal).getByRole('textbox'), { target: { value: 'delete' } });
+    fireEvent.click(within(modal).getByRole('button', { name: 'Delete' }));
+
+    // Distinct headers survive the provider's type+header coalescing.
+    expect(await screen.findByText('Could not delete an object: docs/a.txt')).toBeDefined();
+    expect(await screen.findByText('Could not delete an object: docs/b.txt')).toBeDefined();
+  });
+
   it('offers a disabled Show versions button naming ListObjectVersions', async () => {
     stubS3((operation) => (operation === 'ListObjectsV2' ? { Contents: [] } : {}));
     renderObjectsTab();
 
     const button = await screen.findByRole('button', { name: 'Show versions' });
     expect(button.hasAttribute('disabled')).toBe(true);
-    expect(button.closest('span')?.getAttribute('aria-label')).toContain('ListObjectVersions');
+    const reason = button.closest('span')?.getAttribute('aria-label') ?? '';
+    expect(reason).toContain('ListObjectVersions');
+    // The reason is the registry whitelist, not a bug in the operation.
+    expect(reason).toContain('not whitelisted');
   });
 });

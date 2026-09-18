@@ -13,7 +13,14 @@ const IAM = ((): ServiceDescriptor => {
   return service;
 })();
 
+// The Ace bundle is never loaded in tests: the editor falls back to a textarea.
+vi.mock('../../../lib/aceJsonBundle', () => ({
+  loadAceJsonBundle: (): Promise<never> =>
+    Promise.reject(new Error('ace is not available in tests')),
+}));
+
 const POLICY_ARN = 'arn:aws:iam::000000000000:policy/read-only';
+const AWS_POLICY_ARN = 'arn:aws:iam::aws:policy/ReadOnlyAccess';
 const POLICY_DOCUMENT = JSON.stringify(
   {
     Version: '2012-10-17',
@@ -22,11 +29,85 @@ const POLICY_DOCUMENT = JSON.stringify(
   null,
   2,
 );
+const FULL_ADMIN_DOCUMENT = JSON.stringify(
+  {
+    Version: '2012-10-17',
+    Statement: [{ Effect: 'Allow', Action: '*', Resource: '*' }],
+  },
+  null,
+  2,
+);
 
-function renderDetail(): void {
+const DETAIL_OPERATIONS: Readonly<Record<string, unknown>> = {
+  'iam/GetPolicy': {
+    service: 'iam',
+    operation: 'GetPolicy',
+    result: {
+      Policy: {
+        PolicyName: 'read-only',
+        Arn: POLICY_ARN,
+        DefaultVersionId: 'v1',
+        AttachmentCount: 2,
+        IsAttachable: true,
+        UpdateDate: '2026-02-01T00:00:00.000Z',
+      },
+    },
+  },
+  'iam/GetPolicyVersion': {
+    service: 'iam',
+    operation: 'GetPolicyVersion',
+    result: { PolicyVersion: { Document: encodeURIComponent(POLICY_DOCUMENT) } },
+  },
+  'iam/ListEntitiesForPolicy': {
+    service: 'iam',
+    operation: 'ListEntitiesForPolicy',
+    result: {
+      PolicyUsers: [{ UserName: 'alice' }],
+      PolicyRoles: [{ RoleName: 'lambda-role' }],
+    },
+  },
+  'iam/ListPolicyVersions': {
+    service: 'iam',
+    operation: 'ListPolicyVersions',
+    result: {
+      Versions: [
+        { VersionId: 'v2', IsDefaultVersion: true, CreateDate: '2026-02-02T00:00:00.000Z' },
+        { VersionId: 'v1', IsDefaultVersion: false, CreateDate: '2026-02-01T00:00:00.000Z' },
+      ],
+    },
+  },
+  'iam/CreatePolicyVersion': {
+    service: 'iam',
+    operation: 'CreatePolicyVersion',
+    result: {},
+  },
+  'iam/DeletePolicyVersion': {
+    service: 'iam',
+    operation: 'DeletePolicyVersion',
+    result: {},
+  },
+};
+
+function operationCalls(operation: string): number {
+  const fetchMock = vi.mocked(globalThis.fetch);
+  return fetchMock.mock.calls.filter(([input]) =>
+    String(input).includes(`/api/services/iam/${operation}`),
+  ).length;
+}
+
+/**
+ * Cloudscape keeps a hidden Modal in the DOM; jsdom does not apply the
+ * `awsui_hidden` CSS, so a closed modal is detected by that class.
+ */
+function dialogIsHidden(): boolean {
+  const dialog = document.querySelector('[role="dialog"][data-analytics-modal-id]');
+  return dialog !== null && dialog.className.includes('awsui_hidden');
+}
+
+function renderDetail(policyArn: string = POLICY_ARN): void {
   render(
     <FlashbarProvider>
-      <MemoryRouter initialEntries={[`/console/iam/policies/${encodeURIComponent(POLICY_ARN)}`]}>
+      <MemoryRouter initialEntries={[`/console/iam/policies/${encodeURIComponent(policyArn)}`]}>
         <Routes>
           <Route
             path="/console/iam/policies/:policyArn"
@@ -40,52 +121,7 @@ function renderDetail(): void {
 
 describe('IAM PolicyDetailPage', () => {
   beforeEach(() => {
-    stubApiFetch({
-      operations: {
-        'iam/GetPolicy': {
-          service: 'iam',
-          operation: 'GetPolicy',
-          result: {
-            Policy: {
-              PolicyName: 'read-only',
-              Arn: POLICY_ARN,
-              DefaultVersionId: 'v1',
-              AttachmentCount: 2,
-              IsAttachable: true,
-              UpdateDate: '2026-02-01T00:00:00.000Z',
-            },
-          },
-        },
-        'iam/GetPolicyVersion': {
-          service: 'iam',
-          operation: 'GetPolicyVersion',
-          result: { PolicyVersion: { Document: encodeURIComponent(POLICY_DOCUMENT) } },
-        },
-        'iam/ListEntitiesForPolicy': {
-          service: 'iam',
-          operation: 'ListEntitiesForPolicy',
-          result: {
-            PolicyUsers: [{ UserName: 'alice' }],
-            PolicyRoles: [{ RoleName: 'lambda-role' }],
-          },
-        },
-        'iam/ListPolicyVersions': {
-          service: 'iam',
-          operation: 'ListPolicyVersions',
-          result: {
-            Versions: [
-              { VersionId: 'v2', IsDefaultVersion: true, CreateDate: '2026-02-02T00:00:00.000Z' },
-              { VersionId: 'v1', IsDefaultVersion: false, CreateDate: '2026-02-01T00:00:00.000Z' },
-            ],
-          },
-        },
-        'iam/DeletePolicyVersion': {
-          service: 'iam',
-          operation: 'DeletePolicyVersion',
-          result: {},
-        },
-      },
-    });
+    stubApiFetch({ operations: DETAIL_OPERATIONS });
   });
 
   afterEach(() => {
@@ -151,5 +187,79 @@ describe('IAM PolicyDetailPage', () => {
     await waitFor(() => {
       expect(screen.queryByText('Delete policy version')).toBeNull();
     });
+  });
+
+  it('refreshes the Versions tab after saving a new policy version', async () => {
+    renderDetail();
+    await screen.findByRole('heading', { level: 1, name: 'read-only' });
+    expect(operationCalls('ListPolicyVersions')).toBe(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit policy' }));
+    fireEvent.change(await screen.findByRole('textbox'), {
+      target: {
+        value: JSON.stringify({
+          Version: '2012-10-17',
+          Statement: [{ Effect: 'Allow', Action: 's3:GetObject', Resource: 'arn:aws:s3:::c/*' }],
+        }),
+      },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save new version' }));
+
+    await waitFor(() => {
+      expect(operationCalls('CreatePolicyVersion')).toBe(1);
+      expect(operationCalls('ListPolicyVersions')).toBeGreaterThan(1);
+    });
+  });
+
+  it('offers no deletable version for an AWS managed policy', async () => {
+    renderDetail(AWS_POLICY_ARN);
+    await screen.findByRole('heading', { level: 1, name: 'read-only' });
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Versions' }));
+    const table = await screen.findByRole('table', { name: 'Policy versions' });
+    const deleteButtons = within(table).getAllByRole('button', { name: 'Delete' });
+
+    // Cloudscape renders a disabled button with a reason as aria-disabled.
+    expect(deleteButtons).toHaveLength(2);
+    expect(deleteButtons.every((button) => button.getAttribute('aria-disabled') === 'true')).toBe(
+      true,
+    );
+
+    fireEvent.click(deleteButtons[0] as HTMLElement);
+    expect(screen.queryByText('Delete policy version')).toBeNull();
+  });
+
+  it('closes the full-admin confirmation when saving fails, showing the page error', async () => {
+    stubApiFetch({
+      operations: {
+        ...DETAIL_OPERATIONS,
+        'iam/CreatePolicyVersion': {
+          error: {
+            code: 'MalformedPolicyDocument',
+            message: 'MalformedPolicyDocument: rejected',
+            statusCode: 400,
+          },
+        },
+      },
+    });
+
+    renderDetail();
+    await screen.findByRole('heading', { level: 1, name: 'read-only' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit policy' }));
+    fireEvent.change(await screen.findByRole('textbox'), {
+      target: { value: FULL_ADMIN_DOCUMENT },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save new version' }));
+
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save anyway' }));
+
+    // The modal closes so the page-level alert the failure sets is visible.
+    await waitFor(() => {
+      expect(dialogIsHidden()).toBe(true);
+    });
+    expect(await screen.findByText(/LocalStack rejected the policy document/)).toBeDefined();
+    expect(operationCalls('CreatePolicyVersion')).toBe(1);
   });
 });

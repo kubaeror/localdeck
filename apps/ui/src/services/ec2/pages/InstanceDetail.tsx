@@ -62,7 +62,9 @@ export function InstanceDetailPage({ descriptor }: ServicePageProps): ReactEleme
 
   const { forcedTracking, trackTransition } = useTransitionTracking();
   const transitional = instance !== null && isTransitionalInstanceState(instance.state);
-  usePolling(transitional || forcedTracking, POLL_INTERVAL_MS, () => reload());
+  // Silent: a dropped poll must keep the last known state so the transition
+  // stays observable and this interval keeps running.
+  usePolling(transitional || forcedTracking, POLL_INTERVAL_MS, () => reload({ silent: true }));
 
   const confirmAction = async (): Promise<void> => {
     if (acting || action === null || instance === null) return;

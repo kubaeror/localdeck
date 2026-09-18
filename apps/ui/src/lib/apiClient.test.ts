@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ApiErrorResponse, HealthResponse } from '@localdeck/shared';
-import { ApiClientError, getHealth, toApiError } from './apiClient';
+import { ApiClientError, getHealth, getText, toApiError } from './apiClient';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -21,12 +21,24 @@ describe('apiClient', () => {
       latencyMs: 12,
       endpoint: 'http://localhost:4566',
       region: 'us-east-1',
-      localstack: {
+      provider: {
+        provider: 'localstack',
+        providerLabel: 'LocalStack',
         version: '2026.8.2',
         edition: 'pro',
-        services: { s3: 'available' },
+        docsUrl: 'https://docs.localstack.cloud/aws/services/',
+      },
+      emulator: {
+        provider: 'localstack',
+        providerLabel: 'LocalStack',
+        version: '2026.8.2',
+        edition: 'pro',
+        hasServiceInventory: true,
+        services: { s3: 'enabled' },
+        rawServices: { s3: 'enabled' },
         features: {},
-        counts: { total: 1, available: 1, error: 0, other: 0 },
+        counts: { total: 1, enabled: 1, disabled: 0, error: 0, other: 0 },
+        ready: null,
       },
     };
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(payload));
@@ -37,6 +49,24 @@ describe('apiClient', () => {
       '/api/health',
       expect.objectContaining({ headers: { accept: 'application/json' } }),
     );
+  });
+
+  it('maps the Floci contract unavailable payload onto the unreachable error', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>().mockResolvedValue(
+        jsonResponse({
+          status: 'unavailable',
+          endpoint: 'http://localhost:4566',
+          error: 'MiniStack is unreachable at http://localhost:4566.',
+          console: { name: 'LocalDeck', version: '0.1.0' },
+        }),
+      ),
+    );
+
+    await expect(getHealth()).rejects.toMatchObject({
+      apiError: { code: 'EMULATOR_UNREACHABLE', statusCode: 503 },
+    });
   });
 
   it('surfaces the shared ApiError from a 503 response', async () => {
@@ -91,5 +121,67 @@ describe('apiClient', () => {
   it('passes an ApiError through toApiError unchanged', () => {
     const apiError = { code: 'X', message: 'm', statusCode: 418 };
     expect(toApiError(new ApiClientError(apiError))).toEqual(apiError);
+  });
+});
+
+describe('Content-Disposition file names', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function stubDownload(contentDisposition: string): void {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>().mockResolvedValue(
+        new Response('file body', {
+          status: 200,
+          headers: {
+            'content-type': 'application/octet-stream',
+            'content-disposition': contentDisposition,
+          },
+        }),
+      ),
+    );
+  }
+
+  it('decodes an RFC 5987 filename* parameter', async () => {
+    stubDownload(`attachment; filename*=UTF-8''r%C3%A9sum%C3%A9.txt`);
+
+    await expect(getText('/api/files/1')).resolves.toEqual({
+      text: 'file body',
+      fileName: 'résumé.txt',
+    });
+  });
+
+  it('prefers filename* over a plain filename fallback', async () => {
+    stubDownload(`attachment; filename="fallback.txt"; filename*=UTF-8''na%C3%AFve.txt`);
+
+    await expect(getText('/api/files/1')).resolves.toEqual({
+      text: 'file body',
+      fileName: 'naïve.txt',
+    });
+  });
+
+  it('falls back to filename when filename* is malformed', async () => {
+    stubDownload(`attachment; filename="fallback.txt"; filename*=UTF-8''%E0%A4%A`);
+
+    await expect(getText('/api/files/1')).resolves.toEqual({
+      text: 'file body',
+      fileName: 'fallback.txt',
+    });
+  });
+
+  it('still reads quoted and bare filename parameters', async () => {
+    stubDownload('attachment; filename="report.csv"');
+    await expect(getText('/api/files/1')).resolves.toEqual({
+      text: 'file body',
+      fileName: 'report.csv',
+    });
+
+    stubDownload('attachment; filename=plain.txt');
+    await expect(getText('/api/files/1')).resolves.toEqual({
+      text: 'file body',
+      fileName: 'plain.txt',
+    });
   });
 });

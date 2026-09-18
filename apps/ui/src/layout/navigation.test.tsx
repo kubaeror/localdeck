@@ -1,13 +1,20 @@
 // @vitest-environment jsdom
-import { SERVICE_CATALOG, type LocalStackServiceStatus } from '@localdeck/shared';
+import { SERVICE_CATALOG, type EmulatorServiceState } from '@localdeck/shared';
 import type { SideNavigationProps } from '@cloudscape-design/components/side-navigation';
 import { describe, expect, it } from 'vitest';
-import { buildNavigation, navigationActiveHref, NOT_EMULATED_TOOLTIP } from './navigation';
+import { buildNavigation, navigationActiveHref } from './navigation';
 
-const STATUSES: Record<string, LocalStackServiceStatus> = {
-  s3: 'available',
-  lambda: 'available',
-  logs: 'available',
+const STATUSES: Record<string, EmulatorServiceState> = {
+  s3: 'enabled',
+  lambda: 'enabled',
+  logs: 'enabled',
+  ecs: 'disabled',
+};
+
+const DEFAULTS = {
+  provider: 'localstack' as const,
+  providerLabel: 'LocalStack',
+  hasServiceInventory: true,
 };
 
 function links(items: readonly SideNavigationProps.Item[]): readonly SideNavigationProps.Link[] {
@@ -38,7 +45,11 @@ function sectionItems(
 
 describe('buildNavigation', () => {
   it('groups the registry into console categories', () => {
-    const model = buildNavigation({ services: SERVICE_CATALOG, serviceStatuses: STATUSES });
+    const model = buildNavigation({
+      services: SERVICE_CATALOG,
+      serviceStatuses: STATUSES,
+      ...DEFAULTS,
+    });
 
     expect(model.serviceCount).toBe(SERVICE_CATALOG.length);
     expect(model.emulatedCount).toBe(3);
@@ -53,7 +64,11 @@ describe('buildNavigation', () => {
   });
 
   it('starts with Console Home and ends with the LocalDeck entries', () => {
-    const model = buildNavigation({ services: SERVICE_CATALOG, serviceStatuses: STATUSES });
+    const model = buildNavigation({
+      services: SERVICE_CATALOG,
+      serviceStatuses: STATUSES,
+      ...DEFAULTS,
+    });
     const all = links(model.items);
     expect(all[0]).toMatchObject({ text: 'Console Home', href: '/console/home' });
     expect(all.map((link) => link.text)).toEqual(
@@ -61,45 +76,72 @@ describe('buildNavigation', () => {
     );
   });
 
-  it('marks services LocalStack does not report and never hides them', () => {
-    const model = buildNavigation({ services: SERVICE_CATALOG, serviceStatuses: STATUSES });
+  it('marks services the provider does not report and never hides them', () => {
+    const model = buildNavigation({
+      services: SERVICE_CATALOG,
+      serviceStatuses: STATUSES,
+      ...DEFAULTS,
+    });
     const all = links(model.items);
-    const emulated = all.find((link) => link.text === 'S3');
+    const reported = all.find((link) => link.text === 'S3');
     const missing = all.find((link) => link.text === 'EC2');
 
-    expect(emulated?.info).toBeUndefined();
+    expect(reported?.info).toBeUndefined();
     expect(missing).toBeDefined();
     expect(missing?.info).toBeDefined();
-    expect(NOT_EMULATED_TOOLTIP).toBe('Not emulated locally');
+    expect(JSON.stringify(missing?.info)).toContain('not reported');
+  });
+
+  it('marks services the provider knows but has disabled', () => {
+    const model = buildNavigation({
+      services: SERVICE_CATALOG,
+      serviceStatuses: STATUSES,
+      ...DEFAULTS,
+    });
+    const ecs = links(model.items).find((link) => link.text === 'ECS');
+    expect(JSON.stringify(ecs?.info)).toContain('disabled');
+  });
+
+  it('marks services unverified when the endpoint has no service inventory', () => {
+    const model = buildNavigation({
+      services: SERVICE_CATALOG,
+      serviceStatuses: {},
+      provider: 'generic',
+      providerLabel: 'AWS-compatible endpoint',
+      hasServiceInventory: false,
+    });
+    const ec2 = links(model.items).find((link) => link.text === 'EC2');
+    expect(JSON.stringify(ec2?.info)).toContain('unverified');
   });
 
   it('marks services the api cannot proxy because the SDK package is missing', () => {
     const services = SERVICE_CATALOG.map((service) =>
       service.id === 's3' ? { ...service, available: false } : service,
     );
-    const model = buildNavigation({ services, serviceStatuses: STATUSES });
+    const model = buildNavigation({ services, serviceStatuses: STATUSES, ...DEFAULTS });
     const s3 = links(model.items).find((link) => link.text === 'S3');
 
-    // Emulated locally, but the api has no @aws-sdk/client-s3 installed.
+    // Enabled, but the api has no @aws-sdk/client-s3 installed.
     expect(s3?.info).toBeDefined();
     const rendered = JSON.stringify(s3?.info);
     expect(rendered).toContain('not installed');
   });
 
-  it('lists recently visited services after Console Home', () => {
+  it('renders each service link exactly once (no duplicate hrefs)', () => {
     const model = buildNavigation({
       services: SERVICE_CATALOG,
       serviceStatuses: STATUSES,
-      recentlyVisited: ['lambda', 's3'],
+      ...DEFAULTS,
     });
-    const recent = links(sectionItems(model.items, 'Recently visited'));
-    expect(recent.map((link) => link.text)).toEqual(['Lambda', 'S3']);
+    const hrefs = links(model.items).map((link) => link.href);
+    expect(new Set(hrefs).size).toBe(hrefs.length);
   });
 
   it('filters the tree with the sidebar filter and reports empty results', () => {
     const filtered = buildNavigation({
       services: SERVICE_CATALOG,
       serviceStatuses: STATUSES,
+      ...DEFAULTS,
       filter: 's3',
     });
     expect(filtered.serviceCount).toBeGreaterThan(0);
@@ -110,6 +152,7 @@ describe('buildNavigation', () => {
     const none = buildNavigation({
       services: SERVICE_CATALOG,
       serviceStatuses: STATUSES,
+      ...DEFAULTS,
       // No service text can contain this, so the filter matches nothing.
       filter: '$$$',
     });

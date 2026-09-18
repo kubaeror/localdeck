@@ -69,6 +69,25 @@ describe('IAM PoliciesListPage', () => {
     expect(within(table).getByText('0')).toBeDefined();
   });
 
+  it('renders a policy without an ARN as text instead of a broken link', async () => {
+    stubApiFetch({
+      operations: {
+        'iam/ListPolicies': {
+          service: 'iam',
+          operation: 'ListPolicies',
+          result: {
+            Policies: [{ PolicyName: 'no-arn', AttachmentCount: 0, IsAttachable: true }],
+            IsTruncated: false,
+          },
+        },
+      },
+    });
+    renderList();
+
+    expect(await screen.findByText('no-arn')).toBeDefined();
+    expect(screen.queryByRole('link', { name: 'no-arn' })).toBeNull();
+  });
+
   it('filters by name and switches to the AWS managed scope', async () => {
     renderList();
     await screen.findByText('read-only');

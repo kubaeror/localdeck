@@ -2,9 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { ApiClientError } from '../../lib/apiClient';
 import {
   annotateS3Error,
-  createdAnnotation,
   friendlyS3Error,
   isS3Code,
+  stepAnnotation,
   toFriendlyS3Error,
 } from './errors';
 
@@ -67,11 +67,25 @@ describe('toFriendlyS3Error and isS3Code', () => {
     );
 
     const friendly = toFriendlyS3Error(annotated);
-    expect(createdAnnotation(friendly.apiError)).toBe(
+    expect(stepAnnotation(friendly.apiError)).toBe(
       'Bucket "my-bucket" was created, but tagging failed.',
     );
     expect(friendly.message).toContain('Bucket "my-bucket" was created, but tagging failed.');
     // The canned wording for the code is still appended.
+    expect(friendly.message).toContain('LocalStack denied this action');
+  });
+
+  it('keeps the "object was copied" annotation when the source delete failed', () => {
+    const annotated = annotateS3Error(
+      new ApiClientError({ code: 'AccessDenied', message: 'Access Denied', statusCode: 403 }),
+      'Object "copy.txt" was copied, but deleting the source object failed.',
+    );
+
+    const friendly = toFriendlyS3Error(annotated);
+    expect(stepAnnotation(friendly.apiError)).toBe(
+      'Object "copy.txt" was copied, but deleting the source object failed.',
+    );
+    expect(friendly.message).toContain('was copied, but deleting the source object failed.');
     expect(friendly.message).toContain('LocalStack denied this action');
   });
 });

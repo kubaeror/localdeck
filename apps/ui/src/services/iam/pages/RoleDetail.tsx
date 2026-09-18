@@ -144,7 +144,11 @@ export function RoleDetailPage({ descriptor }: ServicePageProps): ReactElement {
             content: (
               <SpaceBetween size="l">
                 <AttachedPoliciesPanel entity="role" name={roleName} />
-                <PermissionsBoundaryNotice entity="role" name={roleName} />
+                <PermissionsBoundaryNotice
+                  entity="role"
+                  name={roleName}
+                  boundary={role?.permissionsBoundary}
+                />
               </SpaceBetween>
             ),
           },

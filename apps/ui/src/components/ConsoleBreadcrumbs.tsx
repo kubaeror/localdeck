@@ -23,23 +23,20 @@ export function ConsoleBreadcrumbs({ items }: ConsoleBreadcrumbsProps): ReactEle
   const navigate = useNavigate();
   const location = useLocation();
 
-  const trail = useMemo<readonly BreadcrumbGroupProps.Item[]>(
-    () =>
-      [{ text: 'Console Home', href: CONSOLE_HOME_PATH }].concat(
-        items.map((item, index) => {
-          const isLast = index === items.length - 1;
-          return {
-            text: item.text,
-            // Only the last (current) crumb defaults to the current path.
-            // An intermediate crumb without href is a plain step, never a
-            // self-link. Cloudscape renders the last item as text and adds
-            // aria-current="page".
-            href: item.href ?? (isLast ? location.pathname : ''),
-          };
-        }),
-      ),
-    [items, location.pathname],
-  );
+  const trail = useMemo<readonly BreadcrumbGroupProps.Item[]>(() => {
+    const steps = items.flatMap((item, index): BreadcrumbGroupProps.Item[] => {
+      const isLast = index === items.length - 1;
+      const href = item.href !== undefined && item.href.length > 0 ? item.href : undefined;
+      // Cloudscape renders every step except the last as an anchor and falls
+      // back to href="#", so an intermediate step with no target is omitted
+      // instead of becoming a dead link. The current (last) step stays in the
+      // trail: Cloudscape renders it as text with aria-current="page" and it
+      // defaults to the current path.
+      if (!isLast && href === undefined) return [];
+      return [{ text: item.text, href: href ?? location.pathname }];
+    });
+    return [{ text: 'Console Home', href: CONSOLE_HOME_PATH }, ...steps];
+  }, [items, location.pathname]);
 
   return (
     <BreadcrumbGroup
@@ -48,11 +45,7 @@ export function ConsoleBreadcrumbs({ items }: ConsoleBreadcrumbsProps): ReactEle
       onFollow={(event) => {
         if (event.detail.external === true) return;
         event.preventDefault();
-        const href = event.detail.href;
-        // Empty hrefs belong to text-only steps (Cloudscape renders them as
-        // "#"); they must not navigate anywhere.
-        if (href.length === 0) return;
-        navigate(href);
+        navigate(event.detail.href);
       }}
     />
   );

@@ -48,6 +48,25 @@ describe('EKS naming rules', () => {
     );
   });
 
+  it('requires a maximum of at least one node, as EKS does', () => {
+    expect(validateScaling({ minSize: 0, maxSize: 0, desiredSize: 0 })).toContain(
+      'Maximum size must be at least 1 node',
+    );
+    expect(validateScaling({ minSize: 0, maxSize: 1, desiredSize: 0 })).toBeNull();
+  });
+
+  it('requires at least one desired node when creating, but not when updating', () => {
+    // Updates may scale a node group to zero...
+    expect(validateScaling({ minSize: 0, maxSize: 1, desiredSize: 0 })).toBeNull();
+    // ...but a create with zero desired nodes is rejected.
+    expect(
+      validateScaling({ minSize: 0, maxSize: 1, desiredSize: 0 }, { requireDesired: true }),
+    ).toContain('at least 1 node when the node group is created');
+    expect(
+      validateScaling({ minSize: 1, maxSize: 2, desiredSize: 1 }, { requireDesired: true }),
+    ).toBeNull();
+  });
+
   it('parses form values without inventing numbers', () => {
     expect(parseScalingValue('12')).toBe(12);
     expect(Number.isNaN(parseScalingValue(''))).toBe(true);

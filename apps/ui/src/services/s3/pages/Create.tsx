@@ -25,7 +25,7 @@ import { useFlashbar } from '../../../hooks/useFlashbar';
 import { serviceConsolePath } from '../../paths';
 import type { ServicePageProps } from '../../types';
 import { createBucket } from '../api';
-import { createdAnnotation, toFriendlyS3Error } from '../errors';
+import { stepAnnotation, toFriendlyS3Error } from '../errors';
 import { bucketNameRules, S3_REGIONS, validateBucketName } from '../naming';
 import { meaningfulTags } from '../tags';
 import { PublicAccessBlockSettings } from '../components/PublicAccessBlockSettings';
@@ -91,7 +91,7 @@ export function CreatePage({ descriptor }: ServicePageProps): ReactElement {
       navigate(bucketPath(name));
     } catch (caught) {
       const friendly = toFriendlyS3Error(caught);
-      const annotation = createdAnnotation(friendly.apiError);
+      const annotation = stepAnnotation(friendly.apiError);
       if (annotation !== undefined) {
         // The bucket exists; only a follow-up setting failed. Show the whole
         // story and take the user to the bucket instead of a dead-end wizard.
