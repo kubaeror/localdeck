@@ -62,6 +62,12 @@ export interface ServiceBrowserOperation {
   idParam?: string;
   /** True when `idParam` expects an array with the identifier as its entry. */
   idParamIsArray?: boolean;
+  /**
+   * Dotted path to a collection in the response when a batch-style operation
+   * (for example CodeBuild's `BatchGetProjects`) returns a list instead of one
+   * object. The generic browser unwraps the first element as the resource.
+   */
+  resultItemField?: string;
 }
 
 /**
@@ -80,6 +86,17 @@ export interface ServiceBrowserListOperation extends ServiceBrowserOperation {
   nameField?: string | readonly string[];
   /** Input property carrying the pagination token; defaults to `NextToken`. */
   nextTokenParam?: string;
+  /**
+   * Explicit pagination contract for services whose request and response token
+   * fields do not use the `NextToken` family (for example RDS `Marker`, DynamoDB
+   * `ExclusiveStartTableName`/`LastEvaluatedTableName`, SWF `nextPageToken`).
+   * When set, the generic browser sends the token as `requestField` and reads
+   * the next token from the dotted `responseField` path.
+   */
+  pagination?: {
+    requestField: string;
+    responseField: string;
+  };
 }
 
 /** Tags lookup for the detail view; falls back to tags in the describe result. */
@@ -127,4 +144,11 @@ export interface ServiceDescriptor {
    * and tags operations. `planned` entries have no browser spec yet.
    */
   browser?: ServiceBrowserOperations;
+  /**
+   * Runtime-only signal set by the api registry: true when the descriptor's
+   * `sdkPackage` resolves in the api process. The bundled catalog leaves it
+   * undefined (assume available). The ui uses it to grey out services whose
+   * package is not installed instead of surfacing a 501 on first call.
+   */
+  available?: boolean;
 }
