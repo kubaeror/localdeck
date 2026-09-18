@@ -36,7 +36,7 @@ COPY apps/ui apps/ui
 RUN pnpm --filter @localdeck/shared build && pnpm --filter @localdeck/ui build
 
 # --- Runtime stage: nginx serves the bundle and proxies /api ------------------
-FROM nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10 AS runtime
+FROM nginx:1.29-alpine@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de AS runtime
 
 ARG APP_VERSION=dev
 LABEL org.opencontainers.image.title="LocalDeck ui" \
