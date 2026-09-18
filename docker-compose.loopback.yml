@@ -1,0 +1,21 @@
+# Override for environments where LocalStack is published on the HOST LOOPBACK
+# only (127.0.0.1:4566) — typical for WSL2 with a Docker engine inside the same
+# distro. Containers on a bridge network cannot reach the host loopback, so the
+# api shares the host network namespace and talks to 127.0.0.1 directly; the ui
+# reaches the api through the host gateway instead of the compose network.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.loopback.yml up --build
+#
+# Linux/WSL only: `network_mode: host` is not available on Docker Desktop for
+# macOS or Windows.
+services:
+  api:
+    network_mode: host
+    ports: !reset []
+    networks: !reset []
+    extra_hosts: !reset []
+    environment:
+      LOCALSTACK_ENDPOINT: ${LOCALSTACK_ENDPOINT:-http://127.0.0.1:4566}
+  ui:
+    environment:
+      API_UPSTREAM: ${API_UPSTREAM:-http://host.docker.internal:3001}

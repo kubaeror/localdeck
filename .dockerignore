@@ -1,0 +1,13 @@
+**/node_modules
+**/dist
+**/coverage
+**/.turbo
+**/*.tsbuildinfo
+**/*.log
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+README.md
+docker-compose*.yml

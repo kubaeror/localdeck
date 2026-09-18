@@ -1,0 +1,153 @@
+# LocalDeck's CI: fast Node checks on every change, then a smoke suite that runs
+# the api and ui against a throwaway LocalStack service container and drives the
+# console with Playwright. LocalStack is NOT managed by LocalDeck: the container
+# below exists only inside this workflow, while local/dev usage expects a
+# LocalStack that the user starts and manages themselves.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+  PNPM_VERSION: '10.34.5'
+
+jobs:
+  checks:
+    name: Typecheck, lint, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint (ESLint)
+        run: pnpm lint
+
+      - name: Lint (Prettier)
+        run: pnpm lint:format
+
+      - name: Repository invariants (license, disclaimer, no secret material)
+        run: pnpm verify:repo
+
+      - name: README parity table is current
+        run: pnpm gen:parity:check
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+  smoke:
+    name: Smoke (Playwright + CI LocalStack)
+    runs-on: ubuntu-latest
+    needs: checks
+    timeout-minutes: 40
+
+    # The one and only place LocalDeck ever spins up LocalStack: a throwaway
+    # service container for this job. It never touches your own instance.
+    #
+    # The default image is the last release published before LocalStack's
+    # unified-image licensing change (2026.03.0 now requires an auth token to
+    # start, even in CI), so a fresh clone's pipeline is green without secrets.
+    # Maintainers can point `vars.LOCALSTACK_IMAGE` at a current image and set
+    # the `LOCALSTACK_AUTH_TOKEN` secret (a CI auth token from a LocalStack
+    # account) to smoke-test licensed services such as EKS. The Docker socket
+    # mount matches the prerequisites documented for EKS.
+    services:
+      localstack:
+        image: ${{ vars.LOCALSTACK_IMAGE || 'localstack/localstack:4.14.0' }}
+        ports:
+          - 4566:4566
+        env:
+          LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_AUTH_TOKEN }}
+          SERVICES: s3,ec2,iam,sts,sns,sqs,dynamodb,lambda,logs,events,kms,ssm,secretsmanager,cloudformation,ecr,ecs
+          DEBUG: '0'
+          PERSISTENCE: '0'
+        options: >-
+          --health-cmd "curl -sf http://localhost:4566/_localstack/health || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
+          --health-start-period 30s
+          --volume /var/run/docker.sock:/var/run/docker.sock
+
+    env:
+      LOCALSTACK_ENDPOINT: http://localhost:4566
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build shared types, api and ui
+        run: pnpm build
+
+      - name: Confirm the CI LocalStack service container is reachable
+        run: |
+          curl --fail --silent --retry 10 --retry-connrefused \
+            "${LOCALSTACK_ENDPOINT}/_localstack/health" | head -c 400
+          echo
+
+      - name: Install the Playwright browser
+        run: pnpm --filter @localdeck/e2e exec playwright install --with-deps chromium
+
+      # The stack spec asserts GET /api/health == 200 (LocalStack reachable) and
+      # that the ui index serves and renders; the following specs create a real
+      # S3 bucket and start an EKS cluster when the emulator reports EKS.
+      - name: Run Playwright smoke tests (api + ui webServer)
+        run: pnpm test:e2e
+
+      - name: Upload the Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            e2e/playwright-report/
+            e2e/test-results/
+          retention-days: 7

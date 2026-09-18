@@ -1,0 +1,44 @@
+{
+  "name": "localdeck",
+  "version": "0.1.0",
+  "private": true,
+  "description": "LocalDeck — an open-source web console for LocalStack",
+  "license": "MIT",
+  "packageManager": "pnpm@10.34.5",
+  "engines": {
+    "node": ">=20.11.0"
+  },
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "lint": "turbo run lint && eslint scripts",
+    "lint:format": "prettier --check .",
+    "format": "prettier --write .",
+    "test": "turbo run test",
+    "test:e2e": "turbo run build --filter=@localdeck/shared && pnpm --filter @localdeck/e2e smoke",
+    "test:e2e:screens": "pnpm --filter @localdeck/e2e screens",
+    "gen:parity": "tsx scripts/parity-table.ts",
+    "gen:parity:check": "tsx scripts/parity-table.ts --check",
+    "verify:repo": "tsx scripts/repo-checks.ts",
+    "clean": "turbo run clean",
+    "verify:localstack": "pnpm --filter @localdeck/api verify:localstack",
+    "verify:console": "pnpm --filter @localdeck/ui test:live"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@turbo/gen": "^2.10.13",
+    "@types/node": "^22.20.3",
+    "eslint": "^10.10.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.7",
+    "globals": "^17.12.0",
+    "prettier": "^3.9.6",
+    "tsx": "^4.23.13",
+    "turbo": "^2.10.13",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.70.0",
+    "vitest": "^5.0.1"
+  }
+}

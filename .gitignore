@@ -1,0 +1,18 @@
+node_modules/
+dist/
+coverage/
+.turbo/
+*.tsbuildinfo
+
+# Playwright smoke artifacts (reports are uploaded by CI on failure).
+e2e/test-results/
+e2e/playwright-report/
+
+.env
+.env.local
+.env.*.local
+
+.DS_Store
+*.log
+npm-debug.log*
+pnpm-debug.log*

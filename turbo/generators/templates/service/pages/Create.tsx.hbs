@@ -1,0 +1,128 @@
+import type { ApiError } from '@localdeck/shared';
+import Button from '@cloudscape-design/components/button';
+import Container from '@cloudscape-design/components/container';
+import Form from '@cloudscape-design/components/form';
+import FormField from '@cloudscape-design/components/form-field';
+import Header from '@cloudscape-design/components/header';
+import Input from '@cloudscape-design/components/input';
+import KeyValuePairs from '@cloudscape-design/components/key-value-pairs';
+import { useState, type ReactElement } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { CreateWizard } from '../../../components/CreateWizard';
+import { EmptyState } from '../../../components/EmptyState';
+import { useFlashbar } from '../../../hooks/useFlashbar';
+import { toApiError } from '../../../lib/apiClient';
+import { serviceConsolePath } from '../../../services/paths';
+import type { ServicePageProps } from '../../../services/types';
+import { create{{pascalCase displayName}} } from '../api';
+import { CREATE_OPERATION, spec } from '../spec';
+
+/**
+ * {{displayName}} create flow — generated scaffold.
+ *
+ * The wizard only appears when the module whitelists a create operation; any
+ * submit goes through the api dispatcher, which re-checks the whitelist.
+ */
+export function CreatePage({ descriptor }: ServicePageProps): ReactElement {
+  const navigate = useNavigate();
+  const flashbar = useFlashbar();
+  const [name, setName] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<ApiError | null>(null);
+
+  const backToList = (): void => {
+    navigate(serviceConsolePath(descriptor.id));
+  };
+
+  if (CREATE_OPERATION === undefined || !spec.capabilities.create) {
+    return (
+      <EmptyState
+        title={`Creating ${descriptor.displayName} resources is not wired up yet`}
+        description="This generated module has no create operation. Add one to spec.ts (and to the registry whitelist) to enable the wizard."
+        iconKey={descriptor.iconKey}
+        iconCategory={descriptor.category}
+        action={
+          <Button variant="primary" onClick={backToList}>
+            Back to {descriptor.displayName}
+          </Button>
+        }
+      />
+    );
+  }
+
+  const submit = async (): Promise<void> => {
+    setSubmitting(true);
+    setError(null);
+    try {
+      await create{{pascalCase displayName}}({ name });
+      flashbar.notify({
+        type: 'success',
+        header: `${descriptor.displayName} resource created`,
+        content: name,
+      });
+      backToList();
+    } catch (caught) {
+      setError(toApiError(caught));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <CreateWizard
+      title={`Create ${descriptor.displayName}`}
+      description={descriptor.summary}
+      breadcrumbs={[
+        { text: descriptor.displayName, href: serviceConsolePath(descriptor.id) },
+        { text: 'Create' },
+      ]}
+      steps={[
+        {
+          id: 'details',
+          title: 'Details',
+          description: `Name the ${descriptor.displayName} resource to create.`,
+          validate: () => (name.trim().length === 0 ? 'Enter a name.' : null),
+          content: (
+            <Container header={<Header variant="h2">Details</Header>}>
+              <Form>
+                <FormField label="Name" description="The identifier the service will use.">
+                  <Input
+                    value={name}
+                    autoFocus
+                    onChange={({ detail }) => {
+                      setName(detail.value);
+                    }}
+                  />
+                </FormField>
+              </Form>
+            </Container>
+          ),
+        },
+        {
+          id: 'review',
+          title: 'Review',
+          description: 'Check the values before creating the resource.',
+          content: (
+            <Container header={<Header variant="h2">Review</Header>}>
+              <KeyValuePairs
+                columns={1}
+                items={[{ label: 'Name', value: name }]}
+              />
+            </Container>
+          ),
+        },
+      ]}
+      summary={[
+        { label: 'Service', value: descriptor.displayName },
+        { label: 'Operation', value: CREATE_OPERATION },
+        { label: 'Name', value: name.length === 0 ? '—' : name },
+      ]}
+      submitting={submitting}
+      error={error}
+      onSubmit={submit}
+      onCancel={backToList}
+    />
+  );
+}
+
+export default CreatePage;

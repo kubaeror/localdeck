@@ -1,0 +1,90 @@
+import Button from '@cloudscape-design/components/button';
+import ButtonDropdown from '@cloudscape-design/components/button-dropdown';
+import type { TableProps } from '@cloudscape-design/components/table';
+import { useState, type ReactElement } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { ResourceListPage } from '../../../components/ResourceListPage';
+import type { ServicePageProps } from '../../../services/types';
+import { list{{pascalCase displayName}}, type {{pascalCase displayName}}Resource } from '../api';
+import { spec } from '../spec';
+
+const columns: TableProps.ColumnDefinition<{{pascalCase displayName}}Resource>[] = [
+  {
+    id: 'label',
+    header: '{{displayName}}',
+    sortingField: 'label',
+    isRowHeader: true,
+    cell: (row) => row.label,
+  },
+];
+
+/**
+ * {{displayName}} list page — generated scaffold.
+ *
+ * The table is driven by the operation whitelist in `spec.ts`; add columns for
+ * the fields this service returns.
+ */
+export function ListPage({ descriptor }: ServicePageProps): ReactElement {
+  const navigate = useNavigate();
+  const [filteringText, setFilteringText] = useState('');
+
+  const canCreate = spec.capabilities.create;
+  const filtering = { text: filteringText, onChange: setFilteringText };
+
+  return (
+    <ResourceListPage<{{pascalCase displayName}}Resource>
+      title={descriptor.displayName}
+      description={descriptor.summary}
+      breadcrumbs={[{ text: descriptor.displayName }]}
+      columns={columns}
+      getRowId={(row) => row.id}
+      fetcher={({ nextToken, signal }) =>
+        list{{pascalCase displayName}}({
+          ...(nextToken === undefined ? {} : { nextToken }),
+          ...(signal === undefined ? {} : { signal }),
+        })
+      }
+      filtering={filtering}
+      headerActions={
+        canCreate ? (
+          <Button
+            variant="primary"
+            onClick={() => {
+              navigate('create');
+            }}
+          >
+            Create
+          </Button>
+        ) : undefined
+      }
+      rowActions={(row) => (
+        <ButtonDropdown
+          variant="icon"
+          ariaLabel={`Actions for ${row.label}`}
+          items={[
+            { id: 'detail', text: 'View details' },
+            { id: 'copy', text: 'Copy identifier' },
+          ]}
+          onItemClick={({ detail }) => {
+            if (detail.id === 'detail') navigate(row.id);
+            if (detail.id === 'copy') void navigator.clipboard?.writeText(row.id);
+          }}
+        />
+      )}
+      bulkActions={(selected) => (
+        <ButtonDropdown
+          items={[{ id: 'copy', text: `Copy ${selected.length} identifier(s)` }]}
+          onItemClick={() => {
+            void navigator.clipboard?.writeText(selected.map((row) => row.id).join('\n'));
+          }}
+        >
+          Actions
+        </ButtonDropdown>
+      )}
+      emptyTitle={`No ${descriptor.displayName} resources`}
+      emptyDescription={`Nothing was returned by ${descriptor.displayName}. Create a resource to see it here.`}
+    />
+  );
+}
+
+export default ListPage;

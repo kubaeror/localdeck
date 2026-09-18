@@ -1,0 +1,11 @@
+node_modules
+dist
+coverage
+.turbo
+pnpm-lock.yaml
+*.tsbuildinfo
+e2e/test-results
+e2e/playwright-report
+
+# Generator templates are Handlebars documents, not TS/JSX.
+turbo/generators/templates

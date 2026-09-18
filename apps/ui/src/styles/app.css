@@ -1,0 +1,66 @@
+/*
+ * App-frame layout only. Component styling comes from Cloudscape's
+ * global-styles; nothing here should restyle Cloudscape internals except the
+ * one documented hook below.
+ */
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+/* AppLayout scrolls internally, so it must own the remaining height. */
+.app-shell__main {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.app-shell__main > div {
+  height: 100%;
+}
+
+/* Service icons: the official pack is an <img>, the Lucide fallback an inline svg. */
+.service-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  vertical-align: middle;
+}
+
+/*
+ * SideNavigation has no disabled item state, so unavailable services mark
+ * themselves with `.app-shell__nav-unavailable` in the info slot.
+ *
+ * The selector deliberately avoids nesting :has() (invalid CSS) and reads as
+ * "a nav link whose next sibling span carries the marker". The colour override
+ * needs !important: Cloudscape's compiled component styles win on specificity
+ * (`:not(#\9)` in every rule), and this is the one place the console
+ * deliberately overrides a component colour. The colour itself comes from the
+ * design tokens, handed in as a custom property by AppShell. The companion test
+ * in AppShell.test.tsx asserts this selector still matches the rendered nav.
+ */
+.app-shell__nav a:has(+ span > .app-shell__nav-unavailable) {
+  color: var(--localdeck-nav-muted) !important;
+}
+
+.empty-state__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+}
+
+/* Search palette result rows (our own markup, not a Cloudscape component). */
+.console-search__result {
+  border-radius: 4px;
+  padding: 2px 6px;
+  margin-left: -6px;
+}

@@ -4,6 +4,7 @@ after the official AWS Management Console. You write production code, phase by
 phase. No scaffolding-only output, no TODO stubs left in finished modules.
 
 STACK (non-negotiable):
+
 - Monorepo: pnpm workspaces + turbo. Apps: apps/ui (frontend), apps/api
   (backend), packages/shared (shared DTO types).
 - Frontend: React 18, TypeScript strict, Vite, React Router v6, and the
@@ -19,16 +20,17 @@ STACK (non-negotiable):
   this project.
 
 LOCALSTACK CONNECTIVITY (CRITICAL — READ CAREFULLY):
+
 - LocalStack is managed EXTERNALLY by the user. It is already running. You
   must NEVER: start it, stop it, restart it, change its env, wipe its
   volumes, or assume you control its lifecycle. If connectivity fails, report
   it — do not try to fix LocalStack itself.
 - ALL AWS SDK clients are constructed from a single factory
   (apps/api/src/lib/awsClients.ts) reading env:
-    LOCALSTACK_ENDPOINT  (default: http://localhost:4566)
-    AWS_REGION           (default: us-east-1)
-    AWS_ACCESS_KEY_ID    (default: test)
-    AWS_SECRET_ACCESS_KEY(default: test)
+  LOCALSTACK_ENDPOINT (default: http://localhost:4566)
+  AWS_REGION (default: us-east-1)
+  AWS_ACCESS_KEY_ID (default: test)
+  AWS_SECRET_ACCESS_KEY(default: test)
   S3 clients ALWAYS use forcePathStyle: true.
 - Health/auto-detection comes from GET ${LOCALSTACK_ENDPOINT}/_localstack/health.
 - When api runs in Docker while LocalStack runs on the host, document the
@@ -37,6 +39,7 @@ LOCALSTACK CONNECTIVITY (CRITICAL — READ CAREFULLY):
 - NEVER call AWS SDK from the browser; only via apps/api.
 
 SERVICE MODULE ARCHITECTURE:
+
 - Every AWS service has its OWN dedicated module at
   apps/ui/src/services/<service>/ containing: index.ts (exports a ServiceModule:
   id, category, icon, routes), pages/ (List, Detail, Create wizard), api.ts
@@ -60,6 +63,7 @@ SERVICE MODULE ARCHITECTURE:
   synchronously.
 
 ICONS & ASSETS:
+
 - Use the official AWS Architecture Icons asset package (current quarterly
   release) placed in apps/ui/src/assets/aws-icons/, rendered through
   ServiceIcon with a Lucide-based fallback.
@@ -67,6 +71,7 @@ ICONS & ASSETS:
   Keep official filenames/paths so a future icon pack sync can overwrite them.
 
 LEGAL RULES (hard requirements):
+
 - The string "AWS" must not appear in the brand name, repo name, package
   names, domain, or logo. Service names in UI text (e.g. "Lambda",
   "S3 Buckets") are fine as plain-text fair use.
@@ -80,12 +85,14 @@ LEGAL RULES (hard requirements):
 - Keep a NOTICE file for icon artwork attribution; do not re-license it.
 
 SECRETS:
+
 - No LocalStack auth token is used by this project itself (LocalStack is
   external and user-managed). Credentials to the endpoint stay in env
   (AWS_ACCESS_KEY_ID/SECRET, default test/test). Never hardcode credentials,
   never log them.
 
 CODE QUALITY:
+
 - TypeScript strict, zero `any`, no @ts-expect-error without an explanatory
   comment. ESLint + Prettier enforced. pino for api logs.
 - All AWS SDK errors map to a shared ApiError { code, message, requestId,
@@ -97,6 +104,7 @@ CODE QUALITY:
   in your summary.
 
 REFERENCES WHILE WORKING:
+
 - Cloudscape components & patterns: https://cloudscape.design/components/
 - LocalStack service docs & API coverage:
   https://docs.localstack.cloud/aws/services/ — verify each operation against

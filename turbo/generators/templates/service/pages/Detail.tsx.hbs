@@ -1,0 +1,113 @@
+import Box from '@cloudscape-design/components/box';
+import Button from '@cloudscape-design/components/button';
+import Container from '@cloudscape-design/components/container';
+import Header from '@cloudscape-design/components/header';
+import KeyValuePairs from '@cloudscape-design/components/key-value-pairs';
+import List from '@cloudscape-design/components/list';
+import SpaceBetween from '@cloudscape-design/components/space-between';
+import type { ReactElement } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
+import { EmptyState } from '../../../components/EmptyState';
+import { JsonEditor } from '../../../components/JsonEditor';
+import { ResourceDetailPage } from '../../../components/ResourceDetailPage';
+import { stringifyJson } from '../../../lib/json';
+import { serviceConsolePath } from '../../../services/paths';
+import type { ServicePageProps } from '../../../services/types';
+import { spec } from '../spec';
+
+/**
+ * {{displayName}} detail page — generated scaffold.
+ *
+ * The overview tab is intentionally honest: this module does not call a describe
+ * operation yet, so it shows the registry metadata instead of inventing fields.
+ * Wire a describe operation in `api.ts` (and add it to `spec.ts`) to fill it in.
+ */
+export function DetailPage({ descriptor }: ServicePageProps): ReactElement {
+  const { resourceId = '' } = useParams();
+  const navigate = useNavigate();
+
+  const overview = (
+    <SpaceBetween size="l">
+      <EmptyState
+        title="No detail view for this resource yet"
+        description={`This module is a generated scaffold. Add a describe operation to spec.ts to render the ${descriptor.displayName} fields for ${resourceId}.`}
+        iconKey={descriptor.iconKey}
+        iconCategory={descriptor.category}
+        action={
+          <Button
+            variant="primary"
+            onClick={() => {
+              navigate(serviceConsolePath(descriptor.id));
+            }}
+          >
+            Back to {descriptor.displayName}
+          </Button>
+        }
+      />
+      <Container header={<Header variant="h2">Registry entry</Header>}>
+        <KeyValuePairs
+          columns={2}
+          items={[
+            { label: 'Service id', value: <Box variant="code">{descriptor.id}</Box> },
+            { label: 'Resource', value: <Box variant="code">{resourceId}</Box> },
+            { label: 'Category', value: descriptor.category },
+            { label: 'Parity level', value: descriptor.parityLevel },
+            { label: 'SDK package', value: <Box variant="code">{descriptor.sdkPackage}</Box> },
+            { label: 'Whitelisted operations', value: `${descriptor.operations.length}` },
+          ]}
+        />
+      </Container>
+    </SpaceBetween>
+  );
+
+  const operations = (
+    <Container header={<Header variant="h2">Operations this module uses</Header>}>
+      <List
+        ariaLabel="Operations this module uses"
+        items={[...spec.operations]}
+        renderItem={(operation) => ({
+          id: operation,
+          content: <Box variant="code">{operation}</Box>,
+        })}
+      />
+    </Container>
+  );
+
+  // Until a describe operation is wired up, the JSON tab shows the registry
+  // entry — and demonstrates the JsonEditor pattern (CodeView + validation) for
+  // the resource payload a real module renders here.
+  const rawJson = (
+    <JsonEditor
+      label="Resource JSON"
+      description="Wire a describe operation in api.ts to render the service payload here."
+      value={stringifyJson({ descriptor, spec })}
+    />
+  );
+
+  return (
+    <ResourceDetailPage
+      title={resourceId}
+      description={descriptor.summary}
+      breadcrumbs={[
+        { text: descriptor.displayName, href: serviceConsolePath(descriptor.id) },
+        { text: resourceId },
+      ]}
+      tabs={[
+        { id: 'overview', label: 'Overview', content: overview },
+        { id: 'operations', label: 'Operations', content: operations },
+        { id: 'json', label: 'JSON', content: rawJson },
+      ]}
+      headerActions={
+        <Button
+          onClick={() => {
+            navigate(serviceConsolePath(descriptor.id));
+          }}
+        >
+          Back to list
+        </Button>
+      }
+    />
+  );
+}
+
+export default DetailPage;

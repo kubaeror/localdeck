@@ -1,0 +1,64 @@
+import type { Paginated } from '@localdeck/shared';
+import {
+  callServiceOperation,
+  extractResourceRows,
+  nextTokenFrom,
+  toPaginated,
+  type ResourceRow,
+} from '../../lib/serviceOperations';
+import {
+  CREATE_NAME_FIELD,
+  CREATE_OPERATION,
+  LIST_OPERATION,
+  NEXT_TOKEN_FIELD,
+  SERVICE_ID,
+} from './spec';
+
+/**
+ * Typed calls for the {{displayName}} module — generated scaffold.
+ *
+ * Every call goes through the LocalDeck api's dynamic dispatcher: the api owns
+ * the AWS SDK, checks the operation against the registry whitelist and returns
+ * the raw service response. The browser never sees credentials.
+ */
+
+/** One row on the {{displayName}} list page. */
+export type {{pascalCase displayName}}Resource = ResourceRow;
+
+export interface List{{pascalCase displayName}}Options {
+  nextToken?: string;
+  signal?: AbortSignal;
+}
+
+/**
+ * Generated mapper: renders the first resource collection `LIST_OPERATION`
+ * returns. Replace `extractResourceRows` with a typed mapper once the shape of
+ * the response matters for the console.
+ */
+export async function list{{pascalCase displayName}}(
+  options: List{{pascalCase displayName}}Options = {},
+): Promise<Paginated<{{pascalCase displayName}}Resource>> {
+  const result = await callServiceOperation<Record<string, unknown>>(
+    SERVICE_ID,
+    LIST_OPERATION,
+    options.nextToken === undefined ? {} : { [NEXT_TOKEN_FIELD]: options.nextToken },
+    options.signal,
+  );
+  return toPaginated(extractResourceRows(result), nextTokenFrom(result));
+}
+
+export interface Create{{pascalCase displayName}}Input {
+  name: string;
+}
+
+/** Creates one resource; the api rejects the call if the operation is not whitelisted. */
+export async function create{{pascalCase displayName}}(
+  input: Create{{pascalCase displayName}}Input,
+): Promise<void> {
+  if (CREATE_OPERATION === undefined) {
+    throw new Error(`{{displayName}} has no create operation configured in spec.ts.`);
+  }
+  await callServiceOperation(SERVICE_ID, CREATE_OPERATION, {
+    [CREATE_NAME_FIELD]: input.name,
+  });
+}

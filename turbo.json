@@ -1,0 +1,38 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "ui": "stream",
+  "globalEnv": ["NODE_ENV"],
+  "globalPassThroughEnv": [
+    "LOCALSTACK_ENDPOINT",
+    "AWS_REGION",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY"
+  ],
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "inputs": ["$TURBO_DEFAULT$", "!**/*.test.ts", "!**/*.test.tsx", "!**/test/**"],
+      "outputs": ["dist/**"]
+    },
+    "typecheck": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "lint": {
+      "dependsOn": [],
+      "outputs": []
+    },
+    "test": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "dev": {
+      "cache": false,
+      "persistent": true,
+      "dependsOn": ["^build"]
+    },
+    "clean": {
+      "cache": false
+    }
+  }
+}

@@ -1,0 +1,32 @@
+LocalDeck
+=========
+
+LocalDeck is an open-source web console for LocalStack. It is an independent
+project: LocalStack is installed, started and managed by the user, and LocalDeck
+never starts, stops, reconfigures or deletes LocalStack resources on its own.
+
+LocalDeck itself is licensed under the MIT License (see `LICENSE`). The
+third-party components below keep their own terms.
+
+Third-party components
+----------------------
+
+- Cloudscape Design System (`@cloudscape-design/*`) — Copyright Amazon.com, Inc.
+  or its affiliates. Licensed under the Apache License, Version 2.0. LocalDeck
+  uses it unmodified for its user interface.
+- AWS Architecture Icons — Copyright Amazon.com, Inc. or its affiliates.
+  Icon artwork is distributed under Amazon's own terms and is **not** covered by
+  LocalDeck's MIT license; it must not be recolored, cropped or otherwise
+  modified. LocalDeck renders official icons when the icon pack is vendored
+  under `apps/ui/src/assets/aws-icons/` (with the Lucide-based fallback
+  otherwise). The pack is not vendored into this repository yet — when it is
+  added, the quarterly release identifier and the source URL must be recorded
+  here and the artwork must be contributed under its own terms, not re-licensed.
+- Lucide (`lucide-react`) — ISC License. Used as the fallback icon set.
+
+Trademarks
+----------
+
+Amazon Web Services, AWS and the Powered by AWS logo are trademarks of
+Amazon.com, Inc. or its affiliates. LocalDeck is not affiliated with or endorsed
+by Amazon Web Services.
