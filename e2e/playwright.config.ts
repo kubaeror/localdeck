@@ -23,6 +23,9 @@ import {
  */
 export default defineConfig({
   testDir: './tests',
+  // The shipped-container spec needs `docker compose up` and its own config;
+  // it must never run inside the regular api+ui smoke job.
+  testIgnore: ['**/container/**'],
   outputDir: './test-results',
   /* The smoke suite creates real resources in one LocalStack, so it runs in a
      single worker and stays order-independent (every test cleans up after
