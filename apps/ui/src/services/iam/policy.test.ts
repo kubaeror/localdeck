@@ -110,6 +110,72 @@ describe('validateIdentityPolicy', () => {
 
     expect(result.valid).toBe(true);
   });
+
+  it('rejects a statement with both Action and NotAction', () => {
+    const result = validateIdentityPolicy(
+      '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","NotAction":"s3:PutObject","Resource":"*"}]}',
+    );
+
+    expect(result.valid).toBe(false);
+    expect(result.structureErrors.join(' ')).toContain(
+      'must not include both "Action" and "NotAction"',
+    );
+  });
+
+  it('rejects a statement with both Resource and NotResource', () => {
+    const result = validateIdentityPolicy(
+      '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*","NotResource":"arn:aws:s3:::b/*"}]}',
+    );
+
+    expect(result.valid).toBe(false);
+    expect(result.structureErrors.join(' ')).toContain(
+      'must not include both "Resource" and "NotResource"',
+    );
+  });
+
+  it('requires Version to be 2012-10-17 or 2008-10-17', () => {
+    const bad = validateIdentityPolicy(
+      '{"Version":"2020-01-01","Statement":{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}}',
+    );
+    expect(bad.valid).toBe(false);
+    expect(bad.structureErrors.join(' ')).toContain(
+      '"Version" must be "2012-10-17" or "2008-10-17"',
+    );
+
+    const legacy = validateIdentityPolicy(
+      '{"Version":"2008-10-17","Statement":{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}}',
+    );
+    expect(legacy.valid).toBe(true);
+  });
+
+  it('rejects duplicate statement Sids', () => {
+    const result = validateIdentityPolicy(
+      JSON.stringify({
+        Version: '2012-10-17',
+        Statement: [
+          { Sid: 'AllowS3', Effect: 'Allow', Action: 's3:GetObject', Resource: '*' },
+          { Sid: 'AllowS3', Effect: 'Deny', Action: 's3:DeleteObject', Resource: '*' },
+        ],
+      }),
+    );
+
+    expect(result.valid).toBe(false);
+    expect(result.structureErrors.join(' ')).toContain('"Sid" "AllowS3" is already used');
+  });
+
+  it('accepts unique Sids', () => {
+    const result = validateIdentityPolicy(
+      JSON.stringify({
+        Version: '2012-10-17',
+        Statement: [
+          { Sid: 'Read', Effect: 'Allow', Action: 's3:GetObject', Resource: '*' },
+          { Sid: 'Delete', Effect: 'Deny', Action: 's3:DeleteObject', Resource: '*' },
+        ],
+      }),
+    );
+
+    expect(result.valid).toBe(true);
+  });
 });
 
 describe('validateTrustPolicy', () => {
@@ -134,6 +200,56 @@ describe('validateTrustPolicy', () => {
     );
 
     expect(result.structureErrors.join(' ')).toContain('missing "Principal"');
+  });
+
+  it('accepts "*" and objects of string or string[] principals', () => {
+    const wildcard = validateTrustPolicy(
+      '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"sts:AssumeRole"}]}',
+    );
+    expect(wildcard.valid).toBe(true);
+
+    const object = validateTrustPolicy(
+      JSON.stringify({
+        Version: '2012-10-17',
+        Statement: [
+          {
+            Effect: 'Allow',
+            Principal: {
+              AWS: 'arn:aws:iam::123456789012:root',
+              Service: ['lambda.amazonaws.com', 'ec2.amazonaws.com'],
+            },
+            Action: 'sts:AssumeRole',
+          },
+        ],
+      }),
+    );
+    expect(object.valid).toBe(true);
+  });
+
+  it('rejects malformed Principal shapes', () => {
+    for (const principal of [
+      '["arn:aws:iam::123456789012:root"]',
+      '{"AWS":123}',
+      '{"AWS":[]}',
+      '{}',
+      '42',
+    ]) {
+      const result = validateTrustPolicy(
+        `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":${principal},"Action":"sts:AssumeRole"}]}`,
+      );
+      expect(result.valid, principal).toBe(false);
+      expect(result.structureErrors.join(' '), principal).toContain('"Principal" must be "*"');
+    }
+  });
+
+  it('rejects a statement with both Principal and NotPrincipal', () => {
+    const result = validateTrustPolicy(
+      '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"NotPrincipal":{"AWS":"*"},"Action":"sts:AssumeRole"}]}',
+    );
+
+    expect(result.structureErrors.join(' ')).toContain(
+      'must not include both "Principal" and "NotPrincipal"',
+    );
   });
 
   it('still requires Version and Statement', () => {

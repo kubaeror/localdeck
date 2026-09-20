@@ -12,7 +12,7 @@ import {
   type AwsSdkClient,
   type AwsSdkClientConstructor,
 } from '../lib/awsClients.js';
-import { ApiProblem, asApiProblem } from '../lib/errors.js';
+import { ApiProblem, asApiProblem, isUnsupportedOperationError } from '../lib/errors.js';
 import { requireServiceById } from './services.js';
 
 /**
@@ -235,9 +235,48 @@ export function sanitizeDispatcherResult(
 
   const clone: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(value)) {
-    clone[key] = sanitizeDispatcherResult(entry, seen, depth + 1);
+    // defineProperty, not assignment: an SDK result map may contain a
+    // `__proto__` key (DynamoDB attribute, S3 metadata, Lambda env var) which
+    // assignment would silently drop and turn into a prototype mutation.
+    Object.defineProperty(clone, key, {
+      value: sanitizeDispatcherResult(entry, seen, depth + 1),
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
   }
   return clone;
+}
+
+/**
+ * Operations an emulator has already answered "not implemented" for, keyed by
+ * endpoint+service+operation. LocalStack, MiniStack and Floci implement
+ * different operation subsets; once one rejects an operation, the ui disables
+ * it instead of repeating a doomed call. Bounded so a long session cannot grow
+ * the map without limit.
+ */
+const unsupportedOperations = new Map<string, string>();
+const UNSUPPORTED_CACHE_LIMIT = 500;
+
+function unsupportedKey(
+  overrides: AwsClientConfigOverrides,
+  serviceId: string,
+  operation: string,
+): string {
+  return `${overrides.endpoint ?? ''}|${serviceId}|${operation}`;
+}
+
+/** Test hook: forget learned unsupported operations. */
+export function resetUnsupportedOperationCache(): void {
+  unsupportedOperations.clear();
+}
+
+function rememberUnsupported(key: string, message: string): void {
+  if (unsupportedOperations.size >= UNSUPPORTED_CACHE_LIMIT) {
+    const oldest = unsupportedOperations.keys().next().value;
+    if (oldest !== undefined) unsupportedOperations.delete(oldest);
+  }
+  unsupportedOperations.set(key, message);
 }
 
 export async function dispatchServiceOperation(
@@ -261,6 +300,25 @@ export async function dispatchServiceOperation(
     });
   }
 
+  const learnedKey = unsupportedKey(overrides, serviceId, operation);
+  const learned = unsupportedOperations.get(learnedKey);
+  if (learned !== undefined) {
+    throw new ApiProblem({
+      code: ApiErrorCodes.emulatorOperationUnsupported,
+      statusCode: 501,
+      message:
+        `"${target.descriptor.displayName}" does not implement "${operation}" on the active ` +
+        'local emulator; the action is disabled after the first rejection.',
+      service: target.descriptor.id,
+      details: {
+        service: target.descriptor.id,
+        operation,
+        reason: 'learned-unsupported',
+        upstreamMessage: learned,
+      },
+    });
+  }
+
   const loadModule = dependencies.loadSdkModule ?? loadSdkModule;
   const module = await loadModule(target.descriptor);
   const ClientConstructor = resolveClientConstructor(module, target.descriptor);
@@ -279,17 +337,22 @@ export async function dispatchServiceOperation(
   let result: unknown;
   try {
     result = await client.send(new Command(input), {
-      // A hung LocalStack must not hold the handler open, and a browser that
+      // A hung emulator must not hold the handler open, and a browser that
       // goes away must cancel the upstream call.
       abortSignal: sdkAbortSignal(dependencies.signal, overrides.requestTimeoutMs),
     });
   } catch (error) {
+    if (isUnsupportedOperationError(error)) {
+      rememberUnsupported(learnedKey, error instanceof Error ? error.message : String(error));
+    }
     // `asApiProblem` maps SDK/network/serializer failures and fills in
     // `ApiError.service` from the registry descriptor (Smithy never writes
-    // `$service` on real errors).
+    // `$service` on real errors). The operation is passed so unsupported
+    // operations get an actionable message.
     throw asApiProblem(error, {
       ...(overrides.endpoint === undefined ? {} : { endpoint: overrides.endpoint }),
       service: target.descriptor.id,
+      operation: target.operation,
     });
   }
 

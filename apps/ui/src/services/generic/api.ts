@@ -150,6 +150,18 @@ function findCollection(
   return undefined;
 }
 
+/** Fallback id prefix for a response that did not come from a continuation token. */
+const FIRST_PAGE_KEY = 'first-page';
+
+export interface MapListResultOptions {
+  /**
+   * Continuation token this response was fetched with, when any. Rows without
+   * an inferable id fall back to `${pageKey}:${index}`; the index alone would
+   * restart on every page and collide across "Load more".
+   */
+  pageKey?: string;
+}
+
 /**
  * Maps one list response onto rows using the registry's resultPath/idField/
  * nameField hints, falling back to the tolerant inference when a hint does not
@@ -158,7 +170,9 @@ function findCollection(
 export function mapListResult(
   result: unknown,
   list: ServiceBrowserListOperation,
+  options: MapListResultOptions = {},
 ): { rows: GenericResourceRow[]; nextToken?: string } {
+  const pageKey = options.pageKey ?? FIRST_PAGE_KEY;
   const collection = findCollection(result, list);
   const rows = (collection ?? []).flatMap((entry, index): GenericResourceRow[] => {
     if (typeof entry === 'string') {
@@ -172,7 +186,7 @@ export function mapListResult(
           const value = stringValue(entry[field]);
           if (value !== undefined) return value;
         }
-        return String(index);
+        return `${pageKey}:${index}`;
       })();
     const label = extractFields(entry, list.nameField) ?? id;
     return [{ id, label, raw: entry }];
@@ -269,8 +283,28 @@ export function browserOperationInput(
  */
 const tokenRequestFields = new Map<string, string>();
 
+/**
+ * Tokens already requested for one listing. Services echo a token when there
+ * is no further page; asking for it again would append the same rows forever.
+ * The set is cleared whenever a listing restarts from the first page (refresh,
+ * navigation), so a token a new browsing session legitimately reuses is not
+ * mistaken for a loop.
+ */
+const usedPaginationTokens = new Map<string, Set<string>>();
+
 function bindingKey(descriptor: ServiceDescriptor, list: ServiceBrowserListOperation): string {
   return `${descriptor.id}/${list.operation}`;
+}
+
+function paginationLoopError(descriptor: ServiceDescriptor, token: string): ApiClientError {
+  return new ApiClientError({
+    code: 'PAGINATION_LOOP',
+    statusCode: 502,
+    message:
+      `The ${descriptor.displayName} list operation repeated the pagination token "${token}" ` +
+      'instead of returning a new one. Loading stopped to avoid appending the same page forever.',
+    service: descriptor.id,
+  } satisfies ApiError);
 }
 
 /** Fetches one page of resources through the service's listOp. */
@@ -283,6 +317,15 @@ export async function listGenericResources(
 
   const list = browser.list;
   const key = bindingKey(descriptor, list);
+  if (options.nextToken === undefined) {
+    usedPaginationTokens.delete(key);
+  } else {
+    const used = usedPaginationTokens.get(key) ?? new Set<string>();
+    if (used.has(options.nextToken)) throw paginationLoopError(descriptor, options.nextToken);
+    used.add(options.nextToken);
+    usedPaginationTokens.set(key, used);
+  }
+
   const tokenParam =
     list.pagination?.requestField ??
     list.nextTokenParam ??
@@ -292,13 +335,28 @@ export async function listGenericResources(
     ...(options.nextToken === undefined ? {} : { [tokenParam]: options.nextToken }),
   };
   const result = await callServiceOperation(descriptor.id, list.operation, input, options.signal);
-  const { rows } = mapListResult(result, list);
+  const { rows } = mapListResult(result, list, {
+    ...(options.nextToken === undefined ? {} : { pageKey: options.nextToken }),
+  });
   const nextPage = nextPageFromResult(result, list);
   // Remember the field for this binding. It never changes for a given list
   // operation, so a page without a token leaves the entry in place: a
   // concurrent detail-page walk may still need it.
   if (nextPage !== undefined) tokenRequestFields.set(key, nextPage.requestField);
   return toPaginated(rows, nextPage?.token);
+}
+
+/**
+ * How many list pages `describeGenericResource` walks when the service has no
+ * describe binding. The old cap of 10 was low enough that a resource on a
+ * larger listing came back as "not found"; it is high enough now to cover a
+ * realistic listing while still bounding a misbehaving pagination loop.
+ */
+export const DESCRIBE_FALLBACK_PAGE_LIMIT = 50;
+
+export interface DescribeGenericResourceOptions {
+  /** Overrides {@link DESCRIBE_FALLBACK_PAGE_LIMIT}; mainly useful in tests. */
+  maxPages?: number;
 }
 
 /**
@@ -309,6 +367,7 @@ export async function describeGenericResource(
   descriptor: ServiceDescriptor,
   resourceId: string,
   signal?: AbortSignal,
+  options: DescribeGenericResourceOptions = {},
 ): Promise<Record<string, unknown>> {
   const browser = descriptor.browser;
   if (browser === undefined) throw new Error(`${descriptor.id} has no generic browser binding.`);
@@ -333,21 +392,35 @@ export async function describeGenericResource(
     return isRecord(result) ? result : { value: result };
   }
 
+  const maxPages = options.maxPages ?? DESCRIBE_FALLBACK_PAGE_LIMIT;
   let nextToken: string | undefined;
-  for (let page = 0; page < 10; page += 1) {
+  let pagesScanned = 0;
+  for (let page = 0; page < maxPages; page += 1) {
     const current = await listGenericResources(descriptor, {
       ...(nextToken === undefined ? {} : { nextToken }),
       ...(signal === undefined ? {} : { signal }),
     });
+    pagesScanned += 1;
     const match = current.items.find((row) => row.id === resourceId);
     if (match !== undefined) return match.raw;
-    if (current.nextToken === undefined) break;
+    if (current.nextToken === undefined) {
+      throw new ApiClientError({
+        code: 'RESOURCE_NOT_FOUND',
+        statusCode: 404,
+        message:
+          `${descriptor.displayName} did not return a resource with the id "${resourceId}": ` +
+          `the list operation was exhausted after ${pagesScanned} page(s).`,
+        service: descriptor.id,
+      } satisfies ApiError);
+    }
     nextToken = current.nextToken;
   }
   throw new ApiClientError({
     code: 'RESOURCE_NOT_FOUND',
     statusCode: 404,
-    message: `${descriptor.displayName} did not return a resource with the id "${resourceId}".`,
+    message:
+      `${descriptor.displayName} did not return a resource with the id "${resourceId}" ` +
+      `within the first ${maxPages} pages.`,
     service: descriptor.id,
   } satisfies ApiError);
 }

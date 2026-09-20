@@ -1,4 +1,5 @@
 import type { APIRequestContext } from '@playwright/test';
+import type { ApiConfigResponse, HealthResponse } from '@localdeck/shared';
 import { E2E_RESOURCE_PREFIX, E2E_TAG_KEY, REPO_ROOT, trackResource } from '../support';
 
 /**
@@ -9,32 +10,9 @@ import { E2E_RESOURCE_PREFIX, E2E_TAG_KEY, REPO_ROOT, trackResource } from '../s
 
 export { E2E_RESOURCE_PREFIX, E2E_TAG_KEY, REPO_ROOT, trackResource };
 
-export interface LocalStackCounts {
-  total?: number;
-  available?: number;
-  error?: number;
-  running?: number;
-}
+export type { ApiConfigResponse, HealthResponse };
 
-export interface HealthResponse {
-  status: 'ok' | 'degraded';
-  checkedAt: string;
-  endpoint: string;
-  region: string;
-  localstack: {
-    services: Record<string, string>;
-    counts: LocalStackCounts;
-    version?: string;
-  };
-}
-
-export interface ApiConfigResponse {
-  application: { name: string; version: string; environment: string };
-  localstack: { endpoint: string; region: string; healthPath: string };
-  ui: { statusPollIntervalMs: number };
-}
-
-/** Reads the api's normalized LocalStack health document. */
+/** Reads the api's normalized emulator health document. */
 export async function fetchHealth(request: APIRequestContext): Promise<HealthResponse> {
   const response = await request.get('/api/health');
   if (response.status() !== 200) {
@@ -61,10 +39,10 @@ export async function fetchConfig(request: APIRequestContext): Promise<ApiConfig
 }
 
 /**
- * The account id LocalStack uses for the caller, read from STS through the
- * dispatcher. Falls back to LocalStack's well-known 12-zero account when STS
- * is not emulated; the fixture is only used to build a syntactically valid
- * role ARN, which LocalStack stores without validating.
+ * The account id the emulator uses for the caller, read from STS through the
+ * dispatcher. Falls back to the well-known 12-zero account when STS is not
+ * emulated; the fixture is only used to build a syntactically valid role ARN,
+ * which the emulator stores without validating.
  */
 export async function fetchAccountId(request: APIRequestContext): Promise<string> {
   try {
@@ -84,10 +62,14 @@ export async function fetchAccountId(request: APIRequestContext): Promise<string
   return '000000000000';
 }
 
-/** True when the emulator reports the service (any non-error status). */
+/** True when the emulator reports the service as enabled. */
 export function isEmulated(health: HealthResponse, service: string): boolean {
-  const status = health.localstack.services[service];
-  return status !== undefined && status !== 'error' && status !== 'disabled';
+  return health.emulator.services[service] === 'enabled';
+}
+
+/** Display name of the active emulator, for copy assertions. */
+export function providerLabel(health: HealthResponse): string {
+  return health.provider.providerLabel;
 }
 
 export interface ServiceOperationResponse<TResult = unknown> {
@@ -159,10 +141,11 @@ export async function deleteBucketIfExists(
 }
 
 /**
- * Deletes a cluster after waiting for it to settle. LocalStack's k3d teardown
- * races with a cluster that is still CREATING, which can leave orphaned k3d
- * containers behind, so the helper polls DescribeCluster first. Cleanup must
- * never fail the test it follows: problems are reported, not thrown.
+ * Deletes a cluster after waiting for it to settle. The emulator's container
+ * teardown races with a cluster that is still CREATING, which can leave
+ * orphaned containers behind, so the helper polls DescribeCluster first.
+ * Cleanup must never fail the test it follows: problems are reported, not
+ * thrown.
  */
 export async function deleteClusterIfExists(
   request: APIRequestContext,
@@ -182,7 +165,7 @@ export async function deleteClusterIfExists(
       if (status === 'ACTIVE' || status === 'FAILED') {
         settled = true;
       } else if (status === undefined || status === 'DELETING') {
-        // Already gone, or LocalStack is tearing it down itself.
+        // Already gone, or the emulator is tearing it down itself.
         return;
       }
     } catch (error) {

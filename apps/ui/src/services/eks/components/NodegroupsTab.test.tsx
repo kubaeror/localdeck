@@ -69,6 +69,42 @@ const DESCRIBE_DEGRADED = {
   },
 };
 
+/** DescribeNodegroup answer for one lifecycle status. */
+function describeNodegroup(status: string): {
+  service: string;
+  operation: string;
+  result: { nodegroup: Record<string, unknown> };
+} {
+  return {
+    service: 'eks',
+    operation: 'DescribeNodegroup',
+    result: { nodegroup: { ...DESCRIBE_NODEGROUP.result.nodegroup, status } },
+  };
+}
+
+const DESCRIBE_OTHER_CLUSTER_INSTANCE = {
+  service: 'ec2',
+  operation: 'DescribeInstances',
+  result: {
+    Reservations: [
+      {
+        Instances: [
+          {
+            InstanceId: 'i-other-cluster',
+            InstanceType: 't3.medium',
+            State: { Name: 'running' },
+            Tags: [
+              { Key: 'Name', Value: 'ng-workers-node' },
+              { Key: 'eks:nodegroup-name', Value: 'ng-workers' },
+              { Key: 'eks:cluster-name', Value: 'other-cluster' },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+};
+
 const DESCRIBE_INSTANCES = {
   service: 'ec2',
   operation: 'DescribeInstances',
@@ -167,6 +203,82 @@ describe('EKS NodegroupsTab', () => {
 
     // The explicit refresh re-fetches the node groups and the EC2 catalogue.
     fireEvent.click(screen.getByRole('button', { name: 'Refresh node groups' }));
+    await waitFor(() => {
+      expect(dispatchedOperationCalls('ec2', 'DescribeInstances')).toBe(2);
+    });
+  });
+
+  it('disables Delete while EKS rejects deleting the node group, stating the allowed statuses', async () => {
+    stubApiFetch({
+      operations: {
+        'eks/ListNodegroups': LIST_NODEGROUPS,
+        'eks/DescribeNodegroup': describeNodegroup('CREATING'),
+        'ec2/DescribeInstances': DESCRIBE_INSTANCES,
+      },
+    });
+    renderTab();
+
+    const actions = await screen.findByRole('button', { name: 'Actions for ng-workers' });
+    fireEvent.click(actions);
+    const deleteItem = await screen.findByText('Delete');
+    expect(deleteItem.closest('[aria-disabled="true"]')).not.toBeNull();
+    expect(
+      screen.getByText(
+        /only deletes a node group whose status is ACTIVE, CREATE_FAILED or DEGRADED/,
+      ),
+    ).toBeDefined();
+  });
+
+  it('keeps Delete enabled for the statuses EKS accepts', async () => {
+    stubApiFetch({
+      operations: {
+        'eks/ListNodegroups': LIST_NODEGROUPS,
+        'eks/DescribeNodegroup': describeNodegroup('CREATE_FAILED'),
+        'ec2/DescribeInstances': DESCRIBE_INSTANCES,
+      },
+    });
+    renderTab();
+
+    const actions = await screen.findByRole('button', { name: 'Actions for ng-workers' });
+    fireEvent.click(actions);
+    const deleteItem = await screen.findByText('Delete');
+    expect(deleteItem.closest('[aria-disabled="true"]')).toBeNull();
+  });
+
+  it('never links instances that belong to another cluster with the same node group name', async () => {
+    stubApiFetch({
+      operations: {
+        'eks/ListNodegroups': LIST_NODEGROUPS,
+        'eks/DescribeNodegroup': DESCRIBE_NODEGROUP,
+        'ec2/DescribeInstances': DESCRIBE_OTHER_CLUSTER_INSTANCE,
+      },
+    });
+    renderTab();
+
+    await screen.findByText('ng-workers');
+    await waitFor(() => {
+      expect(dispatchedOperationCalls('ec2', 'DescribeInstances')).toBe(1);
+    });
+    expect(screen.queryByRole('link', { name: 'ng-workers-node' })).toBeNull();
+    expect(screen.getByText('None reported')).toBeDefined();
+  });
+
+  it('warns and offers Retry when the EC2 instance list fails', async () => {
+    // No ec2/DescribeInstances stub: the dispatcher answers 501 and the lookup
+    // fails, which must not render "None reported".
+    stubApiFetch({
+      operations: {
+        'eks/ListNodegroups': LIST_NODEGROUPS,
+        'eks/DescribeNodegroup': DESCRIBE_NODEGROUP,
+      },
+    });
+    renderTab();
+
+    expect(await screen.findByText('Could not load the emulated EC2 instances')).toBeDefined();
+    expect(screen.getByText('Lookup failed')).toBeDefined();
+    expect(screen.queryByText('None reported')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     await waitFor(() => {
       expect(dispatchedOperationCalls('ec2', 'DescribeInstances')).toBe(2);
     });

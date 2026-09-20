@@ -5,6 +5,7 @@ import type {
   ServiceDescriptor,
 } from '@localdeck/shared';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ApiClientError } from '../../lib/apiClient';
 import {
   browserOperationInput,
   describeGenericResource,
@@ -286,6 +287,89 @@ describe('generic pagination contracts', () => {
     expect(calls[1]?.input).toEqual({ Marker: 'dist-2' });
   });
 
+  it('prefixes fallback row ids with the page key so pages do not collide', () => {
+    const list: ServiceBrowserListOperation = { ...LIST, resultPath: 'Items' };
+    const first = mapListResult({ Items: [{ size: 1 }] }, list);
+    const again = mapListResult({ Items: [{ size: 2 }] }, list);
+    const second = mapListResult({ Items: [{ size: 3 }] }, list, { pageKey: 'page-2' });
+
+    // Stable for the same page, unique across pages.
+    expect(again.rows[0]?.id).toBe(first.rows[0]?.id);
+    expect(second.rows[0]?.id).not.toBe(first.rows[0]?.id);
+  });
+
+  it('keeps fallback row ids unique across pages loaded through Load more', async () => {
+    const descriptor = descriptorWithList('fallback-ids', {
+      operation: 'ListThings',
+      resultPath: 'Items',
+    });
+    stubOperations({
+      'fallback-ids/ListThings': (input: Record<string, unknown>) =>
+        input['NextToken'] === undefined
+          ? { Items: [{ size: 1 }], NextToken: 'fallback-page-2' }
+          : { Items: [{ size: 2 }] },
+    });
+
+    const first = await listGenericResources(descriptor);
+    const second = await listGenericResources(descriptor, { nextToken: 'fallback-page-2' });
+
+    expect(first.items[0]?.id).not.toBe(second.items[0]?.id);
+  });
+
+  it('stops with a clear error when a listing repeats a pagination token', async () => {
+    const descriptor = descriptorWithList('loop-guard', {
+      operation: 'ListThings',
+      resultPath: 'Items',
+      idField: 'Id',
+    });
+    const calls = stubOperations({
+      'loop-guard/ListThings': {
+        Items: [{ Id: 'same-row' }],
+        NextToken: 'looping-token',
+      },
+    });
+
+    const first = await listGenericResources(descriptor);
+    expect(first.nextToken).toBe('looping-token');
+
+    // The echoed page is served once...
+    const echo = await listGenericResources(descriptor, { nextToken: 'looping-token' });
+    expect(echo.nextToken).toBe('looping-token');
+
+    // ...and asking for the same token again is refused instead of looping.
+    const error = (await listGenericResources(descriptor, {
+      nextToken: 'looping-token',
+    }).catch((caught: unknown) => caught)) as ApiClientError;
+    expect(error).toBeInstanceOf(ApiClientError);
+    expect(error.apiError.code).toBe('PAGINATION_LOOP');
+    expect(error.apiError.message).toContain('looping-token');
+    expect(calls).toHaveLength(2);
+  });
+
+  it('forgets the seen tokens when a listing restarts from the first page', async () => {
+    const descriptor = descriptorWithList('loop-reset', {
+      operation: 'ListThings',
+      resultPath: 'Items',
+      idField: 'Id',
+    });
+    stubOperations({
+      'loop-reset/ListThings': (input: Record<string, unknown>) =>
+        input['NextToken'] === undefined
+          ? { Items: [{ Id: 'page-1' }], NextToken: 'reused-token' }
+          : { Items: [{ Id: 'page-2' }] },
+    });
+
+    await listGenericResources(descriptor);
+    await listGenericResources(descriptor, { nextToken: 'reused-token' });
+    // A refresh starts a new listing; the emulator may hand out the same
+    // opaque token, which must not be mistaken for a loop.
+    await listGenericResources(descriptor);
+
+    await expect(listGenericResources(descriptor, { nextToken: 'reused-token' })).resolves.toEqual({
+      items: [{ id: 'page-2', label: 'page-2', raw: { Id: 'page-2' } }],
+    });
+  });
+
   it('uses an explicit requestField for SWF nextPageToken bindings', async () => {
     const descriptor = descriptorWithList('swf-pagination', {
       operation: 'ListDomains',
@@ -348,6 +432,47 @@ describe('generic batch describes', () => {
       projects: [],
       projectsNotFound: ['missing'],
     });
+  });
+
+  it('names the page cap when the describe fallback walks to the limit', async () => {
+    const descriptor = descriptorWithList('describe-cap', {
+      operation: 'ListThings',
+      resultPath: 'Items',
+      idField: 'Id',
+    });
+    const calls = stubOperations({
+      'describe-cap/ListThings': (input: Record<string, unknown>) => ({
+        Items: [{ Id: 'other' }],
+        NextToken: `token-${String(input['NextToken'] ?? 'start')}`,
+      }),
+    });
+
+    const error = (await describeGenericResource(descriptor, 'missing', undefined, {
+      maxPages: 3,
+    }).catch((caught: unknown) => caught)) as ApiClientError;
+
+    expect(error).toBeInstanceOf(ApiClientError);
+    expect(error.apiError.code).toBe('RESOURCE_NOT_FOUND');
+    expect(error.apiError.message).toContain('within the first 3 pages');
+    expect(calls).toHaveLength(3);
+  });
+
+  it('reports an exhausted listing when the describe fallback runs out of pages', async () => {
+    const descriptor = descriptorWithList('describe-exhausted', {
+      operation: 'ListThings',
+      resultPath: 'Items',
+      idField: 'Id',
+    });
+    stubOperations({
+      'describe-exhausted/ListThings': { Items: [{ Id: 'other' }] },
+    });
+
+    const error = (await describeGenericResource(descriptor, 'missing').catch(
+      (caught: unknown) => caught,
+    )) as ApiClientError;
+
+    expect(error.apiError.code).toBe('RESOURCE_NOT_FOUND');
+    expect(error.apiError.message).toContain('exhausted after 1 page(s)');
   });
 });
 

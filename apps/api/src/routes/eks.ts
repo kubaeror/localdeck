@@ -32,10 +32,9 @@ interface KubeconfigParams {
 export interface EksRouteOptions extends AwsClientConfigOverrides {
   /**
    * Endpoint the generated kubeconfig points the `aws eks get-token` plugin at.
-   * Defaults to the api's configured endpoint. Set
-   * `LOCALSTACK_PUBLIC_ENDPOINT` when the api runs in Docker
-   * (`host.docker.internal`) but kubectl runs on the Docker host, where that
-   * hostname does not resolve.
+   * Defaults to the api's configured endpoint. Set `EMULATOR_PUBLIC_ENDPOINT`
+   * when the api runs in Docker (`host.docker.internal`) but kubectl runs on
+   * the Docker host, where that hostname does not resolve.
    */
   publicEndpoint?: string;
 }
@@ -52,10 +51,26 @@ function requireString(value: unknown, label: string, cluster: string): string {
       code: ApiErrorCodes.clusterNotReady,
       statusCode: 409,
       message:
-        `LocalStack did not report the ${label} for the EKS cluster "${cluster}", so a ` +
+        `The active emulator did not report the ${label} for the EKS cluster "${cluster}", so a ` +
         'kubeconfig cannot be built yet. Wait until the cluster is ACTIVE and download it again.',
       service: 'eks',
       details: { cluster, missing: label },
+    });
+  }
+  return value;
+}
+
+/** Base64 certificate-authority data, as `aws eks update-kubeconfig` expects. */
+function requireBase64(value: string, label: string, cluster: string): string {
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(value) || value.length % 4 !== 0) {
+    throw new ApiProblem({
+      code: ApiErrorCodes.clusterNotReady,
+      statusCode: 409,
+      message:
+        `The active emulator reported ${label} for the EKS cluster "${cluster}" that is not ` +
+        'valid base64, so a kubeconfig cannot be built yet.',
+      service: 'eks',
+      details: { cluster, invalid: label },
     });
   }
   return value;
@@ -105,12 +120,12 @@ export function registerEksRoutes(app: FastifyInstance, options: EksRouteOptions
         clientOverrides,
         { signal: clientDisconnectSignal(reply) },
       );
-      const described = (response.result as { cluster?: DescribedCluster }).cluster;
-      if (described === undefined) {
+      const described = (response.result as { cluster?: DescribedCluster | null }).cluster;
+      if (described === undefined || described === null) {
         throw new ApiProblem({
           code: ApiErrorCodes.notFound,
           statusCode: 404,
-          message: `LocalStack returned no EKS cluster named "${clusterName}".`,
+          message: `The active emulator returned no EKS cluster named "${clusterName}".`,
           service: 'eks',
           details: { cluster: clusterName },
         });
@@ -129,8 +144,12 @@ export function registerEksRoutes(app: FastifyInstance, options: EksRouteOptions
       }
 
       const endpoint = requireString(described.endpoint, 'Kubernetes API endpoint', clusterName);
-      const certificateAuthorityData = requireString(
-        described.certificateAuthority?.data,
+      const certificateAuthorityData = requireBase64(
+        requireString(
+          described.certificateAuthority?.data,
+          'certificate authority data',
+          clusterName,
+        ),
         'certificate authority data',
         clusterName,
       );
@@ -143,7 +162,7 @@ export function registerEksRoutes(app: FastifyInstance, options: EksRouteOptions
           certificateAuthorityData,
         },
         region: clientOverrides.region ?? 'us-east-1',
-        localstackEndpoint: publicEndpoint,
+        emulatorEndpoint: publicEndpoint,
       });
 
       request.log.info(

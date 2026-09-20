@@ -50,19 +50,44 @@ liveDescribe('live console against the external LocalStack', () => {
     const health = (await (await realFetch(`${base}/api/health`)).json()) as {
       endpoint: string;
       region: string;
-      localstack: {
+      provider: {
+        provider: 'localstack' | 'floci' | 'ministack' | 'generic';
+        providerLabel: string;
         version: string | null;
         edition: string | null;
-        services: Record<string, 'available'>;
-        counts: { available: number; total: number };
+        docsUrl: string;
+      };
+      emulator: {
+        provider: 'localstack' | 'floci' | 'ministack' | 'generic';
+        providerLabel: string;
+        version: string | null;
+        edition: string | null;
+        hasServiceInventory: boolean;
+        services: Record<string, 'enabled' | 'disabled' | 'starting' | 'error' | 'unknown'>;
+        counts: { enabled: number; disabled: number; total: number; error: number; other: number };
       };
     };
     const registry = (await (await realFetch(`${base}/api/services`)).json()) as {
-      services?: unknown;
+      services?: { id: string; available?: boolean }[];
     };
     expect(registry.services).toBeDefined();
+    const registryServices = registry.services ?? [];
 
-    const coverage = summarizeRegistryCoverage(health.localstack.services);
+    const coverage = summarizeRegistryCoverage(
+      health.emulator.services,
+      SERVICE_CATALOG,
+      health.provider.provider,
+    );
+    // The sidebar shows one badge per service and "not installed" (the api has
+    // no SDK package for it) wins over "not reported"; compute both counts
+    // against the registry the api actually served.
+    const notInstalled = new Set(
+      registryServices
+        .filter((service) => service.available === false)
+        .map((service) => service.id),
+    );
+    const notReportedBadges = coverage.notEmulated.filter((id) => !notInstalled.has(id)).length;
+    const registeredCount = registryServices.length || SERVICE_CATALOG.length;
 
     renderApp(['/console/home']);
 
@@ -70,29 +95,30 @@ liveDescribe('live console against the external LocalStack', () => {
     expect((await screen.findAllByText(health.endpoint)).length).toBeGreaterThan(0);
     expect(
       screen.getAllByText(
-        `${health.localstack.counts.available} of ${health.localstack.counts.total} available`,
+        `${health.emulator.counts.enabled} of ${health.emulator.counts.total} available`,
       ).length,
     ).toBeGreaterThan(0);
     expect(
       screen.getAllByText(
-        `${health.localstack.version ?? 'unknown'} (${health.localstack.edition ?? 'unknown'})`,
+        `${health.provider.providerLabel} (${health.provider.edition ?? 'unknown'})`,
       ).length,
     ).toBeGreaterThan(0);
+    expect(screen.getAllByText(health.provider.version ?? 'unknown').length).toBeGreaterThan(0);
 
     // The sidebar is the registry matched against this exact health document:
     // every service LocalStack does not report is greyed out, and nothing else.
     await waitFor(() => {
       expect(
         screen.getByText(
-          `${coverage.emulated} of ${SERVICE_CATALOG.length} services emulated locally`,
+          `${coverage.emulated} of ${registeredCount} services reported by LocalStack`,
         ),
       ).toBeDefined();
     });
-    expect(screen.getAllByText('not emulated')).toHaveLength(coverage.notEmulated.length);
+    expect(screen.queryAllByText('not reported')).toHaveLength(notReportedBadges);
 
     console.log(
-      `Live LocalStack ${health.localstack.version ?? '?'} (${health.localstack.edition ?? '?'}) at ${health.endpoint}: ` +
-        `${health.localstack.counts.total} services reported, ${coverage.emulated}/${SERVICE_CATALOG.length} registry entries emulated, ` +
+      `Live LocalStack ${health.emulator.version ?? '?'} (${health.emulator.edition ?? '?'}) at ${health.endpoint}: ` +
+        `${health.emulator.counts.total} services reported, ${coverage.emulated}/${SERVICE_CATALOG.length} registry entries emulated, ` +
         `${coverage.notEmulated.length} greyed out (${coverage.notEmulated.join(', ') || 'none'}), ` +
         `${coverage.unregistered.length} reported services without a console entry.`,
     );
@@ -102,7 +128,7 @@ liveDescribe('live console against the external LocalStack', () => {
     // placeholder; the bucket list is fed by the api's dynamic dispatcher.
     const s3 = screen.getAllByRole('link', { name: 'S3' })[0];
     if (s3 === undefined) throw new Error('the S3 entry is missing from the sidebar');
-    expect(s3.parentElement?.textContent).not.toContain('not emulated');
+    expect(s3.parentElement?.textContent).not.toContain('not reported');
     fireEvent.click(s3);
     expect(await screen.findByRole('heading', { level: 1, name: 'Buckets' })).toBeDefined();
     expect(screen.queryByText('The S3 console is not implemented yet')).toBeNull();
@@ -130,7 +156,7 @@ liveDescribe('live console against the external LocalStack', () => {
     await waitFor(
       () => {
         const current = screen.getByRole('table');
-        expect(current.textContent).toContain('Available');
+        expect(current.textContent).toContain('Enabled');
         expect(current.textContent).toContain('Dedicated console');
       },
       { timeout: 10_000 },

@@ -2,7 +2,7 @@
   "name": "localdeck",
   "version": "0.1.0",
   "private": true,
-  "description": "LocalDeck — an open-source web console for LocalStack",
+  "description": "LocalDeck \u2014 an open-source web console for LocalStack",
   "license": "MIT",
   "packageManager": "pnpm@10.34.5",
   "engines": {
@@ -24,7 +24,8 @@
     "verify:repo": "tsx scripts/repo-checks.ts",
     "clean": "turbo run clean",
     "verify:localstack": "pnpm --filter @localdeck/api verify:localstack",
-    "verify:console": "pnpm --filter @localdeck/ui test:live"
+    "verify:console": "pnpm --filter @localdeck/ui test:live",
+    "verify:emulator": "pnpm --filter @localdeck/api verify:emulator"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { SERVICE_CATALOG, type LocalStackServiceStatus } from '@localdeck/shared';
+import { SERVICE_CATALOG, type EmulatorServiceState } from '@localdeck/shared';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -17,10 +17,6 @@ function renderApp(initialEntries: readonly string[] = ['/console/home']): void 
       <App />
     </MemoryRouter>,
   );
-}
-
-function reportedKeys(): readonly string[] {
-  return Object.keys(REPORTED_SERVICES);
 }
 
 describe('AppShell', () => {
@@ -72,10 +68,11 @@ describe('AppShell', () => {
     // Real values from /api/health, not placeholders.
     expect((await screen.findAllByText('Connected')).length).toBeGreaterThan(0);
     expect(screen.getAllByText('http://localhost:4566').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('2026.8.2 (pro)').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('2026.8.2').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('LocalStack (pro)').length).toBeGreaterThan(0);
     expect(
       screen.getByText(
-        `${TEST_HEALTH.localstack.counts.available} of ${TEST_HEALTH.localstack.counts.total} available`,
+        `${TEST_HEALTH.emulator.counts.enabled} of ${TEST_HEALTH.emulator.counts.total} available`,
       ),
     ).toBeDefined();
   });
@@ -88,20 +85,25 @@ describe('AppShell', () => {
     expect(screen.getAllByText('Compute').length).toBeGreaterThan(0);
 
     const s3 = screen.getByRole('link', { name: 'S3' });
-    expect(s3.parentElement?.textContent).not.toContain('not emulated');
+    expect(s3.parentElement?.textContent).not.toContain('not reported');
 
     // EC2 is registered but not reported by the stubbed stack.
     const ec2 = screen.getByRole('link', { name: 'EC2' });
-    expect(ec2.parentElement?.textContent).toContain('not emulated');
+    expect(ec2.parentElement?.textContent).toContain('not reported');
 
-    const missing = SERVICE_CATALOG.length - reportedKeys().length;
-    expect(screen.getAllByText('not emulated')).toHaveLength(missing);
+    // Every service that is not enabled carries a badge: `not reported` for
+    // services the stack omits, `starting` for the one still coming up.
+    const enabled = TEST_HEALTH.emulator.counts.enabled;
+    const starting = Object.values(REPORTED_SERVICES).filter(
+      (state) => state === 'starting',
+    ).length;
+    expect(screen.getAllByText('not reported')).toHaveLength(
+      SERVICE_CATALOG.length - enabled - starting,
+    );
 
     // The sidebar reports how much of the stack the registry covers.
     expect(
-      screen.getByText(
-        `${reportedKeys().length} of ${SERVICE_CATALOG.length} services emulated locally`,
-      ),
+      screen.getByText(`${enabled} of ${SERVICE_CATALOG.length} services reported by LocalStack`),
     ).toBeDefined();
   });
 
@@ -118,21 +120,23 @@ describe('AppShell', () => {
     const s3 = screen.getByRole('link', { name: 'S3' });
     expect(s3.matches(greyOutSelector)).toBe(false);
 
-    const missing = SERVICE_CATALOG.length - reportedKeys().length;
-    expect(document.querySelectorAll(greyOutSelector)).toHaveLength(missing);
+    // Every non-enabled service link carries the grey-out hook, including the
+    // `starting` one.
+    const greyed = SERVICE_CATALOG.length - TEST_HEALTH.emulator.counts.enabled;
+    expect(document.querySelectorAll(greyOutSelector)).toHaveLength(greyed);
   });
 
   it('shows the tooltip wording behind a greyed out entry', async () => {
     renderApp();
     await screen.findAllByText('us-east-1 (local)');
 
-    const markers = screen.getAllByLabelText('Not emulated locally');
+    const markers = screen.getAllByLabelText(/does not report this service/);
     expect(markers.length).toBeGreaterThan(0);
     const marker = markers[0];
-    if (marker === undefined) throw new Error('no "not emulated" marker was rendered');
+    if (marker === undefined) throw new Error('no "not reported" marker was rendered');
 
     fireEvent.pointerEnter(marker);
-    expect(await screen.findByText('Not emulated locally')).toBeDefined();
+    expect(await screen.findByText(/does not report this service/)).toBeDefined();
   });
 
   it('filters the sidebar', async () => {
@@ -249,7 +253,7 @@ describe('AppShell', () => {
   it('warns on the placeholder page when the stack does not emulate the service', async () => {
     renderApp(['/console/lightsail']);
 
-    expect(await screen.findByText('Lightsail is not emulated locally')).toBeDefined();
+    expect(await screen.findByText('Lightsail is not available from LocalStack')).toBeDefined();
     expect(screen.getByText('The Lightsail console is not implemented yet')).toBeDefined();
   });
 
@@ -362,12 +366,14 @@ describe('AppShell', () => {
     renderApp();
 
     expect(await screen.findByText('LocalStack is not reachable')).toBeDefined();
-    // The sidebar still renders the registry, all greyed out.
+    // The sidebar still renders the registry, all greyed out. With no health
+    // document there is no inventory to compare against, so the badges read
+    // "unverified" instead of claiming the service is absent.
     expect(screen.getByRole('link', { name: 'S3' }).parentElement?.textContent).toContain(
-      'not emulated',
+      'unverified',
     );
     expect(
-      screen.getByText(`0 of ${SERVICE_CATALOG.length} services emulated locally`),
+      screen.getByText(`0 of ${SERVICE_CATALOG.length} services reported by LocalStack`),
     ).toBeDefined();
   });
 
@@ -376,7 +382,7 @@ describe('AppShell', () => {
 
     expect(await screen.findByRole('heading', { level: 1, name: 'All services' })).toBeDefined();
     const table = await screen.findByRole('table');
-    expect(within(table).getAllByText('Not emulated locally').length).toBeGreaterThan(0);
+    expect(within(table).getAllByText('Not reported by LocalStack').length).toBeGreaterThan(0);
 
     fireEvent.change(screen.getByRole('searchbox', { name: 'Filter the service registry' }), {
       target: { value: 's3' },
@@ -406,20 +412,22 @@ describe('AppShell', () => {
 });
 
 describe('AppShell (service status shape)', () => {
-  it('counts legacy running statuses as emulated', async () => {
-    const services: Record<string, LocalStackServiceStatus> = {
+  it('greys out services the provider reports as disabled, never enabled ones', async () => {
+    const services: Record<string, EmulatorServiceState> = {
       ...REPORTED_SERVICES,
-      ec2: 'running',
+      ec2: 'disabled',
     };
     stubApiFetch({
-      health: { ...TEST_HEALTH, localstack: { ...TEST_HEALTH.localstack, services } },
+      health: { ...TEST_HEALTH, emulator: { ...TEST_HEALTH.emulator, services } },
     });
 
     renderApp();
     await screen.findAllByText('us-east-1 (local)');
 
     const ec2 = screen.getByRole('link', { name: 'EC2' });
-    expect(ec2.parentElement?.textContent).not.toContain('not emulated');
+    expect(ec2.parentElement?.textContent).toContain('disabled');
+    const s3 = screen.getByRole('link', { name: 'S3' });
+    expect(s3.parentElement?.textContent).not.toContain('disabled');
 
     cleanup();
     vi.unstubAllGlobals();

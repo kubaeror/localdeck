@@ -2,7 +2,7 @@ import {
   resolveServiceStatus,
   type ServiceDescriptor,
   type ServiceParityLevel,
-  type LocalStackServiceStatus,
+  type EmulatorServiceState,
 } from '@localdeck/shared';
 import Badge from '@cloudscape-design/components/badge';
 import Box from '@cloudscape-design/components/box';
@@ -24,16 +24,21 @@ import { ServiceIcon } from '../components/ServiceIcon';
 import { StatusBadge } from '../components/StatusBadge';
 import { GLOBAL_SEARCH_SHORTCUT_LABEL } from '../contexts/global-search-context';
 import { useGlobalSearch } from '../hooks/useGlobalSearch';
-import { useLocalStackStatus } from '../hooks/useLocalStackStatus';
+import { useEmulatorStatus } from '../hooks/useEmulatorStatus';
 import { useServiceCatalog } from '../hooks/useServiceCatalog';
-import { NOT_EMULATED_LABEL, NOT_INSTALLED_SHORT_LABEL, NOT_INSTALLED_TOOLTIP } from '../lib/copy';
+import {
+  NOT_INSTALLED_SHORT_LABEL,
+  NOT_INSTALLED_TOOLTIP,
+  notReportedLabel,
+  UNVERIFIED_SERVICE_LABEL,
+} from '../lib/copy';
 import { PARITY_COLORS, PARITY_LABELS } from '../lib/parity';
 import { searchServices } from '../lib/serviceSearch';
 import { serviceConsolePath } from '../services/paths';
 
 interface ServiceRow {
   service: ServiceDescriptor;
-  status: LocalStackServiceStatus | undefined;
+  status: EmulatorServiceState | undefined;
   parity: ServiceParityLevel;
 }
 
@@ -70,7 +75,7 @@ function sortingValue(row: ServiceRow, field: SortingField): string {
 export function AllServicesPage(): ReactElement {
   const navigate = useNavigate();
   const search = useGlobalSearch();
-  const status = useLocalStackStatus();
+  const status = useEmulatorStatus();
   const catalog = useServiceCatalog();
 
   const [filteringText, setFilteringText] = useState('');
@@ -82,7 +87,11 @@ export function AllServicesPage(): ReactElement {
   });
   const [isSortingDescending, setIsSortingDescending] = useState(false);
 
-  const reported = useMemo(() => status.health?.localstack.services ?? {}, [status.health]);
+  const reported = useMemo(() => status.health?.emulator.services ?? {}, [status.health]);
+  const provider = status.health?.provider.provider ?? 'generic';
+  const providerLabel = status.health?.provider.providerLabel ?? 'the emulator';
+  const hasServiceInventory = status.health?.emulator.hasServiceInventory ?? false;
+  const loading = status.health === null && status.phase === 'loading';
 
   const rows = useMemo<readonly ServiceRow[]>(() => {
     const query = filteringText.trim();
@@ -95,7 +104,7 @@ export function AllServicesPage(): ReactElement {
 
     const collected: ServiceRow[] = descriptors.map((service) => ({
       service,
-      status: resolveServiceStatus(service, reported),
+      status: resolveServiceStatus(service, reported, provider),
       parity: service.parityLevel,
     }));
 
@@ -107,7 +116,7 @@ export function AllServicesPage(): ReactElement {
         ? left.service.displayName.localeCompare(right.service.displayName, 'en')
         : compared * direction;
     });
-  }, [catalog.services, filteringText, isSortingDescending, reported, sortingColumn]);
+  }, [catalog.services, filteringText, isSortingDescending, provider, reported, sortingColumn]);
 
   const pagesCount = Math.max(1, Math.ceil(rows.length / pageSize));
   // The registry can shrink between polls; clamp instead of showing an empty
@@ -144,11 +153,13 @@ export function AllServicesPage(): ReactElement {
     },
     {
       id: 'status',
-      header: 'LocalStack status',
+      header: `${providerLabel} status`,
       sortingField: 'status',
       cell: (row) =>
         row.status === undefined ? (
-          <Badge color="grey">{NOT_EMULATED_LABEL}</Badge>
+          <Badge color="grey">
+            {hasServiceInventory ? notReportedLabel(providerLabel) : UNVERIFIED_SERVICE_LABEL}
+          </Badge>
         ) : (
           <StatusBadge status={row.status} />
         ),
@@ -183,8 +194,8 @@ export function AllServicesPage(): ReactElement {
           variant="h1"
           description={
             catalog.source === 'api'
-              ? 'The registry served by GET /api/services, matched against the live LocalStack health document.'
-              : 'The registry bundled with the ui, matched against the live LocalStack health document.'
+              ? `The registry served by GET /api/services, matched against the live ${providerLabel} health document.`
+              : `The registry bundled with the ui, matched against the live ${providerLabel} health document.`
           }
           actions={
             <SpaceBetween direction="horizontal" size="xs">
@@ -290,12 +301,18 @@ export function AllServicesPage(): ReactElement {
           />
         }
         empty={
-          <Box textAlign="center" color="inherit">
-            <Box variant="strong">No services match the filter.</Box>
-            <Box variant="p" color="inherit">
-              Clear the filter or search the registry with {GLOBAL_SEARCH_SHORTCUT_LABEL}.
+          loading ? (
+            <Box textAlign="center" color="inherit">
+              <Box variant="strong">Checking {providerLabel}…</Box>
             </Box>
-          </Box>
+          ) : (
+            <Box textAlign="center" color="inherit">
+              <Box variant="strong">No services match the filter.</Box>
+              <Box variant="p" color="inherit">
+                Clear the filter or search the registry with {GLOBAL_SEARCH_SHORTCUT_LABEL}.
+              </Box>
+            </Box>
+          )
         }
       />
     </ContentLayout>

@@ -132,6 +132,22 @@ describe('ResourceListPage', () => {
     expect(screen.getByText('(1 of 2)')).toBeDefined();
   });
 
+  it('shows a no-match state with a clear-filter action when the filter matches nothing', async () => {
+    render(<Harness fetcher={singlePage()} />);
+    await screen.findByText('bucket-a');
+
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Filter buckets' }), {
+      target: { value: 'zzz' },
+    });
+
+    expect(await screen.findByText('No matches for “zzz”')).toBeDefined();
+    expect(screen.queryByText('No buckets yet')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filter' }));
+    expect(await screen.findByText('bucket-a')).toBeDefined();
+    expect(screen.queryByText(/No matches for/)).toBeNull();
+  });
+
   it('renders per-row actions', async () => {
     const onAction = vi.fn();
     render(
@@ -216,6 +232,66 @@ describe('ResourceListPage', () => {
     expect(fetcher).toHaveBeenCalledWith(expect.objectContaining({ nextToken: 'page-2' }));
   });
 
+  it('settles the Load more spinner when a silent reload aborts an in-flight append', async () => {
+    const append = deferred<Paginated<Row>>();
+    const reload = deferred<Paginated<Row>>();
+    let firstPageCalls = 0;
+    const fetcher = vi.fn(async (options: { nextToken?: string }): Promise<Paginated<Row>> => {
+      if (options.nextToken !== undefined) return append.promise;
+      firstPageCalls += 1;
+      return firstPageCalls === 1
+        ? { items: [ROWS[0] as Row], nextToken: 'page-2' }
+        : reload.promise;
+    });
+
+    const { rerender } = render(<Harness fetcher={fetcher} reloadToken={0} />);
+    await screen.findByText('bucket-b');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Load more' }).getAttribute('aria-disabled')).toBe(
+        'true',
+      );
+    });
+
+    // A silent reload replaces the append before it settles. The replacing load
+    // is still in flight, so the aborted append's spinner must already be gone
+    // instead of waiting for (or outliving) the new response.
+    rerender(<Harness fetcher={fetcher} reloadToken={1} />);
+    await waitFor(() => {
+      expect(
+        screen.getByRole('button', { name: 'Load more' }).getAttribute('aria-disabled'),
+      ).toBeNull();
+    });
+
+    await act(async () => {
+      reload.resolve({ items: [ROWS[0] as Row], nextToken: 'page-2' });
+      append.resolve({ items: ROWS });
+    });
+    expect(
+      screen.getByRole('button', { name: 'Load more' }).getAttribute('aria-disabled'),
+    ).toBeNull();
+  });
+
+  it('de-duplicates appended rows by id when a page repeats', async () => {
+    const fetcher = vi.fn(async (options: { nextToken?: string }): Promise<Paginated<Row>> =>
+      options.nextToken === undefined
+        ? { items: [ROWS[0] as Row], nextToken: 'page-2' }
+        : { items: ROWS },
+    );
+
+    render(<Harness fetcher={fetcher} />);
+    await screen.findByText('bucket-b');
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
+    await screen.findByText('bucket-a');
+
+    const names = within(screen.getByRole('table'))
+      .getAllByRole('rowheader')
+      .map((cell) => cell.textContent ?? '');
+    expect(names).toEqual(['bucket-a', 'bucket-b']);
+    expect(screen.getByText('(2)')).toBeDefined();
+  });
+
   it('aborts the in-flight fetch when unmounted', async () => {
     let captured: AbortSignal | undefined;
     const fetcher = vi.fn(async (options: { signal?: AbortSignal }) => {
@@ -273,6 +349,40 @@ describe('ResourceListPage', () => {
     // never went back to its full loading state.
     expect(screen.getByRole('button', { name: 'Delete 1' })).toBeDefined();
     expect(screen.queryByText('Loading buckets')).toBeNull();
+  });
+
+  it('re-derives the selection from fresh rows after a silent reload', async () => {
+    const bulkActions = (selected: readonly Row[]): ReactElement => (
+      <Button>Selected {selected.map((row) => `${row.name}:${row.size}`).join(',')}</Button>
+    );
+    const fetcher = vi
+      .fn<() => Promise<Paginated<Row>>>()
+      .mockResolvedValueOnce({ items: ROWS })
+      .mockResolvedValueOnce({
+        items: [
+          { id: 'bucket-a', name: 'bucket-a', size: 99 },
+          { id: 'bucket-b', name: 'bucket-b', size: 20 },
+        ],
+      })
+      .mockResolvedValueOnce({ items: [{ id: 'bucket-b', name: 'bucket-b', size: 20 }] });
+
+    const { rerender } = render(
+      <Harness fetcher={fetcher} bulkActions={bulkActions} reloadToken={0} />,
+    );
+    await screen.findByText('bucket-a');
+    fireEvent.click(screen.getAllByRole('checkbox')[1] as HTMLElement);
+    expect(await screen.findByRole('button', { name: 'Selected bucket-a:10' })).toBeDefined();
+
+    // The refresh returns new object identities for the same row: bulk actions
+    // must evaluate the fresh row, not the stale selection object.
+    rerender(<Harness fetcher={fetcher} bulkActions={bulkActions} reloadToken={1} />);
+    expect(await screen.findByRole('button', { name: 'Selected bucket-a:99' })).toBeDefined();
+
+    // A row that disappeared from the service is dropped from the selection.
+    rerender(<Harness fetcher={fetcher} bulkActions={bulkActions} reloadToken={2} />);
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: /^Selected/ })).toBeNull();
+    });
   });
 
   it('lets the newest response win when an older one resolves later', async () => {

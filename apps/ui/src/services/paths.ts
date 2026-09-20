@@ -11,5 +11,5 @@ export function serviceConsolePath(serviceId: string): string {
   return `/console/${serviceId}`;
 }
 
-/** LocalStack's per-service API coverage index. */
-export const LOCALSTACK_SERVICES_DOCS_URL = 'https://docs.localstack.cloud/aws/services/';
+/** Documentation index used when the active provider has no docs URL. */
+export const DEFAULT_EMULATOR_DOCS_URL = 'https://github.com/kubaeror/localdeck#service-parity';

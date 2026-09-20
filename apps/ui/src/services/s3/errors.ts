@@ -73,18 +73,22 @@ const FRIENDLY: Readonly<Record<string, { field: S3ErrorField | null; message: s
 };
 
 /**
- * Extracts the "Bucket … was created, but … failed." sentence that
- * {@link annotateS3Error} prepends, when one is present.
+ * Extracts the "X was created/copied, but … failed." sentence that
+ * {@link annotateS3Error} prepends, when one is present. Every such annotation
+ * reports that an earlier step succeeded, so the canned per-code wording must
+ * not replace it.
  */
-export function createdAnnotation(apiError: ApiError): string | undefined {
-  const match = /^(Bucket ".*?" was created, but .*? failed\.)\s+/.exec(apiError.message);
+export function stepAnnotation(apiError: ApiError): string | undefined {
+  const match = /^((?:Bucket|Object) ".*?" was (?:created|copied), but .*? failed\.)\s+/.exec(
+    apiError.message,
+  );
   return match?.[1];
 }
 
 /** Maps one api error to console wording and, when relevant, a form field. */
 export function friendlyS3Error(apiError: ApiError): FriendlyS3Error {
   const known = FRIENDLY[apiError.code];
-  const annotation = createdAnnotation(apiError);
+  const annotation = stepAnnotation(apiError);
   if (known !== undefined) {
     return {
       ...known,

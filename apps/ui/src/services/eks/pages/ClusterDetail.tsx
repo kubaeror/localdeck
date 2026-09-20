@@ -13,10 +13,11 @@ import { DeleteConfirmModal } from '../../../components/DeleteConfirmModal';
 import { ResourceDetailPage } from '../../../components/ResourceDetailPage';
 import { StatusBadge } from '../../../components/StatusBadge';
 import { useFlashbar } from '../../../hooks/useFlashbar';
+import { useEmulatorStatus } from '../../../hooks/useEmulatorStatus';
 import { usePolling } from '../../../hooks/usePolling';
 import { toApiError } from '../../../lib/apiClient';
 import { formatDateTime } from '../../../lib/format';
-import { LOCALSTACK_SERVICES_DOCS_URL, serviceConsolePath } from '../../paths';
+import { DEFAULT_EMULATOR_DOCS_URL, serviceConsolePath } from '../../paths';
 import type { ServicePageProps } from '../../types';
 import {
   clusterStatusName,
@@ -38,15 +39,18 @@ import { NodegroupsTab } from '../components/NodegroupsTab';
 const POLL_INTERVAL_MS = 5_000;
 
 /** Ops the real console offers but LocalDeck does not call yet. */
-const UPDATE_VERSION_REASON =
-  'UpdateClusterVersion is not whitelisted in LocalDeck yet (it is not verified against LocalStack), so the cluster cannot be upgraded here.';
+function updateVersionReason(providerLabel: string): string {
+  return `UpdateClusterVersion is not whitelisted in LocalDeck yet (it is not verified against ${providerLabel}), so the cluster cannot be upgraded here.`;
+}
 
-/** What LocalStack's k3d provider needs, in console wording. */
-const K3D_TROUBLESHOOTING: readonly string[] = [
-  'Docker must be reachable from the LocalStack container (the Docker socket is mounted).',
-  'The k3d API port must be reachable from LocalStack: on Linux/WSL, add host.docker.internal:host-gateway to the LocalStack container.',
-  'An old ~/.kube/config mounted into LocalStack can make EKS think you want to use an existing cluster.',
-];
+/** What a container-backed EKS provider needs, in console wording. */
+function providerTroubleshooting(providerLabel: string): readonly string[] {
+  return [
+    `Docker must be reachable from the ${providerLabel} container (the Docker socket is mounted).`,
+    `The Kubernetes API port must be reachable from ${providerLabel}: on Linux/WSL, add host.docker.internal:host-gateway to the ${providerLabel} container.`,
+    `An old ~/.kube/config mounted into ${providerLabel} can make the EKS provider think you want to use an existing cluster.`,
+  ];
+}
 
 /**
  * One EKS cluster: Overview / Compute (node groups) / Tags. While the cluster
@@ -60,6 +64,15 @@ export function ClusterDetailPage({ descriptor }: ServicePageProps): ReactElemen
   // The whole context value changes on every flashbar message; depending on
   // `notify` alone keeps the loader (and the poll) stable.
   const { notify } = useFlashbar();
+  const status = useEmulatorStatus();
+  const providerLabel = status.health?.provider.providerLabel ?? 'the active emulator';
+  // The announce/load callbacks must not be re-created when the health document
+  // resolves and the label changes: that would abort the in-flight load and
+  // re-run the initial fetch. They read the latest label through a ref instead.
+  const providerLabelRef = useRef(providerLabel);
+  useEffect(() => {
+    providerLabelRef.current = providerLabel;
+  }, [providerLabel]);
 
   const [cluster, setCluster] = useState<EksCluster | null>(null);
   const [loading, setLoading] = useState(true);
@@ -79,15 +92,14 @@ export function ClusterDetailPage({ descriptor }: ServicePageProps): ReactElemen
           header: `Cluster ${next.name} is active`,
           content:
             next.endpoint === undefined
-              ? 'LocalStack finished starting the k3d control plane.'
+              ? `${providerLabelRef.current} finished starting the cluster control plane.`
               : `Kubernetes API endpoint: ${next.endpoint}`,
         });
       } else if (next.status === 'FAILED') {
         notify({
           type: 'error',
           header: `Cluster ${next.name} failed to start`,
-          content:
-            "LocalStack could not start the k3d cluster. Check LocalStack's logs and the k3d requirements below, then delete this cluster and create it again.",
+          content: `${providerLabelRef.current} could not start the cluster. Check its logs and the troubleshooting steps on this page, then delete this cluster and create it again.`,
         });
       }
     },
@@ -109,7 +121,10 @@ export function ClusterDetailPage({ descriptor }: ServicePageProps): ReactElemen
         setError(null);
       } catch (caught) {
         if (controller.signal.aborted) return;
-        setCluster(null);
+        // A silent poll failure must not blank the page: keeping the last good
+        // cluster is what lets polling continue through a transient upstream
+        // error during CREATING (LocalStack starts a real k3d cluster).
+        if (options.silent !== true) setCluster(null);
         setError(toApiError(caught));
       } finally {
         if (!controller.signal.aborted) setLoading(false);
@@ -117,6 +132,12 @@ export function ClusterDetailPage({ descriptor }: ServicePageProps): ReactElemen
     },
     [announce, clusterName],
   );
+
+  // The component instance can be reused for another cluster name; a status
+  // from the previous cluster must never count as its previous status.
+  useEffect(() => {
+    previousStatus.current = null;
+  }, [clusterName]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- cluster lookup for the route
@@ -128,9 +149,9 @@ export function ClusterDetailPage({ descriptor }: ServicePageProps): ReactElemen
 
   const transitional = cluster !== null && isClusterTransitional(cluster.status);
 
-  usePolling(transitional, POLL_INTERVAL_MS, () => {
-    void load({ silent: true });
-  });
+  // Returning the promise lets usePolling's busy guard skip a tick while the
+  // previous poll is still in flight.
+  usePolling(transitional, POLL_INTERVAL_MS, () => load({ silent: true }));
 
   const confirmDelete = async (): Promise<void> => {
     if (cluster === null) return;
@@ -141,7 +162,7 @@ export function ClusterDetailPage({ descriptor }: ServicePageProps): ReactElemen
       notify({
         type: 'info',
         header: `Deleting cluster ${cluster.name}`,
-        content: 'LocalStack is tearing down the k3d cluster.',
+        content: `${providerLabel} is tearing down the cluster.`,
       });
       setDeleteOpen(false);
       navigate(serviceConsolePath(descriptor.id));
@@ -301,7 +322,7 @@ export function ClusterDetailPage({ descriptor }: ServicePageProps): ReactElemen
                     id: 'update-version',
                     text: 'Update Kubernetes version',
                     disabled: true,
-                    disabledReason: UPDATE_VERSION_REASON,
+                    disabledReason: updateVersionReason(providerLabel),
                   },
                 ]}
                 onItemClick={() => undefined}
@@ -336,8 +357,8 @@ export function ClusterDetailPage({ descriptor }: ServicePageProps): ReactElemen
                   type="info"
                   header={`Cluster ${cluster.name} is ${cluster.status.toLowerCase()}`}
                 >
-                  LocalStack is {cluster.status === 'CREATING' ? 'starting' : 'updating'} a real k3d
-                  Kubernetes control plane in Docker. This can take several minutes. The page
+                  {providerLabel} is {cluster.status === 'CREATING' ? 'starting' : 'updating'} the
+                  cluster's Kubernetes control plane. This can take several minutes. The page
                   refreshes every 5 seconds and reports the result through notifications; you can
                   leave it and come back.
                 </Alert>
@@ -346,10 +367,10 @@ export function ClusterDetailPage({ descriptor }: ServicePageProps): ReactElemen
               {failed ? (
                 <Alert
                   type="error"
-                  header="LocalStack could not start this cluster"
+                  header={`${providerLabel} could not start this cluster`}
                   action={
                     <Button
-                      href={LOCALSTACK_SERVICES_DOCS_URL}
+                      href={DEFAULT_EMULATOR_DOCS_URL}
                       target="_blank"
                       external
                       iconAlign="right"
@@ -361,19 +382,19 @@ export function ClusterDetailPage({ descriptor }: ServicePageProps): ReactElemen
                 >
                   <SpaceBetween size="xs">
                     <Box variant="p">
-                      DescribeCluster reports the cluster as FAILED. LocalStack creates EKS clusters
-                      with k3d, so the failure is in the container infrastructure it manages — not
-                      in LocalDeck, and not something LocalDeck can repair for you.
+                      DescribeCluster reports the cluster as FAILED. The EKS provider creates the
+                      control plane in containers, so the failure is in the container infrastructure
+                      it manages — not in LocalDeck, and not something LocalDeck can repair for you.
                     </Box>
-                    <Box variant="p">Things to check in your LocalStack environment:</Box>
+                    <Box variant="p">Things to check in your {providerLabel} environment:</Box>
                     <ul style={{ margin: 0, paddingLeft: '20px' }}>
-                      {K3D_TROUBLESHOOTING.map((item) => (
+                      {providerTroubleshooting(providerLabel).map((item) => (
                         <li key={item}>{item}</li>
                       ))}
                     </ul>
                     <Box variant="p">
-                      Delete this cluster, fix the environment, and create it again. LocalStack logs
-                      contain the underlying k3d error.
+                      Delete this cluster, fix the environment, and create it again. The{' '}
+                      {providerLabel} logs contain the underlying error.
                     </Box>
                   </SpaceBetween>
                 </Alert>
@@ -422,7 +443,7 @@ export function ClusterDetailPage({ descriptor }: ServicePageProps): ReactElemen
           visible
           title={`Delete cluster ${cluster.name}`}
           subjects={[cluster.name]}
-          description={`Deleting a cluster removes its k3d control plane and every node group it owns. The cluster "${cluster.name}" cannot be recovered.`}
+          description={`Deleting a cluster removes its Kubernetes control plane and every node group it owns. The cluster "${cluster.name}" cannot be recovered.`}
           submitLabel="Delete"
           loading={deleting}
           {...(deleteError === null ? {} : { errorText: deleteError })}

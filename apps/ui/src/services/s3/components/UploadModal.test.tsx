@@ -92,4 +92,42 @@ describe('S3 UploadModal', () => {
     renderResult.unmount();
     expect(signals[0]?.aborted).toBe(true);
   });
+
+  it('cancels an in-progress upload and closes the dialog', async () => {
+    const signals: (AbortSignal | null | undefined)[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        (_input: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            signals.push(init?.signal);
+            init?.signal?.addEventListener('abort', () => {
+              reject(new DOMException('Aborted', 'AbortError'));
+            });
+          }),
+      ),
+    );
+    const onUploaded = vi.fn();
+    const onDismiss = vi.fn();
+    renderUploadModal(onUploaded, onDismiss);
+    const files = [new File(['a'], 'report.txt'), new File(['b'], 'second.txt')];
+    const input = document.querySelector('input[type="file"]');
+    if (input === null) throw new Error('file input missing');
+    fireEvent.change(input, { target: { files } });
+    fireEvent.click(screen.getByRole('button', { name: 'Upload' }));
+
+    await waitFor(() => {
+      expect(signals).toHaveLength(1);
+    });
+    // Cancel stays usable while the batch runs.
+    const cancel = screen.getByRole('button', { name: 'Cancel' });
+    expect(cancel.hasAttribute('disabled')).toBe(false);
+    fireEvent.click(cancel);
+
+    expect(signals[0]?.aborted).toBe(true);
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+    // Cancelled never reads as failure or success.
+    expect(onUploaded).not.toHaveBeenCalled();
+    expect(screen.queryByText('Some files were not uploaded')).toBeNull();
+  });
 });

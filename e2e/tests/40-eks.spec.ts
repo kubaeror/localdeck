@@ -28,6 +28,10 @@ test.describe('eks cluster creation', () => {
     page,
     request,
   }) => {
+    test.skip(
+      process.env.LOCALDECK_E2E_SKIP_EKS === '1',
+      'EKS creation is skipped in this matrix leg (LOCALDECK_E2E_SKIP_EKS=1).',
+    );
     test.setTimeout(600_000);
     const health = await fetchHealth(request);
 
@@ -37,16 +41,19 @@ test.describe('eks cluster creation', () => {
       test.info().annotations.push({
         type: 'localstack-eks',
         description:
-          'This LocalStack does not report EKS (an entitlement that includes EKS is required); the honest not-enabled page was asserted instead of a fake creation flow.',
+          'This emulator does not report EKS (an entitlement that includes EKS is required); the honest not-enabled page was asserted instead of a fake creation flow.',
       });
-      await expect(page.getByText('EKS is not enabled in this LocalStack instance')).toBeVisible();
+      const health = await fetchHealth(request);
+      await expect(
+        page.getByText(`EKS is not enabled in this ${health.provider.providerLabel} instance`),
+      ).toBeVisible();
       return;
     }
 
     // Fixtures follow the running api instead of hardcoding us-east-1 and the
     // LocalStack account id.
     const config = await fetchConfig(request);
-    const region = config.localstack.region;
+    const region = config.emulator.region;
     const accountId = await fetchAccountId(request);
     const cluster = uniqueName(`${E2E_RESOURCE_PREFIX}-cluster`);
     let submitted = false;

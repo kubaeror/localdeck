@@ -1,17 +1,18 @@
-import type { LocalStackServiceStatus } from '@localdeck/shared';
+import type { EmulatorServiceState } from '@localdeck/shared';
 import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import type { StatusIndicatorProps } from '@cloudscape-design/components/status-indicator';
 import type { ReactElement } from 'react';
 import { describeStatus, type ResourceStatus, type StatusName } from '../lib/format';
 
 const INDICATOR_TYPES: Readonly<Record<StatusName, StatusIndicatorProps.Type>> = {
-  // LocalStack service statuses
-  available: 'success',
+  // Emulator service states
+  enabled: 'success',
   starting: 'in-progress',
   error: 'error',
   disabled: 'stopped',
   unknown: 'info',
   // Resource lifecycle states
+  available: 'success',
   running: 'success',
   pending: 'in-progress',
   stopped: 'stopped',
@@ -32,7 +33,7 @@ const INDICATOR_TYPES: Readonly<Record<StatusName, StatusIndicatorProps.Type>> =
 
 export interface StatusBadgeProps {
   /** A LocalStack service status or an AWS resource lifecycle state. */
-  status: LocalStackServiceStatus | ResourceStatus;
+  status: EmulatorServiceState | ResourceStatus;
   /** Overrides the console wording, e.g. "Stopping (2 remaining)". */
   label?: string;
 }

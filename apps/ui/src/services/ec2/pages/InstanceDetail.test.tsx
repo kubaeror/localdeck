@@ -4,7 +4,7 @@ import { act } from 'react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FlashbarProvider } from '../../../contexts/FlashbarProvider';
-import { stubApiFetch } from '../../../test/fixtures';
+import { jsonResponse, stubApiFetch } from '../../../test/fixtures';
 import { InstanceDetailPage } from './InstanceDetail';
 
 const EC2_DESCRIPTOR = {
@@ -158,6 +158,79 @@ describe('EC2 InstanceDetailPage', () => {
       const tagsTab = screen.getByRole('tab', { name: 'Tags' });
       expect(tagsTab.getAttribute('aria-selected')).toBe('true');
       expect(screen.getByText(/Tags applied to the instance/)).toBeDefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the last known state and keeps polling when a background refresh fails', async () => {
+    vi.useFakeTimers();
+    try {
+      let describeCalls = 0;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: RequestInfo | URL) => {
+          if (String(input).includes('/api/services/ec2/DescribeInstances')) {
+            describeCalls += 1;
+            if (describeCalls > 1) {
+              return jsonResponse(
+                {
+                  error: {
+                    code: 'EMULATOR_UNREACHABLE',
+                    statusCode: 503,
+                    message: 'LocalStack is unreachable.',
+                  },
+                },
+                503,
+              );
+            }
+            return jsonResponse({
+              service: 'ec2',
+              operation: 'DescribeInstances',
+              result: {
+                Reservations: [
+                  {
+                    Instances: [
+                      {
+                        InstanceId: 'i-alpha',
+                        InstanceType: 't3.micro',
+                        State: { Name: 'pending' },
+                        Placement: { AvailabilityZone: 'us-east-1a' },
+                        Tags: [{ Key: 'Name', Value: 'alpha' }],
+                      },
+                    ],
+                  },
+                ],
+              },
+            });
+          }
+          return new Response('{}', { status: 404 });
+        }),
+      );
+
+      renderDetail();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(screen.getByRole('heading', { level: 1, name: /alpha/ })).toBeDefined();
+      expect(screen.getAllByText('Pending').length).toBeGreaterThan(0);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+
+      // The failed poll reported the error but kept the last known instance, so
+      // the page (and its transitional state) stayed on screen.
+      expect(describeCalls).toBe(2);
+      expect(screen.getByRole('heading', { level: 1, name: /alpha/ })).toBeDefined();
+      expect(screen.getAllByText('Pending').length).toBeGreaterThan(0);
+      expect(screen.getByText(/LocalStack is unreachable/)).toBeDefined();
+
+      // Polling continued because the last known state is still transitional.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      expect(describeCalls).toBe(3);
     } finally {
       vi.useRealTimers();
     }

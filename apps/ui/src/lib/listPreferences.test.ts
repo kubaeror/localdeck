@@ -19,6 +19,12 @@ describe('listPreferences', () => {
     });
   });
 
+  it('round-trips an explicitly empty visible content selection', () => {
+    writeListPreferences('buckets', { visibleContent: [] });
+
+    expect(readListPreferences('buckets')).toEqual({ visibleContent: [] });
+  });
+
   it('ignores malformed values instead of breaking the list page', () => {
     window.localStorage.setItem(
       'localdeck.list-preferences.buckets',

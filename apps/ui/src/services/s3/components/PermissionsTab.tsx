@@ -26,10 +26,11 @@ import {
   getPublicAccessBlock,
   putBucketPolicy,
   putPublicAccessBlock,
+  S3_PUBLIC_ACCESS_NONE,
   type S3PublicAccessState,
 } from '../api';
 import { toFriendlyS3Error } from '../errors';
-import { EXAMPLE_BUCKET_POLICY, validateBucketPolicy } from '../policy';
+import { buildExampleBucketPolicy, validateBucketPolicy } from '../policy';
 import { PublicAccessBlockSettings } from './PublicAccessBlockSettings';
 
 export interface PermissionsTabProps {
@@ -203,7 +204,11 @@ export function PermissionsTab({
     setPublicAccessError(null);
     try {
       await deletePublicAccessBlock(bucket);
-      setPublicAccess({ ...S3_PUBLIC_ACCESS_DEFAULTS, configured: false });
+      // No explicit configuration is every setting off, not the console's
+      // partial "defaults": showing those as 2-of-4 would contradict the
+      // "No explicit configuration" note and a Save would silently re-apply
+      // blocks the user just removed.
+      setPublicAccess({ ...S3_PUBLIC_ACCESS_NONE, configured: false });
       clearSettingsDraft();
       flashbar.notify({
         type: 'success',
@@ -467,7 +472,7 @@ export function PermissionsTab({
                 <Button
                   variant="inline-link"
                   onClick={() => {
-                    updatePolicyDraft(EXAMPLE_BUCKET_POLICY);
+                    updatePolicyDraft(buildExampleBucketPolicy(bucket));
                     setPolicyError(null);
                   }}
                 >

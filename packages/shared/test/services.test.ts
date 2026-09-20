@@ -4,14 +4,14 @@ import {
   SERVICE_CATEGORIES,
   browserOperationsFor,
   findService,
-  isServiceEmulated,
-  localStackKeysFor,
+  isServiceEnabled,
   resolveServiceStatus,
   serviceCategories,
+  serviceHealthKeys,
   serviceSearchText,
   summarizeRegistryCoverage,
 } from '../src/index.js';
-import type { LocalStackServiceStatus } from '../src/index.js';
+import type { EmulatorProviderId, EmulatorServiceState } from '../src/index.js';
 
 describe('service catalog', () => {
   it('has unique, route-safe ids', () => {
@@ -87,12 +87,19 @@ describe('service catalog', () => {
     );
   });
 
-  it('never lets two services claim the same LocalStack health key', () => {
-    const claimed = new Map<string, string>();
-    for (const service of SERVICE_CATALOG) {
-      for (const key of localStackKeysFor(service)) {
-        expect(claimed.has(key), `${key} is claimed twice`).toBe(false);
-        claimed.set(key, service.id);
+  it('never lets two services claim the same health key for a provider', () => {
+    const providers: readonly EmulatorProviderId[] = ['localstack', 'floci', 'ministack'];
+    for (const provider of providers) {
+      const claimed = new Map<string, string>();
+      for (const service of SERVICE_CATALOG) {
+        for (const key of serviceHealthKeys(service, provider)) {
+          const owner = claimed.get(key);
+          expect(
+            owner,
+            `${provider}: ${key} is claimed by ${owner} and ${service.id}`,
+          ).toBeUndefined();
+          claimed.set(key, service.id);
+        }
       }
     }
   });
@@ -214,45 +221,58 @@ describe('generic-browser pagination catalog', () => {
   });
 });
 
-describe('registry vs LocalStack health', () => {
-  const services: Record<string, LocalStackServiceStatus> = {
-    s3: 'available',
-    lambda: 'available',
-    elb: 'available',
-    es: 'available',
-    'timestream-write': 'available',
+describe('registry vs emulator health', () => {
+  const services: Record<string, EmulatorServiceState> = {
+    s3: 'enabled',
+    lambda: 'enabled',
+    elb: 'enabled',
+    es: 'enabled',
+    'timestream-write': 'enabled',
     dynamodb: 'disabled',
-    'not-in-registry': 'available',
+    'not-in-registry': 'enabled',
   };
 
   it('matches services by id and by health-key alias', () => {
-    const expectStatus = (id: string, status: LocalStackServiceStatus | undefined): void => {
+    const expectStatus = (id: string, status: EmulatorServiceState | undefined): void => {
       const service = findService(id);
       if (service === undefined) throw new Error(`${id} must be registered`);
-      expect(resolveServiceStatus(service, services)).toBe(status);
+      expect(resolveServiceStatus(service, services, 'localstack')).toBe(status);
     };
 
-    expectStatus('s3', 'available');
+    expectStatus('s3', 'enabled');
     expectStatus('dynamodb', 'disabled');
     // Aliases: ELB reports as elb, OpenSearch as es, Timestream as timestream-write.
-    expectStatus('elbv2', 'available');
-    expectStatus('opensearch', 'available');
-    expectStatus('timestream', 'available');
-    // Registered but not reported by this LocalStack: the sidebar greys it out.
+    expectStatus('elbv2', 'enabled');
+    expectStatus('opensearch', 'enabled');
+    expectStatus('timestream', 'enabled');
+    // Registered but not reported by this emulator: the sidebar greys it out.
     expectStatus('ec2', undefined);
 
     const ec2 = findService('ec2');
     if (ec2 === undefined) throw new Error('ec2 must be registered');
-    expect(isServiceEmulated(ec2, services)).toBe(false);
+    expect(isServiceEnabled(ec2, services, 'localstack')).toBe(false);
   });
 
   it('summarizes how much of the emulator the registry covers', () => {
-    const coverage = summarizeRegistryCoverage(services);
+    const coverage = summarizeRegistryCoverage(services, SERVICE_CATALOG, 'localstack');
 
+    expect(coverage.provider).toBe('localstack');
     expect(coverage.registered).toBe(SERVICE_CATALOG.length);
-    expect(coverage.emulated).toBe(SERVICE_CATALOG.length - coverage.notEmulated.length);
+    expect(coverage.emulated + coverage.disabled + coverage.notEmulated.length).toBe(
+      SERVICE_CATALOG.length,
+    );
+    expect(coverage.disabled).toBe(1);
     expect(coverage.notEmulated).toContain('ec2');
     expect(coverage.notEmulated).not.toContain('s3');
     expect(coverage.unregistered).toEqual(['not-in-registry']);
+  });
+
+  it('resolves provider aliases against canonical states', () => {
+    const floci = findService('cloudwatch');
+    if (floci === undefined) throw new Error('cloudwatch must be registered');
+    expect(resolveServiceStatus(floci, { monitoring: 'enabled' }, 'floci')).toBe('enabled');
+    expect(resolveServiceStatus(floci, { monitoring: 'disabled' }, 'floci')).toBe('disabled');
+    // The same key means something else under LocalStack's vocabulary.
+    expect(resolveServiceStatus(floci, { monitoring: 'enabled' }, 'localstack')).toBeUndefined();
   });
 });

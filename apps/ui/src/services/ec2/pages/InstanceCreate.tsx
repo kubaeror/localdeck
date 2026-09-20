@@ -22,7 +22,7 @@ import Toggle from '@cloudscape-design/components/toggle';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { CreateWizard } from '../../../components/CreateWizard';
-import { TagsEditor } from '../../../components/TagsEditor';
+import { TagsEditor, validateTags } from '../../../components/TagsEditor';
 import { useFlashbar } from '../../../hooks/useFlashbar';
 import { serviceConsolePath } from '../../paths';
 import type { ServicePageProps } from '../../types';
@@ -38,6 +38,7 @@ import {
   listVpcs,
   newClientToken,
   runInstances,
+  tagLaunchedVolumes,
   type CreatedEc2KeyPair,
   type Ec2Image,
   type Ec2InstanceType,
@@ -71,6 +72,14 @@ const VOLUME_TYPES: readonly SelectProps.Option[] = [
   { label: 'standard (Magnetic, previous generation)', value: 'standard' },
 ];
 
+/**
+ * EBS only allows SSD types as a root volume: gp2/gp3/io1/io2. HDD (st1/sc1)
+ * and standard magnetic volumes can only be attached as data volumes.
+ */
+const ROOT_VOLUME_TYPES: readonly SelectProps.Option[] = VOLUME_TYPES.filter((option) =>
+  ['gp2', 'gp3', 'io1', 'io2'].includes(option.value ?? ''),
+);
+
 const OWNER_SCOPES: readonly SelectProps.Option[] = [
   { label: 'Amazon images', value: 'amazon' },
   { label: 'Owned by me', value: 'self' },
@@ -83,6 +92,8 @@ const TYPE_PAGE_SIZE = 15;
 interface ExtraVolume {
   rowId: number;
   deviceName: string;
+  /** Optional `Name` tag applied to this volume after the launch. */
+  name: string;
   sizeGiB: number;
   volumeType: string;
   /** Only set for volume types that take an explicit IOPS value. */
@@ -420,6 +431,9 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
   const meaningfulTags = tags.filter(
     (tag) => tag.Key.trim().length > 0 || tag.Value.trim().length > 0,
   );
+  const tagProblems = validateTags(tags);
+  const tagsProblem =
+    tagProblems.length === 0 ? null : tagProblems.map((problem) => problem.message).join(' ');
 
   const rootDeviceName = selectedImage?.rootDeviceName ?? '/dev/sda1';
   const rootSize = Number.parseInt(rootSizeGiB, 10);
@@ -484,6 +498,12 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
 
   const submit = async (): Promise<void> => {
     if (submitting) return;
+    if (tagsProblem !== null) {
+      // The button is gated by the wizard's step validation; this guard keeps
+      // a programmatic submit from sending invalid tags.
+      setActiveStepIndex(0);
+      return;
+    }
     setSubmitting(true);
     setError(null);
 
@@ -517,12 +537,6 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
         ...(selectedSubnet?.availabilityZone === undefined
           ? {}
           : { availabilityZone: selectedSubnet.availabilityZone }),
-        volumeTags: [
-          {
-            Key: 'Name',
-            Value: `${name.trim().length === 0 ? 'instance' : name.trim()}-root`,
-          },
-        ],
         blockDevices: [
           {
             deviceName: rootDeviceName,
@@ -542,6 +556,31 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
           })),
         ],
       });
+
+      // RunInstances can only carry one volume `Tags` list for every device,
+      // so the wizard names the volumes afterwards from the returned block
+      // device mappings. Tagging is best-effort: a failure is reported but
+      // never turns a successful launch into an error.
+      const tagFailures = await tagLaunchedVolumes({
+        instance,
+        instanceName: name,
+        additionalVolumes: extraVolumes.map((volume) => ({
+          deviceName: volume.deviceName,
+          ...(volume.name.trim().length === 0 ? {} : { name: volume.name.trim() }),
+        })),
+      });
+      if (tagFailures.length > 0) {
+        flashbar.notify({
+          type: 'warning',
+          header: 'Instance launched, but some volume names were not applied',
+          content: tagFailures
+            .map(
+              (failure) =>
+                `${failure.deviceName} (${failure.volumeId}) could not be tagged: ${failure.message}`,
+            )
+            .join(' '),
+        });
+      }
 
       flashbar.notify({
         type: 'info',
@@ -1074,15 +1113,7 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
         <SpaceBetween size="m">
           <Box variant="h3">Root volume ({rootDeviceName})</Box>
           <SpaceBetween direction="horizontal" size="m">
-            <FormField
-              label="Size (GiB)"
-              errorText={rootStorageProblem ?? undefined}
-              constraintText={
-                rootVolumeType === 'st1' || rootVolumeType === 'sc1'
-                  ? 'st1/sc1 volumes start at 125 GiB.'
-                  : undefined
-              }
-            >
+            <FormField label="Size (GiB)" errorText={rootStorageProblem ?? undefined}>
               <Input
                 value={rootSizeGiB}
                 inputMode="numeric"
@@ -1095,9 +1126,9 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
             <FormField label="Volume type">
               <Select
                 selectedOption={
-                  volumeTypeOptions.find((option) => option.value === rootVolumeType) ?? null
+                  ROOT_VOLUME_TYPES.find((option) => option.value === rootVolumeType) ?? null
                 }
-                options={volumeTypeOptions}
+                options={[...ROOT_VOLUME_TYPES]}
                 ariaLabel="Root volume type"
                 onChange={({ detail }) => {
                   selectRootVolumeType(detail.selectedOption.value ?? 'gp3');
@@ -1151,6 +1182,24 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
                 header: 'Device name',
                 isRowHeader: true,
                 cell: (volume) => <Box variant="code">{volume.deviceName}</Box>,
+              },
+              {
+                id: 'name',
+                header: 'Name',
+                cell: (volume) => (
+                  <Input
+                    value={volume.name}
+                    placeholder="data-volume"
+                    ariaLabel={`Name of ${volume.deviceName}`}
+                    onChange={({ detail }) => {
+                      setExtraVolumes((current) =>
+                        current.map((entry) =>
+                          entry.rowId === volume.rowId ? { ...entry, name: detail.value } : entry,
+                        ),
+                      );
+                    }}
+                  />
+                ),
               },
               {
                 id: 'size',
@@ -1305,6 +1354,7 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
                 {
                   rowId: nextRowId.current++,
                   deviceName: next,
+                  name: '',
                   sizeGiB: 8,
                   volumeType: 'gp3',
                   iops: defaultVolumePerformance('gp3').iops,
@@ -1407,7 +1457,7 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
             id: 'name',
             title: 'Name and tags',
             description: 'Name the instance and add tags.',
-            validate: () => nameProblem,
+            validate: () => nameProblem ?? tagsProblem,
             content: nameStep,
           },
           {
@@ -1470,7 +1520,7 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
           { label: 'Service', value: descriptor.displayName },
           { label: 'Name', value: name.trim().length === 0 ? '—' : name },
           { label: 'AMI', value: selectedImage?.name ?? imageId ?? '—' },
-          { label: 'Instance type', value: instanceType },
+          { label: 'Instance type', value: effectiveInstanceType },
           {
             label: 'Key pair',
             value:

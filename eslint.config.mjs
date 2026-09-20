@@ -57,6 +57,7 @@ export default tseslint.config(
     // available here, and Node globals are not available in apps/ui.
     files: [
       'apps/api/**/*.{ts,tsx}',
+      'apps/console/**/*.{ts,tsx}',
       'packages/**/*.{ts,tsx}',
       'e2e/**/*.{ts,tsx}',
       'scripts/**/*.{ts,tsx,mjs,js}',
@@ -72,6 +73,7 @@ export default tseslint.config(
     // they are executed by tsx and are not part of a tsconfig project.
     files: [
       'apps/api/**/*.{ts,tsx}',
+      'apps/console/**/*.{ts,tsx}',
       'apps/ui/**/*.{ts,tsx}',
       'packages/**/*.{ts,tsx}',
       'e2e/**/*.{ts,tsx}',

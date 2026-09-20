@@ -4,7 +4,7 @@
  * the ui can render a consistent error state instead of a raw stack trace.
  */
 export interface ApiError {
-  /** Stable, machine-readable code, e.g. LOCALSTACK_UNREACHABLE. */
+  /** Stable, machine-readable code, e.g. EMULATOR_UNREACHABLE. */
   code: string;
   /** Human-readable, safe-to-display message (never contains credentials). */
   message: string;
@@ -31,9 +31,19 @@ export const ApiErrorCodes = {
   methodNotAllowed: 'METHOD_NOT_ALLOWED',
   validationFailed: 'VALIDATION_FAILED',
   badGateway: 'BAD_GATEWAY',
+  /** The configured local emulator could not be reached at all. */
+  emulatorUnreachable: 'EMULATOR_UNREACHABLE',
+  /** The emulator answered its health endpoint with an unexpected document. */
+  emulatorInvalidResponse: 'EMULATOR_INVALID_RESPONSE',
+  /** The emulator accepted the connection but did not answer in time. */
+  emulatorTimeout: 'EMULATOR_TIMEOUT',
+  /** The emulator implements the service but not this operation. */
+  emulatorOperationUnsupported: 'EMULATOR_OPERATION_UNSUPPORTED',
+  /** @deprecated Renamed to emulatorUnreachable. */
   localstackUnreachable: 'LOCALSTACK_UNREACHABLE',
+  /** @deprecated Renamed to emulatorInvalidResponse. */
   localstackInvalidResponse: 'LOCALSTACK_INVALID_RESPONSE',
-  /** LocalStack accepted the connection but did not answer in time. */
+  /** @deprecated Renamed to emulatorTimeout. */
   localstackTimeout: 'LOCALSTACK_TIMEOUT',
   /** The caller went away (or Fastify's handler timeout aborted the request). */
   requestAborted: 'REQUEST_ABORTED',

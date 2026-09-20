@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   describeNetworkFailure,
   findNetworkErrorCode,
-  LocalStackUnreachableProblem,
+  EmulatorUnreachableProblem,
+  isUnsupportedOperationError,
   toApiError,
 } from '../src/lib/errors.js';
 
@@ -27,13 +28,13 @@ function awsSdkError(
 
 describe('toApiError', () => {
   it('keeps ApiProblem errors intact', () => {
-    const problem = new LocalStackUnreachableProblem({
+    const problem = new EmulatorUnreachableProblem({
       endpoint: 'http://localhost:4566',
       reason: 'connection failed (ECONNREFUSED)',
     });
 
     const apiError = toApiError(problem);
-    expect(apiError.code).toBe('LOCALSTACK_UNREACHABLE');
+    expect(apiError.code).toBe('EMULATOR_UNREACHABLE');
     expect(apiError.statusCode).toBe(503);
     expect(apiError.details?.['endpoint']).toBe('http://localhost:4566');
   });
@@ -82,7 +83,7 @@ describe('toApiError', () => {
     );
 
     const apiError = toApiError(timeout, { endpoint: 'http://localhost:4566' });
-    expect(apiError.code).toBe('LOCALSTACK_TIMEOUT');
+    expect(apiError.code).toBe('EMULATOR_TIMEOUT');
     expect(apiError.statusCode).toBe(504);
     expect(apiError.message).toContain('did not finish');
   });
@@ -94,7 +95,7 @@ describe('toApiError', () => {
     );
 
     const apiError = toApiError(connectTimeout, { endpoint: 'http://localhost:4566' });
-    expect(apiError.code).toBe('LOCALSTACK_UNREACHABLE');
+    expect(apiError.code).toBe('EMULATOR_UNREACHABLE');
     expect(apiError.statusCode).toBe(503);
   });
 
@@ -116,7 +117,7 @@ describe('toApiError', () => {
     });
 
     const apiError = toApiError(aborted);
-    expect(apiError.code).toBe('LOCALSTACK_TIMEOUT');
+    expect(apiError.code).toBe('EMULATOR_TIMEOUT');
     expect(apiError.statusCode).toBe(504);
   });
 
@@ -131,7 +132,7 @@ describe('toApiError', () => {
     expect(apiError.details?.['reason']).toBe('sdk-input-serialization');
   });
 
-  it('maps Fastify handler timeouts to 504 LOCALSTACK_TIMEOUT', () => {
+  it('maps Fastify handler timeouts to 504 EMULATOR_TIMEOUT', () => {
     const handlerTimeout = Object.assign(
       new Error("Request timed out after 30000 ms on route '/'"),
       {
@@ -141,17 +142,17 @@ describe('toApiError', () => {
     );
 
     const apiError = toApiError(handlerTimeout, { endpoint: 'http://localhost:4566' });
-    expect(apiError.code).toBe('LOCALSTACK_TIMEOUT');
+    expect(apiError.code).toBe('EMULATOR_TIMEOUT');
     expect(apiError.statusCode).toBe(504);
   });
 
-  it('maps connection failures to 503 LOCALSTACK_UNREACHABLE with the endpoint', () => {
+  it('maps connection failures to 503 EMULATOR_UNREACHABLE with the endpoint', () => {
     const refused = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:4566'), {
       code: 'ECONNREFUSED',
     });
 
     const apiError = toApiError(refused, { endpoint: 'http://localhost:4566' });
-    expect(apiError.code).toBe('LOCALSTACK_UNREACHABLE');
+    expect(apiError.code).toBe('EMULATOR_UNREACHABLE');
     expect(apiError.statusCode).toBe(503);
     expect(apiError.message).toContain('http://localhost:4566');
     expect(apiError.details?.['reason']).toBe('ECONNREFUSED');
@@ -163,7 +164,7 @@ describe('toApiError', () => {
     });
 
     expect(findNetworkErrorCode(nested)).toBe('ECONNREFUSED');
-    expect(toApiError(nested).code).toBe('LOCALSTACK_UNREACHABLE');
+    expect(toApiError(nested).code).toBe('EMULATOR_UNREACHABLE');
   });
 
   it('describes undici connection failures instead of the generic "fetch failed"', () => {
@@ -226,5 +227,45 @@ describe('toApiError', () => {
     expect(apiError.code).toBe('INTERNAL_ERROR');
     expect(apiError.statusCode).toBe(500);
     expect(apiError.message).not.toContain('hunter2');
+  });
+
+  it('names the pinned provider in unreachable copy', () => {
+    const apiError = toApiError(
+      Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }),
+      { endpoint: 'http://localhost:4566', emulatorLabel: 'MiniStack' },
+    );
+
+    expect(apiError.code).toBe('EMULATOR_UNREACHABLE');
+    expect(apiError.message).toContain('MiniStack');
+  });
+
+  it('maps emulator "not implemented" failures to EMULATOR_OPERATION_UNSUPPORTED', () => {
+    const notImplemented = Object.assign(new Error('This operation is not implemented yet'), {
+      name: 'NotImplementedException',
+      $fault: 'server',
+      $metadata: { httpStatusCode: 501 },
+    });
+
+    const apiError = toApiError(notImplemented, { service: 'glue', operation: 'StartJobRun' });
+    expect(apiError.code).toBe('EMULATOR_OPERATION_UNSUPPORTED');
+    expect(apiError.statusCode).toBe(501);
+    expect(apiError.message).toContain('glue');
+    expect(apiError.message).toContain('StartJobRun');
+    expect(apiError.details?.['operation']).toBe('StartJobRun');
+  });
+
+  it('recognizes unsupported-operation failures by name, status and message', () => {
+    expect(isUnsupportedOperationError({ httpStatusCode: 501 })).toBe(true);
+    expect(
+      isUnsupportedOperationError(Object.assign(new Error('x'), { name: 'NotImplemented' })),
+    ).toBe(true);
+    expect(
+      isUnsupportedOperationError(new Error('Unsupported operation: DeleteBucketPolicy')),
+    ).toBe(true);
+    expect(
+      isUnsupportedOperationError(new Error('the service is disabled in this configuration')),
+    ).toBe(true);
+    expect(isUnsupportedOperationError(new Error('NoSuchBucket'))).toBe(false);
+    expect(isUnsupportedOperationError(new TypeError('bad input'))).toBe(false);
   });
 });

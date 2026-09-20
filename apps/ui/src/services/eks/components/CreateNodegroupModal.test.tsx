@@ -96,6 +96,61 @@ async function fillRequiredFields(): Promise<void> {
   });
 }
 
+/**
+ * Answers CreateNodegroup only after `release()` is called, so a test can
+ * click Create while the first request is still in flight.
+ */
+function stubDeferredCreate(): { calls: Call[]; release: () => void } {
+  const calls: Call[] = [];
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let held = false;
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const match = /\/api\/services\/([^/?]+)\/([^/?]+)/.exec(url);
+    if (match === null) return new Response('{}', { status: 404 });
+    const service = match[1] ?? '';
+    const operation = match[2] ?? '';
+    const body =
+      init?.body === undefined
+        ? {}
+        : (JSON.parse(String(init.body)) as { input?: Record<string, unknown> });
+    calls.push({ service, operation, input: body.input ?? {} });
+    if (service === 'ec2' && operation === 'DescribeInstanceTypes') {
+      return new Response(
+        JSON.stringify({
+          service,
+          operation,
+          result: { InstanceTypes: [{ InstanceType: 't3.medium' }] },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }
+    if (service === 'iam' && operation === 'ListRoles') {
+      return new Response(JSON.stringify({ service, operation, result: { Roles: [] } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (service === 'eks' && operation === 'CreateNodegroup' && !held) {
+      held = true;
+      await gate;
+    }
+    return new Response(
+      JSON.stringify({
+        service,
+        operation,
+        result: { nodegroup: { nodegroupName: 'ng-workers', status: 'CREATING' } },
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  return { calls, release };
+}
+
 describe('EKS CreateNodegroupModal', () => {
   afterEach(() => {
     cleanup();
@@ -195,6 +250,22 @@ describe('EKS CreateNodegroupModal', () => {
     );
     await waitFor(() => {
       expect(screen.queryAllByText('subnet-9').length).toBeGreaterThan(0);
+    });
+  }, 20_000);
+
+  it('dispatches one CreateNodegroup when Create is double-clicked', async () => {
+    const { calls, release } = stubDeferredCreate();
+    const { onCreated } = renderModal();
+    await fillRequiredFields();
+
+    const create = screen.getByRole('button', { name: 'Create' });
+    fireEvent.click(create);
+    fireEvent.click(create);
+
+    expect(calls.filter((entry) => entry.operation === 'CreateNodegroup')).toHaveLength(1);
+    release();
+    await waitFor(() => {
+      expect(onCreated).toHaveBeenCalledTimes(1);
     });
   }, 20_000);
 });

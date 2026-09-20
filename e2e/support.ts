@@ -24,7 +24,8 @@ function readPort(name: string, fallback: number): number {
 
 export const API_PORT = readPort('E2E_API_PORT', 3001);
 export const UI_PORT = readPort('E2E_UI_PORT', 5173);
-export const LOCALSTACK_ENDPOINT = process.env.LOCALSTACK_ENDPOINT ?? 'http://localhost:4566';
+export const LOCALSTACK_ENDPOINT =
+  process.env.EMULATOR_ENDPOINT ?? process.env.LOCALSTACK_ENDPOINT ?? 'http://localhost:4566';
 
 export const API_ORIGIN = `http://127.0.0.1:${API_PORT}`;
 export const UI_ORIGIN = `http://127.0.0.1:${UI_PORT}`;

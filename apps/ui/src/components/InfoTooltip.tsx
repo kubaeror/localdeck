@@ -24,8 +24,10 @@ export function InfoTooltip({ content, children, className }: InfoTooltipProps):
     <>
       <span
         ref={triggerRef}
-        // Focusable so keyboard users can reach the explanation.
-        tabIndex={0}
+        // Not in the tab order: sidebar badges can number in the hundreds and
+        // would each add a focus stop. The explanation stays reachable on
+        // hover, and the badge text/aria-label carry the same information.
+        tabIndex={-1}
         className={className}
         aria-label={typeof content === 'string' ? content : undefined}
         aria-describedby={isOpen ? tooltipId : undefined}

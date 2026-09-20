@@ -1,17 +1,17 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { LocalStackStatusProvider } from './LocalStackStatusProvider';
-import { useLocalStackStatus } from '../hooks/useLocalStackStatus';
+import { EmulatorStatusProvider } from './EmulatorStatusProvider';
+import { useEmulatorStatus } from '../hooks/useEmulatorStatus';
 import { jsonResponse, TEST_CONFIG, TEST_HEALTH, TEST_REGISTRY } from '../test/fixtures';
 
 function Consumer(): ReactElement {
-  const status = useLocalStackStatus();
+  const status = useEmulatorStatus();
   return (
     <div>
       <span data-testid="phase">{status.phase}</span>
-      <span data-testid="endpoint">{status.config?.localstack.endpoint ?? ''}</span>
-      <span data-testid="version">{status.health?.localstack.version ?? ''}</span>
+      <span data-testid="endpoint">{status.config?.emulator.endpoint ?? ''}</span>
+      <span data-testid="version">{status.health?.emulator.version ?? ''}</span>
       <button
         onClick={() => {
           status.refresh();
@@ -25,13 +25,13 @@ function Consumer(): ReactElement {
 
 function renderProvider(): void {
   render(
-    <LocalStackStatusProvider>
+    <EmulatorStatusProvider>
       <Consumer />
-    </LocalStackStatusProvider>,
+    </EmulatorStatusProvider>,
   );
 }
 
-describe('LocalStackStatusProvider', () => {
+describe('EmulatorStatusProvider', () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
   });
@@ -69,7 +69,7 @@ describe('LocalStackStatusProvider', () => {
         return jsonResponse(
           {
             error: {
-              code: 'LOCALSTACK_UNREACHABLE',
+              code: 'EMULATOR_UNREACHABLE',
               statusCode: 503,
               message: 'LocalStack is unreachable at http://localhost:4566.',
             },

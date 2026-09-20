@@ -87,6 +87,8 @@ jobs:
             dockerfile: apps/api/Dockerfile
           - image: ui
             dockerfile: apps/ui/Dockerfile
+          - image: console
+            dockerfile: apps/console/Dockerfile
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -107,51 +109,70 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}-ci
 
   smoke:
-    name: Smoke (Playwright + CI LocalStack)
+    name: Smoke (Playwright + ${{ matrix.emulator }})
     runs-on: ubuntu-latest
     needs: checks
     timeout-minutes: 40
-
-    # The one and only place LocalDeck ever spins up LocalStack: a throwaway
-    # service container for this job. It never touches your own instance.
-    #
-    # The default image is the last release published before LocalStack's
-    # unified-image licensing change (2026.03.0 now requires an auth token to
-    # start, even in CI), so a fresh clone's pipeline is green without secrets.
-    # Maintainers can point `vars.LOCALSTACK_IMAGE` at a current image and set
-    # the `LOCALSTACK_AUTH_TOKEN` secret (a CI auth token from a LocalStack
-    # account) to smoke-test licensed services. The expression below keeps
-    # pull requests from forks on the free default image, because repository
-    # variables are visible to fork builds while secrets are not.
-    #
-    # `eks` is intentionally absent from SERVICES: the free default image has no
-    # EKS entitlement, so the EKS spec asserts the console's honest
-    # "not enabled" page instead. Add `eks` to SERVICES (and set the image +
-    # token above) to exercise the licensed path locally or in a maintainer run.
-    # The Docker socket mount matches the prerequisites documented for EKS.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The one and only place LocalDeck ever spins up emulators: throwaway
+          # service containers for this job. They never touch your own instance.
+          #
+          # LocalStack: the default image is the last release published before
+          # LocalStack's unified-image licensing change (2026.03.0 now requires
+          # an auth token to start, even in CI), so a fresh clone's pipeline is
+          # green without secrets. Maintainers can point `vars.LOCALSTACK_IMAGE`
+          # at a current image and set the `LOCALSTACK_AUTH_TOKEN` secret to
+          # smoke-test licensed services; the expression below keeps pull
+          # requests from forks on the free default image. `eks` is
+          # intentionally absent from SERVICES: the free default image has no
+          # EKS entitlement, so the EKS spec asserts the console's honest
+          # "not enabled" page instead.
+          - emulator: localstack
+            image: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) && 'localstack/localstack:4.14.0' || vars.LOCALSTACK_IMAGE || 'localstack/localstack:4.14.0' }}
+            services: s3,ec2,iam,sts,sns,sqs,dynamodb,lambda,logs,events,kms,ssm,secretsmanager,cloudformation,ecr,ecs
+            skip-eks: '0'
+          # MiniStack: MIT, no auth token, same 4566 contract (health at
+          # /_ministack/health and /_localstack/health). SERVICES filters the
+          # enabled handlers. EKS is skipped: its k3s container is Docker-heavy
+          # and the EKS path is covered by the LocalStack leg.
+          - emulator: ministack
+            image: ministackorg/ministack:latest
+            services: s3,ec2,iam,sts,sns,sqs,dynamodb,logs,events,kms,ssm,secretsmanager,cloudformation,ecr,ecs
+            skip-eks: '1'
+          # Floci: MIT, no auth token, LocalStack-parity health at /_floci/health
+          # and /_localstack/health. Its status vocabulary is inverted
+          # (running = enabled), which is exactly what the provider adapter
+          # normalizes; the matrix proves it end to end.
+          - emulator: floci
+            image: floci/floci:latest
+            services: ''
+            skip-eks: '1'
     services:
-      localstack:
-        image: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork) && 'localstack/localstack:4.14.0' || vars.LOCALSTACK_IMAGE || 'localstack/localstack:4.14.0' }}
+      emulator:
+        image: ${{ matrix.image }}
         ports:
           - 4566:4566
         env:
-          # Fork pull requests never receive repository secrets, so this is
-          # already empty there; the image expression above is the other half
-          # of the gate.
+          # Only the LocalStack image reads this; Floci and MiniStack ignore it.
+          # Fork pull requests never receive the secret, which is fine because
+          # the fork image expression above uses the free default image.
           LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_AUTH_TOKEN }}
-          SERVICES: s3,ec2,iam,sts,sns,sqs,dynamodb,lambda,logs,events,kms,ssm,secretsmanager,cloudformation,ecr,ecs
+          SERVICES: ${{ matrix.services }}
           DEBUG: '0'
           PERSISTENCE: '0'
+        # No --health-cmd: the LocalStack, Floci and MiniStack images ship
+        # different (or no) HTTP clients, so a curl-based check never turns
+        # healthy on Floci/MiniStack. The explicit readiness step below polls
+        # /_localstack/health with retries instead.
         options: >-
-          --health-cmd "curl -sf http://localhost:4566/_localstack/health || exit 1"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 30
-          --health-start-period 30s
           --volume /var/run/docker.sock:/var/run/docker.sock
 
     env:
-      LOCALSTACK_ENDPOINT: http://localhost:4566
+      EMULATOR_ENDPOINT: http://localhost:4566
+      LOCALDECK_E2E_SKIP_EKS: ${{ matrix.skip-eks }}
       AWS_REGION: us-east-1
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test
@@ -175,8 +196,9 @@ jobs:
         uses: actions/cache@v6
         with:
           path: .turbo
-          key: turbo-${{ runner.os }}-smoke-${{ hashFiles('turbo.json', 'pnpm-lock.yaml') }}
+          key: turbo-${{ runner.os }}-smoke-${{ matrix.emulator }}-${{ hashFiles('turbo.json', 'pnpm-lock.yaml') }}
           restore-keys: |
+            turbo-${{ runner.os }}-smoke-${{ matrix.emulator }}-
             turbo-${{ runner.os }}-smoke-
 
       - name: Cache the Playwright browsers
@@ -193,10 +215,10 @@ jobs:
       - name: Build shared types, api and ui
         run: pnpm build
 
-      - name: Confirm the CI LocalStack service container is reachable
+      - name: Confirm the CI emulator service container is reachable
         run: |
-          curl --fail --silent --retry 10 --retry-connrefused \
-            "${LOCALSTACK_ENDPOINT}/_localstack/health" | head -c 400
+          curl --fail --silent --retry 10 --retry-connrefused --retry-all-errors \
+            "${EMULATOR_ENDPOINT}/_localstack/health" | head -c 400
           echo
 
       - name: Install the Playwright browser
@@ -215,11 +237,75 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-report
+          name: playwright-report-${{ matrix.emulator }}
           path: |
             e2e/playwright-report/
             e2e/test-results/
           retention-days: 7
+
+  sidecar-smoke:
+    name: Sidecar smoke (Floci + console image)
+    runs-on: ubuntu-latest
+    needs: checks
+    timeout-minutes: 30
+
+    # Proves the Floci Console Contract v1 sidecar: the single console image
+    # serves the app and /api/health against a Floci container, with no
+    # LocalDeck api/ui containers involved.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build the console image
+        run: |
+          docker build -f apps/console/Dockerfile -t localdeck/console:ci --build-arg APP_VERSION=ci-${{ github.sha }} .
+
+      - name: Start Floci and the console on a shared network
+        run: |
+          docker network create localdeck-sidecar
+          docker run --detach --name floci --network localdeck-sidecar             -p 4566:4566 floci/floci:latest
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:4566/_floci/health >/dev/null; then
+              echo "Floci is healthy after ${attempt} attempt(s)"
+              break
+            fi
+            sleep 2
+          done
+          docker run --detach --name console --network localdeck-sidecar             -p 4500:4500             -e AWS_ENDPOINT_URL=http://floci:4566             -e AWS_ACCESS_KEY_ID=test             -e AWS_SECRET_ACCESS_KEY=test             localdeck/console:ci
+
+      - name: Assert the contract health shape and labels
+        run: |
+          for attempt in $(seq 1 60); do
+            body="$(curl --silent http://127.0.0.1:4500/api/health || true)"
+            status="$(printf '%s' "${body}" | jq -r '.status // empty' 2>/dev/null || true)"
+            if [ "${status}" = "ok" ]; then
+              printf '%s' "${body}" | jq -e '.endpoint and .console.name == "LocalDeck" and .provider.providerLabel' >/dev/null
+              echo "console contract health is ok: $(printf '%s' "${body}" | jq -c '{status, provider: .provider.providerLabel, services: .emulator.counts.enabled}')"
+              break
+            fi
+            if [ "${attempt}" = "60" ]; then
+              echo "::error::the console never reported status ok"
+              printf '%s' "${body}"
+              exit 1
+            fi
+            sleep 2
+          done
+          docker inspect --format '{{ index .Config.Labels "io.floci.console.contract" }}' console | grep -qx '1'
+          docker inspect --format '{{ index .Config.Labels "io.floci.console.health-path" }}' console | grep -qx '/api/health'
+          echo "contract labels are present"
+
+      - name: Exercise an S3 flow through the sidecar
+        run: |
+          curl --fail --silent --show-error -X POST             http://127.0.0.1:4500/api/services/s3/CreateBucket             -H 'content-type: application/json' -d '{"input":{"Bucket":"sidecar-smoke"}}' >/dev/null
+          curl --fail --silent --show-error -X POST             http://127.0.0.1:4500/api/services/s3/ListBuckets             -H 'content-type: application/json' -d '{"input":{}}'             | jq -e '.result.Buckets | map(.Name) | index("sidecar-smoke") != null' >/dev/null
+          curl --fail --silent http://127.0.0.1:4500/ | grep -q '<div id="root">'
+          echo "the sidecar serves the SPA and proxies S3"
+
+      - name: Stop the sidecar stack
+        if: always()
+        run: |
+          docker rm --force console floci || true
+          docker network rm localdeck-sidecar || true
 
   container-smoke:
     name: Container smoke (compose nginx, upload >1 MiB)

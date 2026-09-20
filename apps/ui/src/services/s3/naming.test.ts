@@ -53,10 +53,23 @@ describe('regions', () => {
 });
 
 describe('keys and prefixes', () => {
-  it('validates object keys', () => {
+  it('validates object keys by UTF-8 byte length, not code units', () => {
     expect(validateObjectKey('folder/object.txt')).toBeNull();
     expect(validateObjectKey('   ')).toBe('Enter an object key.');
-    expect(validateObjectKey('a'.repeat(1025))).toContain('1024 characters');
+    expect(validateObjectKey('a'.repeat(1024))).toBeNull();
+    expect(validateObjectKey('a'.repeat(1025))).toContain('1024 UTF-8 bytes');
+    // 300 emoji are 1200 UTF-8 bytes but only 600 UTF-16 code units.
+    expect(validateObjectKey('🎉'.repeat(300))).toContain('1024 UTF-8 bytes');
+    expect(validateObjectKey('🎉'.repeat(256))).toBeNull();
+  });
+
+  it('rejects dot and dot-dot path segments the api would refuse', () => {
+    expect(validateObjectKey('a/../b')).toContain('"." or ".."');
+    expect(validateObjectKey('../escape.txt')).toContain('"." or ".."');
+    expect(validateObjectKey('a/./b')).toContain('"." or ".."');
+    // Dots inside a name are ordinary characters.
+    expect(validateObjectKey('report.v1.txt')).toBeNull();
+    expect(validateObjectKey('a/.../b')).toBeNull();
   });
 
   it('normalizes prefixes to end with a slash', () => {

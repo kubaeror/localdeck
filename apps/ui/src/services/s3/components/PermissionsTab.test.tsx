@@ -139,6 +139,78 @@ describe('S3 PermissionsTab', () => {
     expect(await screen.findByText(/No explicit configuration exists/)).toBeDefined();
   });
 
+  it('shows the all-off state after removing the configuration and never re-applies it', async () => {
+    const calls = stubS3((operation) => {
+      if (operation === 'GetPublicAccessBlock') {
+        return {
+          PublicAccessBlockConfiguration: {
+            BlockPublicAcls: true,
+            IgnorePublicAcls: true,
+            BlockPublicPolicy: true,
+            RestrictPublicBuckets: true,
+          },
+        };
+      }
+      if (operation === 'GetBucketPolicy') {
+        return { __error: { code: 'NoSuchBucketPolicy', message: 'none', statusCode: 404 } };
+      }
+      return {};
+    });
+    renderPermissions();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove configuration' }));
+    await waitFor(() => {
+      expect(calls.some((call) => call.operation === 'DeletePublicAccessBlock')).toBe(true);
+    });
+
+    // No explicit configuration is 0 of 4 settings, not the console's
+    // partially-blocked defaults that used to be shown here.
+    expect(await screen.findByText('Not blocked')).toBeDefined();
+    expect(screen.queryByText(/Partially blocked/)).toBeNull();
+    expect(screen.getByText(/No explicit configuration exists/)).toBeDefined();
+    const checkboxes = screen.getAllByRole('checkbox') as HTMLInputElement[];
+    expect(checkboxes.every((checkbox) => !checkbox.checked)).toBe(true);
+
+    // Save is a no-op: the removed blocks cannot be silently written back.
+    const save = screen.getByRole('button', { name: 'Save changes' });
+    expect(save.hasAttribute('disabled')).toBe(true);
+    expect(calls.some((call) => call.operation === 'PutPublicAccessBlock')).toBe(false);
+  });
+
+  it('loads the example policy with the current bucket name', async () => {
+    stubS3((operation) => {
+      if (operation === 'GetPublicAccessBlock') {
+        return {
+          PublicAccessBlockConfiguration: {
+            BlockPublicAcls: true,
+            IgnorePublicAcls: true,
+            BlockPublicPolicy: true,
+            RestrictPublicBuckets: true,
+          },
+        };
+      }
+      if (operation === 'GetBucketPolicy') {
+        return { __error: { code: 'NoSuchBucketPolicy', message: 'none', statusCode: 404 } };
+      }
+      return {};
+    });
+    const onPolicyDraftChange = vi.fn();
+    render(
+      <FlashbarProvider>
+        <MemoryRouter>
+          <PermissionsTab bucket="alpha-bucket" onPolicyDraftChange={onPolicyDraftChange} />
+        </MemoryRouter>
+      </FlashbarProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Use example policy' }));
+
+    const draft = onPolicyDraftChange.mock.calls[0]?.[0];
+    expect(typeof draft).toBe('string');
+    expect(draft).toContain('arn:aws:s3:::alpha-bucket/*');
+    expect(draft).not.toContain('my-bucket');
+  });
+
   it('shows one section error without hiding the other permissions section', async () => {
     stubS3((operation) => {
       if (operation === 'GetPublicAccessBlock') {

@@ -1,4 +1,4 @@
-import { isServiceEmulated, type ServiceDescriptor } from '@localdeck/shared';
+import { isServiceEnabled, type ServiceDescriptor } from '@localdeck/shared';
 import Box from '@cloudscape-design/components/box';
 import Input from '@cloudscape-design/components/input';
 import Link from '@cloudscape-design/components/link';
@@ -8,7 +8,7 @@ import { colorBackgroundItemSelected } from '@cloudscape-design/design-tokens';
 import { useEffect, useId, useMemo, useRef, useState, type ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { GLOBAL_SEARCH_SHORTCUT_LABEL } from '../contexts/global-search-context';
-import { useLocalStackStatus } from '../hooks/useLocalStackStatus';
+import { useEmulatorStatus } from '../hooks/useEmulatorStatus';
 import { useRecentlyVisited } from '../hooks/useRecentlyVisited';
 import { useServiceCatalog } from '../hooks/useServiceCatalog';
 import { searchServices, type ServiceMatch } from '../lib/serviceSearch';
@@ -35,7 +35,7 @@ export interface GlobalSearchPaletteProps {
 export function GlobalSearchPalette({ onDismiss }: GlobalSearchPaletteProps): ReactElement {
   const navigate = useNavigate();
   const { services } = useServiceCatalog();
-  const status = useLocalStackStatus();
+  const status = useEmulatorStatus();
   const { visited } = useRecentlyVisited();
 
   const [query, setQuery] = useState('');
@@ -67,7 +67,9 @@ export function GlobalSearchPalette({ onDismiss }: GlobalSearchPaletteProps): Re
     matches.findIndex((match) => match.service.id === activeId),
   );
   const activeMatch = matches[activeIndex];
-  const servicesReported = status.health?.localstack.services ?? {};
+  const servicesReported = status.health?.emulator.services ?? {};
+  const provider = status.health?.provider.provider ?? 'generic';
+  const providerLabel = status.health?.provider.providerLabel ?? 'the emulator';
 
   const optionId = (serviceId: string): string => `${listboxId}-option-${serviceId}`;
 
@@ -110,7 +112,8 @@ export function GlobalSearchPalette({ onDismiss }: GlobalSearchPaletteProps): Re
           placeholder="Search by service name, id, category or operation"
           nativeInputAttributes={{
             role: 'combobox',
-            'aria-expanded': true,
+            // The listbox is only rendered when there is something to expand.
+            'aria-expanded': matches.length > 0,
             'aria-controls': listboxId,
             'aria-autocomplete': 'list',
             ...(activeMatch === undefined
@@ -143,6 +146,25 @@ export function GlobalSearchPalette({ onDismiss }: GlobalSearchPaletteProps): Re
           }}
         />
 
+        {/* Announced when the result set changes; visually hidden. */}
+        <span
+          role="status"
+          aria-live="polite"
+          style={{
+            position: 'absolute',
+            width: '1px',
+            height: '1px',
+            margin: '-1px',
+            padding: 0,
+            border: 0,
+            overflow: 'hidden',
+            clip: 'rect(0, 0, 0, 0)',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {matches.length} {matches.length === 1 ? 'match' : 'matches'}
+        </span>
+
         {matches.length === 0 ? (
           <Box color="text-body-secondary">
             {isSearching
@@ -162,9 +184,9 @@ export function GlobalSearchPalette({ onDismiss }: GlobalSearchPaletteProps): Re
             >
               {matches.map((match, index) => {
                 const isActive = index === activeIndex;
-                const emulation = isServiceEmulated(match.service, servicesReported)
-                  ? 'emulated locally'
-                  : 'not emulated locally';
+                const emulation = isServiceEnabled(match.service, servicesReported, provider)
+                  ? `reported by ${providerLabel}`
+                  : `not reported by ${providerLabel}`;
                 return (
                   <li
                     key={match.service.id}

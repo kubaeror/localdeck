@@ -13,6 +13,8 @@ import {
   getBucketTags,
   getPublicAccessBlock,
   listObjects,
+  moveObject,
+  triggerDownload,
   uploadObject,
 } from './api';
 import { toFriendlyS3Error } from './errors';
@@ -361,6 +363,19 @@ describe('deleteFolder', () => {
     expect(result.deleted).toHaveLength(1002);
     expect(result.failures).toEqual([]);
   });
+
+  it('refuses an empty or bucket-root prefix instead of deleting the whole bucket', async () => {
+    const calls = stubDispatcher(() => ({ Contents: [{ Key: 'a.txt', Size: 1 }] }));
+
+    await expect(deleteFolder({ bucket: 'my-bucket', prefix: '' })).rejects.toThrow(
+      /Refusing to delete/,
+    );
+    await expect(deleteFolder({ bucket: 'my-bucket', prefix: '/' })).rejects.toThrow(
+      /Refusing to delete/,
+    );
+    // The guard runs before any listing or delete reaches the api.
+    expect(calls).toEqual([]);
+  });
 });
 
 describe('deleteObjects', () => {
@@ -415,6 +430,33 @@ describe('copyObject source encoding', () => {
   });
 });
 
+describe('moveObject', () => {
+  it('says the copy completed when deleting the source fails', async () => {
+    const calls = stubDispatcher((input) =>
+      'CopySource' in input
+        ? {}
+        : { __error: { code: 'AccessDenied', message: 'no delete', statusCode: 403 } },
+    );
+
+    const caught = await moveObject({
+      sourceBucket: 'source-bucket',
+      sourceKey: 'docs/move.txt',
+      destinationBucket: 'dest-bucket',
+      destinationKey: 'moved.txt',
+    }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+    expect(calls.map((call) => call.operation)).toEqual(['CopyObject', 'DeleteObject']);
+    const friendly = toFriendlyS3Error(caught);
+    expect(friendly.message).toContain('Object "moved.txt" was copied');
+    expect(friendly.message).toContain('deleting the source object failed');
+    // The canned per-code wording is appended, not substituted for the story.
+    expect(friendly.message).toContain('LocalStack denied this action');
+  });
+});
+
 describe('upload and download', () => {
   it('POSTs the file to the upload proxy and unwraps the result', async () => {
     const fetchMock = vi.fn<
@@ -453,6 +495,19 @@ describe('upload and download', () => {
   it('builds a same-origin download url for the proxy route', () => {
     expect(downloadObjectUrl({ bucket: 'b', key: 'a/b c.txt' })).toBe(
       '/api/services/s3/objects/download?bucket=b&key=a%2Fb%20c.txt',
+    );
+  });
+
+  it('opens the download in a new tab so a failure cannot replace the console', () => {
+    const open = vi.fn().mockReturnValue(null);
+    vi.stubGlobal('open', open);
+
+    triggerDownload('/api/services/s3/objects/download?bucket=b&key=a.txt');
+
+    expect(open).toHaveBeenCalledWith(
+      '/api/services/s3/objects/download?bucket=b&key=a.txt',
+      '_blank',
+      'noopener',
     );
   });
 });

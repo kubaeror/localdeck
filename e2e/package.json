@@ -15,6 +15,7 @@
     "clean": "rm -rf playwright-report playwright-report-container test-results test-results-container .turbo"
   },
   "devDependencies": {
-    "@playwright/test": "^1.63.0"
+    "@playwright/test": "^1.63.0",
+    "@localdeck/shared": "workspace:*"
   }
 }

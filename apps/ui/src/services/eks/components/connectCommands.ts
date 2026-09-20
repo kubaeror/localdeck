@@ -11,14 +11,19 @@ export function shellQuote(value: string): string {
 }
 
 /** Where the endpoint, credentials and region come from for kubectl. */
-export function kubeconfigCommands(clusterName: string, endpoint: string, region: string): string {
+export function kubeconfigCommands(
+  clusterName: string,
+  endpoint: string,
+  region: string,
+  providerLabel = 'the emulator',
+): string {
   return [
     '# 1. Download the kubeconfig (button above), then point kubectl at it',
     `export KUBECONFIG=~/Downloads/${shellQuote(kubeconfigFileName(clusterName))}`,
     '',
-    '# 2. Let the kubeconfig credential plugin reach LocalStack',
+    '# 2. Let the kubeconfig credential plugin reach the emulator',
     `export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=${shellQuote(region)}`,
-    `export AWS_ENDPOINT_URL=${shellQuote(endpoint)}   # your LOCALSTACK_ENDPOINT`,
+    `export AWS_ENDPOINT_URL=${shellQuote(endpoint)}   # your ${providerLabel} endpoint`,
     '',
     '# 3. Talk to the cluster',
     'kubectl get nodes',

@@ -32,7 +32,8 @@ function matches(policy: IamPolicy, text: string): boolean {
   const needle = text.trim().toLowerCase();
   if (needle.length === 0) return true;
   return (
-    policy.policyName.toLowerCase().includes(needle) || policy.arn.toLowerCase().includes(needle)
+    policy.policyName.toLowerCase().includes(needle) ||
+    (policy.arn ?? '').toLowerCase().includes(needle)
   );
 }
 
@@ -101,11 +102,10 @@ export function PolicyPicker({
   }, [load]);
 
   const excluded = new Set(excludeArns);
-  const candidates = items.filter((policy) => !excluded.has(policy.arn));
-  const filtered = candidates.filter((policy) => matches(policy, filteringText));
-  const unattachable = new Set(
-    candidates.filter((policy) => !policy.isAttachable).map((policy) => policy.arn),
+  const candidates = items.filter(
+    (policy) => policy.arn === undefined || !excluded.has(policy.arn),
   );
+  const filtered = candidates.filter((policy) => matches(policy, filteringText));
   const pagesCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   // Clamp the page index when the candidates shrink (scope switch, filter,
   // reload, exclusions); otherwise the table renders an out-of-range page.
@@ -113,7 +113,8 @@ export function PolicyPicker({
   const visibleItems = filtered.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
 
   const visibleSelected = visibleItems.filter(
-    (policy) => policy.isAttachable && selectedArns.includes(policy.arn),
+    (policy) =>
+      policy.isAttachable && policy.arn !== undefined && selectedArns.includes(policy.arn),
   );
   const hiddenSelectedCount = selectedArns.filter(
     (arn) => !visibleItems.some((policy) => policy.arn === arn),
@@ -204,7 +205,7 @@ export function PolicyPicker({
         loadingText="Loading policies"
         items={visibleItems}
         columnDefinitions={columns}
-        trackBy={(policy) => policy.arn}
+        trackBy={(policy) => policy.arn ?? policy.policyName}
         selectionType="multi"
         selectedItems={visibleSelected}
         ariaLabels={{
@@ -214,16 +215,25 @@ export function PolicyPicker({
           allItemsSelectionLabel: () => 'Select all policies on this page',
         }}
         onSelectionChange={({ detail }) => {
-          const visibleArns = visibleItems.map((policy) => policy.arn);
+          const visibleArns = visibleItems.flatMap((policy) =>
+            policy.arn === undefined ? [] : [policy.arn],
+          );
           const keptHidden = selectedArns.filter((arn) => !visibleArns.includes(arn));
-          const attempted = detail.selectedItems.map((policy) => policy.arn);
-          const blocked = attempted.filter((arn) => unattachable.has(arn));
+          const attemptedItems = detail.selectedItems;
+          const blocked = attemptedItems.filter(
+            (policy) => policy.arn === undefined || !policy.isAttachable,
+          );
           setSelectionNotice(
             blocked.length === 0
               ? null
-              : `${blocked.length} selected polic${blocked.length === 1 ? 'y is' : 'ies are'} marked IsAttachable=false by LocalStack and cannot be attached to an identity.`,
+              : `${blocked.length} selected polic${blocked.length === 1 ? 'y is' : 'ies are'} marked IsAttachable=false by LocalStack, or LocalStack did not report an ARN, so ${blocked.length === 1 ? 'it' : 'they'} cannot be attached to an identity.`,
           );
-          onChange([...keptHidden, ...attempted.filter((arn) => !unattachable.has(arn))]);
+          onChange([
+            ...keptHidden,
+            ...attemptedItems.flatMap((policy) =>
+              policy.arn === undefined || !policy.isAttachable ? [] : [policy.arn],
+            ),
+          ]);
         }}
         empty={
           <Box textAlign="center" color="text-body-secondary">

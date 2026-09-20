@@ -54,14 +54,16 @@ describe('service registry routes', () => {
     expect(s3?.parityLevel).toBe('dedicated');
   });
 
-  it('resolves a single service and its LocalStack health keys', async () => {
+  it('resolves a single service and its provider health keys', async () => {
     const response = await app.inject({ method: 'GET', url: '/api/services/elbv2' });
 
     expect(response.statusCode).toBe(200);
     const body = response.json<ServiceDetailResponse>();
     expect(body.service.id).toBe('elbv2');
     expect(body.service.displayName).toBe('Elastic Load Balancing');
-    expect(body.localStackKeys).toEqual(['elbv2', 'elb']);
+    expect(body.healthKeys).toEqual(
+      expect.arrayContaining(['elbv2', 'elb', 'elasticloadbalancing']),
+    );
   });
 
   it('serves the whitelisted operations and the generic-browser binding', async () => {
@@ -109,7 +111,7 @@ describe('service registry routes', () => {
     const response = await app.inject({ method: 'GET', url: '/api/services/timestream' });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json<ServiceDetailResponse>().localStackKeys).toEqual([
+    expect(response.json<ServiceDetailResponse>().healthKeys).toEqual([
       'timestream',
       'timestream-write',
       'timestream-query',
@@ -211,5 +213,31 @@ describe('api route hygiene', () => {
 
     const failure = await app.inject({ method: 'GET', url: '/api/services/not-a-service' });
     expect(failure.headers['x-request-id']).toBeTruthy();
+  });
+});
+
+describe('provider-specific health keys', () => {
+  it('exposes the provider aliases when a provider is pinned', async () => {
+    const pinned = await buildApp({
+      config: loadConfig({
+        ...process.env,
+        NODE_ENV: 'test',
+        EMULATOR_ENDPOINT: UNREACHABLE_ENDPOINT,
+        EMULATOR_PROVIDER: 'floci',
+        AWS_REGION: 'us-east-1',
+      }),
+      logger: false,
+    });
+    await pinned.ready();
+    try {
+      const cloudwatch = await pinned.inject({ method: 'GET', url: '/api/services/cloudwatch' });
+      expect(cloudwatch.statusCode).toBe(200);
+      expect(cloudwatch.json<ServiceDetailResponse>().healthKeys).toContain('monitoring');
+
+      const elbv2 = await pinned.inject({ method: 'GET', url: '/api/services/elbv2' });
+      expect(elbv2.json<ServiceDetailResponse>().healthKeys).toContain('elasticloadbalancing');
+    } finally {
+      await pinned.close();
+    }
   });
 });

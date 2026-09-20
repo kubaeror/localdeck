@@ -15,10 +15,10 @@ import { EmptyState } from '../../../components/EmptyState';
 import { ResourceListPage } from '../../../components/ResourceListPage';
 import { StatusBadge } from '../../../components/StatusBadge';
 import { useFlashbar } from '../../../hooks/useFlashbar';
-import { useLocalStackStatus } from '../../../hooks/useLocalStackStatus';
+import { useEmulatorStatus } from '../../../hooks/useEmulatorStatus';
 import { usePolling } from '../../../hooks/usePolling';
 import { formatDateTime } from '../../../lib/format';
-import { LOCALSTACK_SERVICES_DOCS_URL, serviceConsolePath } from '../../paths';
+import { DEFAULT_EMULATOR_DOCS_URL, serviceConsolePath } from '../../paths';
 import type { ServicePageProps } from '../../types';
 import {
   clusterStatusName,
@@ -44,7 +44,12 @@ const POLL_INTERVAL_MS = 10_000;
 export function ClustersListPage({ descriptor }: ServicePageProps): ReactElement {
   const navigate = useNavigate();
   const flashbar = useFlashbar();
-  const status = useLocalStackStatus();
+  const status = useEmulatorStatus();
+  const providerLabel =
+    status.health?.provider.providerLabel ??
+    status.config?.emulator.providerLabel ??
+    'the emulator';
+  const docsUrl = status.health?.provider.docsUrl ?? DEFAULT_EMULATOR_DOCS_URL;
   const [filteringText, setFilteringText] = useState('');
   const [reloadToken, setReloadToken] = useState(0);
   const [transitional, setTransitional] = useState(false);
@@ -148,7 +153,7 @@ export function ClustersListPage({ descriptor }: ServicePageProps): ReactElement
       flashbar.notify({
         type: 'info',
         header: `Deleting cluster ${name}`,
-        content: 'LocalStack is tearing down the k3d cluster. This can take a minute.',
+        content: `${providerLabel} is tearing down the cluster. This can take a minute.`,
       });
       setDeleteTarget(null);
       setReloadToken((token) => token + 1);
@@ -184,7 +189,7 @@ export function ClustersListPage({ descriptor }: ServicePageProps): ReactElement
     );
   }
 
-  const eksStatus = status.health?.localstack.services['eks'];
+  const eksStatus = status.health?.emulator.services['eks'];
   if (status.health !== null && eksStatus === undefined) {
     return (
       <ContentLayout
@@ -215,32 +220,31 @@ export function ClustersListPage({ descriptor }: ServicePageProps): ReactElement
         <EmptyState
           iconKey={descriptor.iconKey}
           iconCategory={descriptor.category}
-          title="EKS is not enabled in this LocalStack instance"
+          title={`EKS is not enabled in this ${providerLabel} instance`}
           description={
             <SpaceBetween size="s">
               <Box variant="p">
-                LocalStack at{' '}
+                {providerLabel} at{' '}
                 <Box variant="code" display="inline">
-                  {status.config?.localstack.endpoint ?? 'the configured endpoint'}
+                  {status.config?.emulator.endpoint ?? 'the configured endpoint'}
                 </Box>{' '}
                 does not report the{' '}
                 <Box variant="code" display="inline">
                   eks
                 </Box>{' '}
-                service, so LocalStack cannot create clusters and LocalDeck does not send any EKS
-                calls.
+                service, so LocalDeck does not send EKS calls and cannot create clusters.
               </Box>
               <Box variant="p">
-                LocalStack's EKS provider starts k3d clusters in Docker and is part of LocalStack
-                Pro (Ultimate plan). No LocalDeck setting changes this: LocalDeck never starts or
-                reconfigures LocalStack. Enable EKS in your LocalStack configuration, restart it
-                yourself, then re-check.
+                EKS support depends on the emulator build; for LocalStack it is part of Pro
+                (Ultimate). No LocalDeck setting changes this: LocalDeck never starts or
+                reconfigures the emulator. Enable EKS in the {providerLabel} configuration, restart
+                it yourself, then re-check.
               </Box>
             </SpaceBetween>
           }
           learnMore={{
-            text: 'LocalStack EKS documentation and API coverage',
-            href: LOCALSTACK_SERVICES_DOCS_URL,
+            text: `${providerLabel} EKS documentation and API coverage`,
+            href: docsUrl,
           }}
         />
       </ContentLayout>
@@ -294,7 +298,7 @@ export function ClustersListPage({ descriptor }: ServicePageProps): ReactElement
           ) : undefined
         }
         emptyTitle="No EKS clusters"
-        emptyDescription="Create a cluster to have LocalStack start a k3d Kubernetes control plane you can reach with kubectl, k9s or Headlamp."
+        emptyDescription={`Create a cluster to have ${providerLabel} start a Kubernetes control plane you can reach with kubectl, k9s or Headlamp.`}
       />
 
       {deleteTarget === null ? null : (
@@ -302,7 +306,7 @@ export function ClustersListPage({ descriptor }: ServicePageProps): ReactElement
           visible
           title={`Delete cluster ${deleteTarget.name}`}
           subjects={[deleteTarget.name]}
-          description={`Deleting a cluster removes its k3d control plane and every node group it owns. The cluster "${deleteTarget.name}" cannot be recovered.`}
+          description={`Deleting a cluster removes its Kubernetes control plane and every node group it owns. The cluster "${deleteTarget.name}" cannot be recovered.`}
           submitLabel="Delete"
           loading={deleting}
           {...(deleteError === null ? {} : { errorText: deleteError })}

@@ -6,7 +6,7 @@ import Form from '@cloudscape-design/components/form';
 import Header from '@cloudscape-design/components/header';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import { useState, type ReactElement, type ReactNode } from 'react';
-import { TagsEditor } from '../../../components/TagsEditor';
+import { TagsEditor, validateTags } from '../../../components/TagsEditor';
 import { useFlashbar } from '../../../hooks/useFlashbar';
 import { createTags, deleteTags } from '../api';
 import { toFriendlyEc2Error } from '../errors';
@@ -44,9 +44,12 @@ export function ResourceTagsTab({
 
   const edited = draft ?? tags;
   const changed = draft !== null && JSON.stringify(edited) !== JSON.stringify(tags);
+  const tagProblems = validateTags(edited);
+  const tagsInvalid = tagProblems.length > 0;
 
   const save = async (): Promise<void> => {
     if (saving) return;
+    if (tagsInvalid) return;
     setSaving(true);
     setSaveError(null);
     try {
@@ -75,7 +78,7 @@ export function ResourceTagsTab({
           <Button
             variant="primary"
             loading={saving}
-            disabled={!changed}
+            disabled={!changed || tagsInvalid}
             onClick={() => {
               void save();
             }}

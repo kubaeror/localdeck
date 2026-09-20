@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import type { ReactElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GlobalSearchProvider } from './GlobalSearchProvider';
-import { LocalStackStatusProvider } from './LocalStackStatusProvider';
+import { EmulatorStatusProvider } from './EmulatorStatusProvider';
 import { RecentlyVisitedProvider } from './RecentlyVisitedProvider';
 import { ServiceCatalogProvider } from './ServiceCatalogProvider';
 import { useGlobalSearch } from '../hooks/useGlobalSearch';
@@ -35,7 +35,7 @@ function Consumer(): ReactElement {
 function renderProvider(): void {
   render(
     <MemoryRouter initialEntries={['/console/home']}>
-      <LocalStackStatusProvider>
+      <EmulatorStatusProvider>
         <ServiceCatalogProvider>
           <RecentlyVisitedProvider>
             <GlobalSearchProvider>
@@ -43,7 +43,7 @@ function renderProvider(): void {
             </GlobalSearchProvider>
           </RecentlyVisitedProvider>
         </ServiceCatalogProvider>
-      </LocalStackStatusProvider>
+      </EmulatorStatusProvider>
     </MemoryRouter>,
   );
 }

@@ -50,6 +50,9 @@ export function UpdateScalingModal({
   const scalingProblem = validateScaling(scaling);
 
   const submit = async (): Promise<void> => {
+    // UpdateNodegroupConfig is not idempotent from the UI's point of view: a
+    // double submit would send two overlapping updates.
+    if (submitting) return;
     setSubmitting(true);
     setError(null);
     try {
@@ -83,7 +86,7 @@ export function UpdateScalingModal({
             <Button
               variant="primary"
               loading={submitting}
-              disabled={scalingProblem !== null}
+              disabled={submitting || scalingProblem !== null}
               onClick={() => {
                 void submit();
               }}

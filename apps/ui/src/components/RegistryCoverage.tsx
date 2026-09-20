@@ -9,6 +9,8 @@ export interface RegistryCoverageProps {
   coverage: RegistryCoverageSummary;
   /** Where the rendered registry came from. */
   source: ServiceCatalogSource;
+  /** Display name of the active emulator. */
+  providerLabel: string;
   /**
    * `details` renders the four-row KeyValuePairs block used on the health
    * page; `summary` renders one inline sentence for the Console Home widget.
@@ -17,22 +19,24 @@ export interface RegistryCoverageProps {
 }
 
 /**
- * How the LocalDeck registry lines up with the services LocalStack reports.
- * Shared by the service health page and the Console Home widget so both show
- * the same numbers with the same wording.
+ * How the LocalDeck registry lines up with the services the active emulator
+ * reports. Shared by the service health page and the Console Home widget so
+ * both show the same numbers with the same wording.
  */
 export function RegistryCoverage({
   coverage,
   source,
+  providerLabel,
   variant = 'details',
 }: RegistryCoverageProps): ReactElement {
   if (variant === 'summary') {
     return (
       <Box>
         {coverage.emulated} of {coverage.registered} registered services
+        {coverage.disabled === 0 ? '' : ` · ${coverage.disabled} disabled in ${providerLabel}`}
         {coverage.unregistered.length === 0
           ? ''
-          : ` · ${coverage.unregistered.length} stack services without a console entry`}
+          : ` · ${coverage.unregistered.length} ${providerLabel} services without a console entry`}
       </Box>
     );
   }
@@ -51,15 +55,19 @@ export function RegistryCoverage({
             ),
         },
         {
-          label: 'Emulated locally',
+          label: `Enabled in ${providerLabel}`,
           value: <Box>{coverage.emulated}</Box>,
         },
         {
-          label: 'Not emulated locally',
+          label: `Disabled in ${providerLabel}`,
+          value: <Box>{coverage.disabled}</Box>,
+        },
+        {
+          label: `Not reported by ${providerLabel}`,
           value: <Box>{coverage.notEmulated.length}</Box>,
         },
         {
-          label: 'Stack services without a console entry',
+          label: `${providerLabel} services without a console entry`,
           value: <Box>{coverage.unregistered.length}</Box>,
         },
       ]}

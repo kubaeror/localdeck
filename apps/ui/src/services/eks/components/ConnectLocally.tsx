@@ -7,7 +7,8 @@ import Link from '@cloudscape-design/components/link';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import { useState, type ReactElement } from 'react';
 import { useFlashbar } from '../../../hooks/useFlashbar';
-import { useLocalStackStatus } from '../../../hooks/useLocalStackStatus';
+import { useEmulatorStatus } from '../../../hooks/useEmulatorStatus';
+import { DEFAULT_EMULATOR_DOCS_URL } from '../../paths';
 import { downloadKubeconfig, kubeconfigFileName, type EksCluster } from '../api';
 import { toFriendlyEksError } from '../errors';
 import { kubeconfigCommands } from './connectCommands';
@@ -32,13 +33,15 @@ const FALLBACK_REGION = 'us-east-1';
  */
 export function ConnectLocally({ cluster }: ConnectLocallyProps): ReactElement {
   const flashbar = useFlashbar();
-  const status = useLocalStackStatus();
+  const status = useEmulatorStatus();
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const ready = cluster.status === 'ACTIVE';
-  const endpoint = status.config?.localstack.endpoint ?? FALLBACK_ENDPOINT;
-  const region = status.config?.localstack.region ?? FALLBACK_REGION;
+  const endpoint = status.config?.emulator.publicEndpoint ?? FALLBACK_ENDPOINT;
+  const region = status.config?.emulator.region ?? FALLBACK_REGION;
+  const providerLabel = status.health?.provider.providerLabel ?? 'the active emulator';
+  const docsUrl = status.health?.provider.docsUrl ?? DEFAULT_EMULATOR_DOCS_URL;
 
   const download = async (): Promise<void> => {
     setDownloading(true);
@@ -62,7 +65,7 @@ export function ConnectLocally({ cluster }: ConnectLocallyProps): ReactElement {
       header={
         <Header
           variant="h2"
-          description="Use the same kubectl workflow you use against real EKS. LocalStack exposes the k3d cluster through the endpoint in DescribeCluster."
+          description={`Use the same kubectl workflow you use against real EKS. ${providerLabel} exposes the Kubernetes API through the endpoint in DescribeCluster.`}
         >
           Connect locally
         </Header>
@@ -103,7 +106,7 @@ export function ConnectLocally({ cluster }: ConnectLocallyProps): ReactElement {
 
         <Box variant="code">
           <pre style={{ margin: 0, overflowX: 'auto' }}>
-            {kubeconfigCommands(cluster.name, endpoint, region)}
+            {kubeconfigCommands(cluster.name, endpoint, region, providerLabel)}
           </pre>
         </Box>
 
@@ -112,16 +115,13 @@ export function ConnectLocally({ cluster }: ConnectLocallyProps): ReactElement {
           <Box variant="code" display="inline">
             aws eks get-token
           </Box>{' '}
-          (the same credential plugin the AWS CLI writes), pinned to your LocalStack endpoint. The
-          AWS CLI v2 must be on your PATH; use the dummy credentials your LocalStack accepts. See{' '}
-          <Link
-            href="https://docs.localstack.cloud/aws/services/eks/"
-            external
-            externalIconAriaLabel="Opens in a new tab"
-          >
-            LocalStack's EKS documentation
+          (the same credential plugin the AWS CLI writes), pinned to your {providerLabel} endpoint.
+          The AWS CLI v2 must be on your PATH; use the dummy credentials {providerLabel} accepts.
+          See{' '}
+          <Link href={docsUrl} external externalIconAriaLabel="Opens in a new tab">
+            {providerLabel} EKS documentation
           </Link>{' '}
-          for k3d requirements and supported Kubernetes versions.
+          for the provider's EKS requirements and supported Kubernetes versions.
         </Box>
       </SpaceBetween>
     </Container>

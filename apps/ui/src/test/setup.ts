@@ -7,10 +7,11 @@ import { configure } from '@testing-library/react';
  */
 if (typeof window !== 'undefined') {
   // Service consoles are loaded with dynamic imports; the first import of a
-  // module can take seconds to transform under vitest, so findBy*/waitFor need
-  // a wider window than the one-second default (kept below the 20s test budget
-  // in vite.config.ts so a failure is still an assertion, not a timeout).
-  configure({ asyncUtilTimeout: 10_000 });
+  // module can take seconds to transform under vitest, and the whole suite
+  // runs in parallel workers, so findBy*/waitFor need a wider window than the
+  // one-second default (kept below the 45s test budget in vite.config.ts so a
+  // failure is still an assertion, not a timeout).
+  configure({ asyncUtilTimeout: 25_000 });
 
   if (typeof window.matchMedia !== 'function') {
     const createMediaQueryList = (query: string): MediaQueryList => {

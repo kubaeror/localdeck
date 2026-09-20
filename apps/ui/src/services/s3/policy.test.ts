@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { EXAMPLE_BUCKET_POLICY, validateBucketPolicy } from './policy';
+import { buildExampleBucketPolicy, validateBucketPolicy } from './policy';
 
 const VALID = JSON.stringify({
   Version: '2012-10-17',
@@ -64,12 +64,47 @@ describe('validateBucketPolicy', () => {
   });
 
   it('flags wildcard principals with an Allow effect as public', () => {
-    expect(validateBucketPolicy(EXAMPLE_BUCKET_POLICY).grantsPublicAccess).toBe(true);
+    expect(validateBucketPolicy(buildExampleBucketPolicy('my-bucket')).grantsPublicAccess).toBe(
+      true,
+    );
 
     const denyOnly = validateBucketPolicy(
       '{"Statement":{"Effect":"Deny","Principal":"*","Action":"s3:*","Resource":"arn:aws:s3:::b/*"}}',
     );
     expect(denyOnly.grantsPublicAccess).toBe(false);
+  });
+
+  it('finds a wildcard nested inside an object or array Principal', () => {
+    const statement = (principal: unknown): string =>
+      JSON.stringify({
+        Statement: {
+          Effect: 'Allow',
+          Principal: principal,
+          Action: 's3:GetObject',
+          Resource: 'arn:aws:s3:::b/*',
+        },
+      });
+
+    expect(validateBucketPolicy(statement({ AWS: '*' })).grantsPublicAccess).toBe(true);
+    expect(validateBucketPolicy(statement({ AWS: ['*'] })).grantsPublicAccess).toBe(true);
+    expect(validateBucketPolicy(statement(['*'])).grantsPublicAccess).toBe(true);
+    // A named principal map is not public, whatever its shape.
+    expect(
+      validateBucketPolicy(statement({ AWS: 'arn:aws:iam::000000000000:root' })).grantsPublicAccess,
+    ).toBe(false);
+    expect(
+      validateBucketPolicy(statement({ Service: 'cloudfront.amazonaws.com' })).grantsPublicAccess,
+    ).toBe(false);
+  });
+
+  it('builds the example policy from the current bucket name', () => {
+    const policy = buildExampleBucketPolicy('alpha-bucket');
+    expect(policy).toContain('arn:aws:s3:::alpha-bucket/*');
+    expect(policy).not.toContain('my-bucket');
+    expect(validateBucketPolicy(policy)).toMatchObject({
+      valid: true,
+      grantsPublicAccess: true,
+    });
   });
 
   it('rejects an empty statement list', () => {

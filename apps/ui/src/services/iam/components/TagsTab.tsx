@@ -71,6 +71,9 @@ export function TagsTab({ entity, name }: TagsTabProps): ReactElement {
       const normalized = normalizeTags(tags);
       if (entity === 'user') await putUserTags({ userName: name, tags: normalized });
       else await putRoleTags({ roleName: name, tags: normalized });
+      // Show the normalized set in the editor too; otherwise a key saved with
+      // surrounding whitespace would keep the form looking changed.
+      setTags(normalized);
       setSavedTags(normalized);
       flashbar.notify({ type: 'success', header: 'Tags saved', content: name });
     } catch (caught) {

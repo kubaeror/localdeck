@@ -1,3 +1,4 @@
+import type { ApiConfigResponse } from '@localdeck/shared';
 import {
   API_ORIGIN,
   IS_CI,
@@ -6,23 +7,17 @@ import {
   clearTrackedResources,
 } from './support';
 
-interface ApiConfigResponse {
-  application: { name: string; version: string; environment: string };
-  localstack: { endpoint: string; region: string; healthPath: string };
-  ui: { statusPollIntervalMs: number };
-}
-
 /**
  * Logs what the suite is really talking to. `reuseExistingServer` is enabled
  * outside CI, so a stale `pnpm dev` could otherwise silently serve another
- * build against another LocalStack; this prints the effective origins and the
+ * build against another emulator; this prints the effective origins and the
  * endpoint the running api reports, and warns when they disagree.
  */
 export default async function globalSetup(): Promise<void> {
   clearTrackedResources();
 
   console.log(
-    `[e2e] LocalStack endpoint under test: ${LOCALSTACK_ENDPOINT}` +
+    `[e2e] emulator endpoint under test: ${LOCALSTACK_ENDPOINT}` +
       (IS_CI
         ? ' (Playwright starts the api and ui)'
         : ' (Playwright reuses already-running api/ui when present)'),
@@ -47,14 +42,14 @@ export default async function globalSetup(): Promise<void> {
 
   console.log(
     `[e2e] api ${reported.application.name} ${reported.application.version} ` +
-      `(${reported.application.environment}) reports endpoint ` +
-      `${reported.localstack.endpoint} and region ${reported.localstack.region}; ` +
+      `(${reported.application.environment}) reports ${reported.emulator.providerLabel} at ` +
+      `${reported.emulator.endpoint} (region ${reported.emulator.region}); ` +
       `ui poll interval ${reported.ui.statusPollIntervalMs}ms`,
   );
 
-  if (reported.localstack.endpoint !== LOCALSTACK_ENDPOINT) {
+  if (reported.emulator.endpoint !== LOCALSTACK_ENDPOINT) {
     console.warn(
-      `[e2e] WARNING: the api is bound to ${reported.localstack.endpoint}, but this ` +
+      `[e2e] WARNING: the api is bound to ${reported.emulator.endpoint}, but this ` +
         `suite expects ${LOCALSTACK_ENDPOINT}. Stop the reused server or unset ` +
         'reuseExistingServer (E2E_API_PORT/E2E_UI_PORT) before trusting the results.',
     );

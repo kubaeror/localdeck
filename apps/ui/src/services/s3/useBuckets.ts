@@ -25,6 +25,9 @@ export function useBuckets(): UseBucketsResult {
     const id = requestId.current + 1;
     requestId.current = id;
     setLoading(true);
+    // Retry must not keep showing the previous failure while the new request
+    // is in flight.
+    setError(null);
     try {
       const result = await listBuckets();
       if (requestId.current !== id) return;

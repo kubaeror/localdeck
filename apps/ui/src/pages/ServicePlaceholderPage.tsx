@@ -1,6 +1,7 @@
 import {
-  localStackKeysFor,
   resolveServiceStatus,
+  serviceHealthKeys,
+  type EmulatorServiceState,
   type ServiceDescriptor,
   type ServiceParityLevel,
 } from '@localdeck/shared';
@@ -18,15 +19,16 @@ import { useNavigate } from 'react-router-dom';
 import { ConsoleBreadcrumbs } from '../components/ConsoleBreadcrumbs';
 import { EmptyState } from '../components/EmptyState';
 import { StatusBadge } from '../components/StatusBadge';
-import { useLocalStackStatus } from '../hooks/useLocalStackStatus';
-import { NOT_EMULATED_LABEL } from '../lib/copy';
+import { useEmulatorStatus } from '../hooks/useEmulatorStatus';
+import {
+  disabledLabel,
+  notReportedLabel,
+  UNKNOWN_PROVIDER_LABEL,
+  UNVERIFIED_SERVICE_LABEL,
+} from '../lib/copy';
 import { describeServiceStatus, formatRelativeTime } from '../lib/format';
 import { PARITY_LABELS } from '../lib/parity';
-import {
-  ALL_SERVICES_PATH,
-  CONSOLE_HOME_PATH,
-  LOCALSTACK_SERVICES_DOCS_URL,
-} from '../services/paths';
+import { ALL_SERVICES_PATH, CONSOLE_HOME_PATH, DEFAULT_EMULATOR_DOCS_URL } from '../services/paths';
 
 const PARITY_EXPLANATION: Readonly<Record<ServiceParityLevel, string>> = {
   dedicated:
@@ -43,21 +45,64 @@ export interface ServicePlaceholderPageProps {
   routeTitle?: string;
 }
 
+/** One sentence explaining why this console cannot serve data yet. */
+function unavailabilityCopy(
+  state: EmulatorServiceState | undefined,
+  providerLabel: string,
+  hasServiceInventory: boolean,
+): string {
+  if (state === 'disabled') {
+    return (
+      `${providerLabel} knows this service but has it disabled in its configuration, so the ` +
+      `entry is greyed out in the sidebar. Enable the service in ${providerLabel} to use this console.`
+    );
+  }
+  if (state === 'error') {
+    return `${providerLabel} reports this service in an error state. Check the emulator logs.`;
+  }
+  if (state === 'starting') {
+    return `${providerLabel} is still starting this service; check again in a moment.`;
+  }
+  if (!hasServiceInventory) {
+    return (
+      'This endpoint exposes no service inventory, so LocalDeck cannot tell whether it implements ' +
+      'this service. Operations are attempted and disabled if the endpoint rejects them.'
+    );
+  }
+  return (
+    `${providerLabel} does not report the service, so this entry is greyed out in the sidebar. ` +
+    `LocalDeck never starts or reconfigures ${providerLabel}.`
+  );
+}
+
 /**
  * Per-service placeholder used until a service module lands. It never fakes
  * data: everything shown here comes from the registry and the live health
- * document.
+ * document of the active emulator.
  */
 export function ServicePlaceholderPage({
   descriptor,
   routeTitle,
 }: ServicePlaceholderPageProps): ReactElement {
   const navigate = useNavigate();
-  const status = useLocalStackStatus();
+  const status = useEmulatorStatus();
 
-  const services = status.health?.localstack.services ?? {};
-  const serviceStatus = resolveServiceStatus(descriptor, services);
-  const emulated = serviceStatus !== undefined;
+  const provider = status.health?.provider.provider ?? 'generic';
+  const providerLabel = status.health?.provider.providerLabel ?? UNKNOWN_PROVIDER_LABEL;
+  const hasServiceInventory = status.health?.emulator.hasServiceInventory ?? false;
+  const docsUrl = status.health?.provider.docsUrl ?? DEFAULT_EMULATOR_DOCS_URL;
+  const services = status.health?.emulator.services ?? {};
+  const serviceStatus = resolveServiceStatus(descriptor, services, provider);
+  const enabled = serviceStatus === 'enabled';
+
+  const badgeLabel =
+    serviceStatus === 'disabled'
+      ? disabledLabel(providerLabel)
+      : serviceStatus === undefined
+        ? hasServiceInventory
+          ? notReportedLabel(providerLabel)
+          : UNVERIFIED_SERVICE_LABEL
+        : undefined;
 
   return (
     <ContentLayout
@@ -76,7 +121,7 @@ export function ServicePlaceholderPage({
           variant="h1"
           description={descriptor.summary}
           actions={
-            <Button href={LOCALSTACK_SERVICES_DOCS_URL} target="_blank" external>
+            <Button href={docsUrl} target="_blank" external>
               API coverage
             </Button>
           }
@@ -86,10 +131,10 @@ export function ServicePlaceholderPage({
       }
     >
       <SpaceBetween size="l">
-        {emulated ? null : (
+        {enabled ? null : (
           <Alert
-            type="warning"
-            header={`${descriptor.displayName} is not emulated locally`}
+            type={serviceStatus === 'error' ? 'error' : 'warning'}
+            header={`${descriptor.displayName} is not available from ${providerLabel}`}
             action={
               <Button
                 onClick={() => {
@@ -101,11 +146,7 @@ export function ServicePlaceholderPage({
               </Button>
             }
           >
-            LocalStack at{' '}
-            <Box variant="code">{status.config?.localstack.endpoint ?? 'loading…'}</Box> does not
-            report the service <Box variant="code">{descriptor.id}</Box>, so this entry is greyed
-            out in the sidebar. LocalDeck never starts or reconfigures LocalStack — enable the
-            service in your LocalStack configuration if you need it.
+            {unavailabilityCopy(serviceStatus, providerLabel, hasServiceInventory)}
           </Alert>
         )}
 
@@ -143,8 +184,8 @@ export function ServicePlaceholderPage({
             </Button>
           }
           learnMore={{
-            text: 'LocalStack API coverage',
-            href: LOCALSTACK_SERVICES_DOCS_URL,
+            text: `${providerLabel} service documentation`,
+            href: docsUrl,
           }}
         />
 
@@ -155,12 +196,13 @@ export function ServicePlaceholderPage({
               { label: 'Category', value: <Box>{descriptor.category}</Box> },
               { label: 'Parity level', value: <Box>{PARITY_LABELS[descriptor.parityLevel]}</Box> },
               {
-                label: 'LocalStack status',
-                value: emulated ? (
-                  <StatusBadge status={serviceStatus} />
-                ) : (
-                  <Box color="text-status-inactive">{NOT_EMULATED_LABEL}</Box>
-                ),
+                label: `${providerLabel} status`,
+                value:
+                  serviceStatus === undefined ? (
+                    <Box color="text-status-inactive">{badgeLabel}</Box>
+                  ) : (
+                    <StatusBadge status={serviceStatus} />
+                  ),
               },
               {
                 label: 'Last checked',
@@ -176,8 +218,10 @@ export function ServicePlaceholderPage({
                 value: <Box variant="code">{descriptor.sdkPackage}</Box>,
               },
               {
-                label: 'LocalStack health keys',
-                value: <Box variant="code">{localStackKeysFor(descriptor).join(', ')}</Box>,
+                label: `${providerLabel} health keys`,
+                value: (
+                  <Box variant="code">{serviceHealthKeys(descriptor, provider).join(', ')}</Box>
+                ),
               },
             ]}
           />
@@ -204,9 +248,9 @@ export function ServicePlaceholderPage({
           />
         </Container>
 
-        {emulated ? (
+        {enabled ? (
           <Box color="text-body-secondary" variant="small">
-            LocalStack reports this service as “{describeServiceStatus(serviceStatus)}”.
+            {providerLabel} reports this service as “{describeServiceStatus(serviceStatus)}”.
           </Box>
         ) : null}
       </SpaceBetween>

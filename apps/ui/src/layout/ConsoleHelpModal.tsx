@@ -6,7 +6,7 @@ import SpaceBetween from '@cloudscape-design/components/space-between';
 import type { ReactElement } from 'react';
 import { ConnectionStatusIndicator } from '../components/ConnectionStatusIndicator';
 import { GLOBAL_SEARCH_SHORTCUT_LABEL } from '../contexts/global-search-context';
-import { useLocalStackStatus } from '../hooks/useLocalStackStatus';
+import { useEmulatorStatus } from '../hooks/useEmulatorStatus';
 import { useServiceCatalog } from '../hooks/useServiceCatalog';
 import { formatAvailability, formatLatency, formatRelativeTime } from '../lib/format';
 
@@ -17,9 +17,11 @@ export interface ConsoleHelpModalProps {
 
 /** "About this console": live endpoint details, shortcuts and the notice. */
 export function ConsoleHelpModal({ visible, onDismiss }: ConsoleHelpModalProps): ReactElement {
-  const status = useLocalStackStatus();
+  const status = useEmulatorStatus();
   const catalog = useServiceCatalog();
   const { config, health } = status;
+  const providerLabel =
+    health?.provider.providerLabel ?? config?.emulator.providerLabel ?? 'Emulator';
 
   return (
     <Modal
@@ -41,37 +43,44 @@ export function ConsoleHelpModal({ visible, onDismiss }: ConsoleHelpModalProps):
           columns={2}
           items={[
             {
-              label: 'LocalStack',
+              label: 'Provider',
               value: health ? (
                 <Box>
-                  {health.localstack.version ?? 'unknown'}
-                  {health.localstack.edition === null ? '' : ` (${health.localstack.edition})`}
+                  {providerLabel}
+                  {health.provider.edition === null ? '' : ` (${health.provider.edition})`}
                 </Box>
               ) : (
                 <Box color="text-status-inactive">unknown</Box>
               ),
             },
             {
+              label: 'Version',
+              value: health ? (
+                <Box>{health.provider.version ?? 'unknown'}</Box>
+              ) : (
+                <Box color="text-status-inactive">unknown</Box>
+              ),
+            },
+            {
               label: 'Connection',
-              value: <ConnectionStatusIndicator phase={status.phase} />,
+              value: (
+                <ConnectionStatusIndicator phase={status.phase} providerLabel={providerLabel} />
+              ),
             },
             {
               label: 'Endpoint',
-              value: <Box variant="code">{config?.localstack.endpoint ?? 'loading…'}</Box>,
+              value: <Box variant="code">{config?.emulator.endpoint ?? 'loading…'}</Box>,
             },
             {
               label: 'Region',
-              value: <Box variant="code">{config?.localstack.region ?? 'loading…'}</Box>,
+              value: <Box variant="code">{config?.emulator.region ?? 'loading…'}</Box>,
             },
             {
               label: 'Health check',
               value: health ? (
                 <Box>
                   {formatLatency(health.latencyMs)} ·{' '}
-                  {formatAvailability(
-                    health.localstack.counts.available,
-                    health.localstack.counts.total,
-                  )}
+                  {formatAvailability(health.emulator.counts.enabled, health.emulator.counts.total)}
                 </Box>
               ) : (
                 <Box color="text-status-inactive">unknown</Box>

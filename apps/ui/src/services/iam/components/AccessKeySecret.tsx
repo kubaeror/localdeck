@@ -5,24 +5,10 @@ import KeyValuePairs from '@cloudscape-design/components/key-value-pairs';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import type { ReactElement } from 'react';
 import type { CreatedAccessKey } from '../api';
+import { accessKeyCsv } from './accessKeyCsv';
 
 export interface AccessKeySecretProps {
   accessKey: CreatedAccessKey;
-}
-
-/** Quotes one CSV field per RFC 4180. */
-function csvField(value: string): string {
-  return `"${value.replace(/"/g, '""')}"`;
-}
-
-/**
- * The access-key CSV the real console downloads ("Download .csv"), with the
- * header AWS uses. `User name` is empty when the service did not echo it.
- */
-function accessKeyCsv(accessKey: CreatedAccessKey): string {
-  const header = ['User name', 'Access key ID', 'Secret access key'];
-  const row = [accessKey.userName ?? '', accessKey.accessKeyId, accessKey.secretAccessKey];
-  return `${header.map(csvField).join(',')}\n${row.map(csvField).join(',')}\n`;
 }
 
 /** Downloads the key pair as a CSV file, deferring the object-URL revoke. */

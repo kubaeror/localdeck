@@ -65,7 +65,7 @@ test.describe('containerized console', () => {
         `/api/services/s3/objects/download?bucket=${encodeURIComponent(bucket)}&key=${encodeURIComponent(key)}`,
       );
       expect(download.status()).toBe(200);
-      expect(download.headers()['x-localdeck-download-mode']).toBe('presigned-proxy');
+      expect(download.headers()['x-localdeck-download-mode']).toBe('sdk-stream');
       const downloaded = await download.body();
       expect(downloaded.byteLength).toBe(payload.byteLength);
       expect(downloaded.equals(payload)).toBe(true);

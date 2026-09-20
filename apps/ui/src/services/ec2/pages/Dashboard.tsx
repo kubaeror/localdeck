@@ -80,8 +80,9 @@ export function DashboardPage({ descriptor }: ServicePageProps): ReactElement {
   }, []);
   const { data, loading, refreshing, error, reload } = useEc2Resource(loader);
 
-  // The counts refresh on their own; polling never blocks the page.
-  usePolling(true, POLL_INTERVAL_MS, () => reload());
+  // The counts refresh on their own; polling never blocks the page, and a
+  // dropped poll keeps the previous counts instead of blanking the dashboard.
+  usePolling(true, POLL_INTERVAL_MS, () => reload({ silent: true }));
 
   const confirmDeleteKeyPair = async (): Promise<void> => {
     if (deleting || deleteTarget === null) return;
