@@ -1,9 +1,10 @@
 # Contributing to LocalDeck
 
 Thanks for taking an interest in LocalDeck, the open-source web console for
-LocalStack. This guide covers the setup a contributor needs, the checks a pull
-request must pass, and the rules that keep the project legally and technically
-clean.
+local AWS emulators (LocalStack, MiniStack, Floci and any endpoint that speaks
+the AWS wire protocol). This guide covers the setup a contributor needs, the
+checks a pull request must pass, and the rules that keep the project legally
+and technically clean.
 
 ## Prerequisites
 
@@ -11,14 +12,17 @@ clean.
   pins 22 for version managers).
 - **pnpm 10** — `corepack enable pnpm`. `.npmrc` sets `engine-strict=true`, so
   an older Node fails the install instead of failing later in Vite.
-- **A LocalStack instance you manage yourself.** LocalDeck never starts, stops,
-  reconfigures or wipes LocalStack; the smoke tests and the live verification
-  scripts simply talk to the endpoint you point them at.
+- **A local emulator you manage yourself.** LocalDeck never starts, stops,
+  reconfigures or wipes it; the smoke tests and the live verification scripts
+  simply talk to the endpoint you point them at. LocalStack, MiniStack
+  (`ministackorg/ministack`) and Floci (`floci/floci:latest`) are supported and
+  tested; other AWS-compatible endpoints work through the generic fallback.
   - Current LocalStack releases (2026.03 and later) require an auth token to
     start; obtain one from your LocalStack account and export it in _your_
     LocalStack environment. This repository never stores or forwards it.
-  - The EKS module needs a LocalStack entitlement that includes EKS, and the
-    k3d provider needs the Docker socket mounted into _your_ LocalStack
+  - The EKS module needs a provider that starts real Kubernetes containers
+    (LocalStack with an EKS entitlement, Floci real mode, MiniStack k3s) and
+    the Docker socket mounted into _your_ emulator
     (`-v /var/run/docker.sock:/var/run/docker.sock`).
 
 ## Setup
@@ -27,7 +31,7 @@ clean.
 git clone https://github.com/kubaeror/localdeck.git
 cd localdeck
 pnpm install
-LOCALSTACK_ENDPOINT=http://localhost:4566 pnpm dev
+EMULATOR_ENDPOINT=http://localhost:4566 pnpm dev
 ```
 
 - ui: <http://localhost:5173>
@@ -49,22 +53,24 @@ pnpm verify:repo        # disclaimer, MIT license, no secret material
 pnpm gen:parity:check   # README parity table is current
 ```
 
-CI (`.github/workflows/ci.yml`) runs exactly these on Node 22, builds both
-Docker images without pushing them, and then runs two browser jobs: a smoke job
-that spins up a **throwaway LocalStack service container** and drives the
-console through `vite preview`, and a container job that runs the shipped
-`docker compose` stack (nginx + api) and uploads an S3 object larger than
-nginx's 1 MiB default. That container is the single allowed exception to
-"LocalDeck never manages LocalStack": it exists only inside the workflow.
+CI (`.github/workflows/ci.yml`) runs exactly these on Node 22, builds the three
+Docker images without pushing them, and then runs browser jobs: a smoke matrix
+that spins up a **throwaway emulator service container per leg** (LocalStack,
+MiniStack and Floci) and drives the console through `vite preview`, a container
+job that runs the shipped `docker compose` stack (nginx + api) and uploads an
+S3 object larger than nginx's 1 MiB default, and a sidecar job that starts
+Floci plus the single-container console image and asserts the Floci Console
+Contract v1 surface. Those containers are the single allowed exception to
+"LocalDeck never manages an emulator": they exist only inside the workflow.
 
 ## End-to-end smoke tests
 
 The Playwright suite lives in `e2e/` and drives the real console against a real
-LocalStack:
+emulator:
 
 ```bash
-# with your own LocalStack already running (node process, not containers):
-LOCALSTACK_ENDPOINT=http://localhost:4566 pnpm test:e2e
+# with your own emulator already running (node process, not containers):
+EMULATOR_ENDPOINT=http://localhost:4566 pnpm test:e2e
 
 # or while `pnpm dev` runs: Playwright reuses the servers on 3001/5173
 pnpm test:e2e
@@ -79,11 +85,12 @@ asserts:
 - an object uploads and downloads through the S3 proxy routes;
 - an EC2 instance is launched and terminated through the dispatcher;
 - unknown services, non-whitelisted operations, missing SDK packages and an
-  unreachable LocalStack answer the documented 404/400/501/503 contracts;
-- EKS cluster creation starts through the wizard when the emulator reports EKS
-  (Ultimate-plan feature). On an emulator without EKS the test asserts the
-  console's honest "not enabled" page instead and annotates the run — it never
-  fakes a cluster.
+  unreachable emulator answer the documented 404/400/501/503 contracts;
+- EKS cluster creation starts through the wizard when the emulator reports EKS.
+  On an emulator without EKS the test asserts the console's honest "not enabled"
+  page instead and annotates the run — it never fakes a cluster. Set
+  `LOCALDECK_E2E_SKIP_EKS=1` in matrix legs that only smoke-test the rest of the
+  console (the MiniStack/Floci CI legs do).
 
 The shipped containers have their own minimal project:
 
@@ -92,7 +99,8 @@ docker compose up --build            # nginx serves the bundle, api proxies /api
 pnpm test:e2e:container              # uploads >1 MiB through nginx
 ```
 
-Useful environment variables: `LOCALSTACK_ENDPOINT`, `E2E_UI_PORT`,
+Useful environment variables: `EMULATOR_ENDPOINT` (`LOCALSTACK_ENDPOINT` is an
+alias), `EMULATOR_PROVIDER`, `LOCALDECK_E2E_SKIP_EKS`, `E2E_UI_PORT`,
 `E2E_API_PORT`, `E2E_CONTAINER_UI_PORT`. The specs record every resource they
 create under `e2e/test-results/e2e-cleanup.jsonl`; a global teardown sweeps
 anything left behind (only names with the `localdeck-e2e` prefix and instances
@@ -131,9 +139,14 @@ without CI touching the working tree.
 - TypeScript strict, **zero `any`**, no `@ts-expect-error` without an
   explanatory reason. ESLint enforces both; `pnpm verify:repo` and the
   architecture guard tests catch the rest.
-- The browser never calls LocalStack or the AWS SDK directly. Every service
+- The browser never calls the emulator or the AWS SDK directly. Every service
   call goes through `apps/ui/src/lib/apiClient.ts` to the api dispatcher; the
   ui architecture tests fail the build otherwise.
+- Provider differences live in `packages/shared/src/providers/`: health
+  fingerprints, status normalization (Floci's `available` means disabled) and
+  service-key aliases. Never compare raw provider statuses outside that module.
+  Operations an emulator does not implement must surface as
+  `EMULATOR_OPERATION_UNSUPPORTED` and a disabled action, never a raw 5xx.
 - AWS SDK clients are constructed only by
   `apps/api/src/lib/awsClients.ts`.
 - Compose every page from the shared primitives in
@@ -154,6 +167,8 @@ without CI touching the working tree.
   or the README.
 - Icon artwork is not covered by the project's MIT license. Keep official
   filenames and never recolor or crop icons; see `NOTICE`.
+- LocalDeck is not affiliated with LocalStack, MiniStack or Floci. Name them
+  factually for interoperability; never use their logos or imply endorsement.
 
 ## Pull requests
 
@@ -161,9 +176,9 @@ without CI touching the working tree.
 2. Keep the change focused; include tests for behaviour and update the docs
    the change touches.
 3. Run the full check list above locally (the same commands CI runs).
-4. Describe what you verified against your own LocalStack, including the
-   LocalStack version, because emulator coverage varies between releases and
-   plans.
+4. Describe what you verified against your own emulator (`pnpm
+verify:emulator` prints the detected provider and version), because coverage
+   varies between emulators, releases and plans.
 
 ## License
 
