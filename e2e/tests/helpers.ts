@@ -1,4 +1,5 @@
 import type { APIRequestContext } from '@playwright/test';
+import type { ApiConfigResponse, HealthResponse } from '@localdeck/shared';
 import { E2E_RESOURCE_PREFIX, E2E_TAG_KEY, REPO_ROOT, trackResource } from '../support';
 
 /**
@@ -9,46 +10,7 @@ import { E2E_RESOURCE_PREFIX, E2E_TAG_KEY, REPO_ROOT, trackResource } from '../s
 
 export { E2E_RESOURCE_PREFIX, E2E_TAG_KEY, REPO_ROOT, trackResource };
 
-export interface EmulatorCounts {
-  total?: number;
-  enabled?: number;
-  disabled?: number;
-  error?: number;
-  other?: number;
-}
-
-export interface HealthResponse {
-  status: 'ok' | 'degraded';
-  checkedAt: string;
-  endpoint: string;
-  region: string;
-  provider: {
-    provider: 'localstack' | 'floci' | 'ministack' | 'generic';
-    providerLabel: string;
-    version: string | null;
-    edition: string | null;
-    docsUrl: string;
-  };
-  emulator: {
-    services: Record<string, 'enabled' | 'disabled' | 'starting' | 'error' | 'unknown'>;
-    counts: EmulatorCounts;
-    version?: string;
-    hasServiceInventory: boolean;
-  };
-}
-
-export interface ApiConfigResponse {
-  application: { name: string; version: string; environment: string };
-  emulator: {
-    provider: string;
-    providerLabel: string;
-    endpoint: string;
-    publicEndpoint: string;
-    region: string;
-    healthPaths: readonly string[];
-  };
-  ui: { statusPollIntervalMs: number };
-}
+export type { ApiConfigResponse, HealthResponse };
 
 /** Reads the api's normalized emulator health document. */
 export async function fetchHealth(request: APIRequestContext): Promise<HealthResponse> {

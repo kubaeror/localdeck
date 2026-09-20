@@ -10,7 +10,7 @@ import {
 /**
  * The two S3-specific api routes carry object bytes, which the JSON dispatcher
  * cannot: a multipart upload that streams into LocalStack and a download that
- * proxies the presigned URL back. Both are part of the flagship object browser
+ * streams the object back through the SDK. Both are part of the flagship object browser
  * flow, so they get their own end-to-end check against the real emulator.
  */
 test.describe('s3 object upload and download', () => {
@@ -45,7 +45,7 @@ test.describe('s3 object upload and download', () => {
         `/api/services/s3/objects/download?bucket=${encodeURIComponent(bucket)}&key=${encodeURIComponent(key)}`,
       );
       expect(download.status()).toBe(200);
-      expect(download.headers()['x-localdeck-download-mode']).toBe('presigned-proxy');
+      expect(download.headers()['x-localdeck-download-mode']).toBe('sdk-stream');
       const downloaded = await download.body();
       expect(downloaded.byteLength).toBe(payload.byteLength);
       expect(downloaded.equals(payload)).toBe(true);

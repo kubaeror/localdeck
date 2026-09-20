@@ -163,12 +163,11 @@ jobs:
           SERVICES: ${{ matrix.services }}
           DEBUG: '0'
           PERSISTENCE: '0'
+        # No --health-cmd: the LocalStack, Floci and MiniStack images ship
+        # different (or no) HTTP clients, so a curl-based check never turns
+        # healthy on Floci/MiniStack. The explicit readiness step below polls
+        # /_localstack/health with retries instead.
         options: >-
-          --health-cmd "curl -sf http://localhost:4566/_localstack/health || exit 1"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 30
-          --health-start-period 30s
           --volume /var/run/docker.sock:/var/run/docker.sock
 
     env:
@@ -218,7 +217,7 @@ jobs:
 
       - name: Confirm the CI emulator service container is reachable
         run: |
-          curl --fail --silent --retry 10 --retry-connrefused \
+          curl --fail --silent --retry 10 --retry-connrefused --retry-all-errors \
             "${EMULATOR_ENDPOINT}/_localstack/health" | head -c 400
           echo
 
