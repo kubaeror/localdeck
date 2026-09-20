@@ -69,7 +69,7 @@ describe('EmulatorStatusProvider', () => {
         return jsonResponse(
           {
             error: {
-              code: 'LOCALSTACK_UNREACHABLE',
+              code: 'EMULATOR_UNREACHABLE',
               statusCode: 503,
               message: 'LocalStack is unreachable at http://localhost:4566.',
             },

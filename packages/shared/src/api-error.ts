@@ -4,7 +4,7 @@
  * the ui can render a consistent error state instead of a raw stack trace.
  */
 export interface ApiError {
-  /** Stable, machine-readable code, e.g. LOCALSTACK_UNREACHABLE. */
+  /** Stable, machine-readable code, e.g. EMULATOR_UNREACHABLE. */
   code: string;
   /** Human-readable, safe-to-display message (never contains credentials). */
   message: string;

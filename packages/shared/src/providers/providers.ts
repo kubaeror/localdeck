@@ -93,9 +93,12 @@ const LOCALSTACK: EmulatorProviderDescriptor = {
   docsUrl: 'https://docs.localstack.cloud/aws/services/',
   healthPaths: ['/_localstack/health'],
   hasServiceInventory: true,
-  // LocalStack always reports its feature flags; a bare `services` document
-  // without one is handled by the api's "unknown inventory" fallback instead.
-  detect: (payload) => 'features' in payload,
+  // Current releases report `features`; older ones (4.x community) do not, but
+  // still use the LocalStack status vocabulary. MiniStack and Floci carry
+  // distinctive markers, so a services-only document is LocalStack's.
+  detect: (payload) =>
+    'features' in payload ||
+    ('services' in payload && !('ready_scripts' in payload) && !('original_edition' in payload)),
   normalizeStatus: normalizeLocalStackStatus,
 };
 

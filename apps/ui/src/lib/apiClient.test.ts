@@ -72,7 +72,7 @@ describe('apiClient', () => {
   it('surfaces the shared ApiError from a 503 response', async () => {
     const body: ApiErrorResponse = {
       error: {
-        code: 'LOCALSTACK_UNREACHABLE',
+        code: 'EMULATOR_UNREACHABLE',
         message: 'LocalDeck api is running, but LocalStack is unreachable.',
         statusCode: 503,
         details: { endpoint: 'http://localhost:4566' },
@@ -82,7 +82,7 @@ describe('apiClient', () => {
 
     const error = await getHealth().catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(ApiClientError);
-    expect((error as ApiClientError).apiError.code).toBe('LOCALSTACK_UNREACHABLE');
+    expect((error as ApiClientError).apiError.code).toBe('EMULATOR_UNREACHABLE');
     expect((error as ApiClientError).apiError.statusCode).toBe(503);
   });
 

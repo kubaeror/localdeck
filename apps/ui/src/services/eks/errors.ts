@@ -82,10 +82,17 @@ const FRIENDLY: Readonly<Record<string, { field: EksErrorField; message: string 
     message:
       'The kubeconfig can only be downloaded once the cluster is ACTIVE. LocalDeck keeps polling while the cluster is being created.',
   },
+  EMULATOR_UNREACHABLE: {
+    field: null,
+    message:
+      'LocalDeck cannot reach the emulator right now. The console stopped sending EKS calls; retry when it is reachable again.',
+  },
+  // Older api builds answered the legacy code; keep the mapping so a mixed
+  // deployment still renders friendly copy.
   LOCALSTACK_UNREACHABLE: {
     field: null,
     message:
-      'LocalDeck cannot reach LocalStack right now. The console stopped sending EKS calls; retry when LocalStack is reachable again.',
+      'LocalDeck cannot reach the emulator right now. The console stopped sending EKS calls; retry when it is reachable again.',
   },
 };
 

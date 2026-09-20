@@ -96,9 +96,6 @@ export const EMULATOR_UNREACHABLE: ApiErrorResponse = {
   },
 };
 
-/** @deprecated Renamed to EMULATOR_UNREACHABLE. */
-export const LOCALSTACK_UNREACHABLE = EMULATOR_UNREACHABLE;
-
 /** Results the stubbed dispatcher answers with, per `service/operation`. */
 export const TEST_OPERATION_RESULTS: Readonly<Record<string, unknown>> = {
   's3/ListBuckets': {

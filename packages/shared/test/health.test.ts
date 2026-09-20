@@ -38,10 +38,11 @@ describe('emulator provider descriptors', () => {
     const detect = (payload: Record<string, unknown>): string | undefined =>
       detectEmulatorProvider(payload)?.id;
     expect(detect({ features: {}, services: {} })).toBe('localstack');
+    // LocalStack 4.x community health documents have no `features` key.
+    expect(detect({ services: { s3: 'available' }, version: '4.14.0' })).toBe('localstack');
     expect(detect({ original_edition: 'floci-always-free' })).toBe('floci');
     expect(detect({ edition: 'floci-always-free' })).toBe('floci');
     expect(detect({ ready_scripts: { status: 'completed' } })).toBe('ministack');
-    expect(detect({ services: {} })).toBeUndefined();
     expect(detect({ unexpected: true })).toBeUndefined();
   });
 });
