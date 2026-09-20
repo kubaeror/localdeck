@@ -87,7 +87,7 @@ export function ClustersListPage({ descriptor }: ServicePageProps): ReactElement
             href={clusterPath(cluster.name)}
             onFollow={(event) => {
               event.preventDefault();
-              navigate(clusterPath(cluster.name));
+              void navigate(clusterPath(cluster.name));
             }}
           >
             {cluster.name}
@@ -130,7 +130,7 @@ export function ClustersListPage({ descriptor }: ServicePageProps): ReactElement
               },
             ]}
             onItemClick={({ detail }) => {
-              if (detail.id === 'view') navigate(clusterPath(cluster.name));
+              if (detail.id === 'view') void navigate(clusterPath(cluster.name));
               if (detail.id === 'delete') {
                 setDeleteError(null);
                 setDeleteTarget(cluster);
@@ -283,7 +283,7 @@ export function ClustersListPage({ descriptor }: ServicePageProps): ReactElement
           <Button
             variant="primary"
             onClick={() => {
-              navigate(`${serviceConsolePath(descriptor.id)}/create`);
+              void navigate(`${serviceConsolePath(descriptor.id)}/create`);
             }}
           >
             Create cluster

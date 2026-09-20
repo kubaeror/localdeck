@@ -80,7 +80,7 @@ export function GroupDetailPage({ descriptor }: ServicePageProps): ReactElement 
       await deleteGroup(groupName);
       flashbar.notify({ type: 'success', header: 'Group deleted', content: groupName });
       setDeleteVisible(false);
-      navigate(`${serviceConsolePath(descriptor.id)}/groups`);
+      void navigate(`${serviceConsolePath(descriptor.id)}/groups`);
     } catch (caught) {
       setDeleteError(toFriendlyIamError(caught).message);
     } finally {

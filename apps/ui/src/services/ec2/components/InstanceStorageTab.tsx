@@ -65,7 +65,7 @@ export function InstanceStorageTab({ instance, serviceId }: InstanceStorageTabPr
 
   const openVolume = useCallback(
     (volumeId: string) => {
-      navigate(volumePath(volumeId));
+      void navigate(volumePath(volumeId));
     },
     [navigate, volumePath],
   );

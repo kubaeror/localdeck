@@ -165,7 +165,7 @@ export function ClusterDetailPage({ descriptor }: ServicePageProps): ReactElemen
         content: `${providerLabel} is tearing down the cluster.`,
       });
       setDeleteOpen(false);
-      navigate(serviceConsolePath(descriptor.id));
+      void navigate(serviceConsolePath(descriptor.id));
     } catch (caught) {
       setDeleteError(toFriendlyEksError(caught).message);
     } finally {

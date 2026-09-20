@@ -77,7 +77,7 @@ export function UserCreatePage({ descriptor }: ServicePageProps): ReactElement {
   const userPath = `${serviceConsolePath(descriptor.id)}/users/${encodeURIComponent(createdUserName)}`;
 
   const leave = (): void => {
-    navigate(`${serviceConsolePath(descriptor.id)}/users`);
+    void navigate(`${serviceConsolePath(descriptor.id)}/users`);
   };
 
   const submit = async (): Promise<void> => {
@@ -116,7 +116,7 @@ export function UserCreatePage({ descriptor }: ServicePageProps): ReactElement {
 
     if (!programmaticAccess) {
       setSubmitting(false);
-      navigate(`${serviceConsolePath(descriptor.id)}/users/${encodeURIComponent(userName)}`);
+      void navigate(`${serviceConsolePath(descriptor.id)}/users/${encodeURIComponent(userName)}`);
       return;
     }
 
@@ -130,7 +130,7 @@ export function UserCreatePage({ descriptor }: ServicePageProps): ReactElement {
         header: 'User created, but the access key failed',
         content: toFriendlyIamError(caught).message,
       });
-      navigate(`${serviceConsolePath(descriptor.id)}/users/${encodeURIComponent(userName)}`);
+      void navigate(`${serviceConsolePath(descriptor.id)}/users/${encodeURIComponent(userName)}`);
     } finally {
       setSubmitting(false);
     }
@@ -327,7 +327,7 @@ export function UserCreatePage({ descriptor }: ServicePageProps): ReactElement {
         <Modal
           visible
           onDismiss={() => {
-            navigate(userPath);
+            void navigate(userPath);
           }}
           header="Access key created"
           size="medium"
@@ -337,7 +337,7 @@ export function UserCreatePage({ descriptor }: ServicePageProps): ReactElement {
               <Button
                 variant="primary"
                 onClick={() => {
-                  navigate(userPath);
+                  void navigate(userPath);
                 }}
               >
                 Go to user

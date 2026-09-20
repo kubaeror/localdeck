@@ -52,7 +52,7 @@ export function CreatePage({ descriptor }: ServicePageProps): ReactElement {
   const [error, setError] = useState<ApiError | null>(null);
 
   const backToList = (): void => {
-    navigate(serviceConsolePath(descriptor.id));
+    void navigate(serviceConsolePath(descriptor.id));
   };
 
   const bucketPath = (bucket: string): string =>
@@ -88,7 +88,7 @@ export function CreatePage({ descriptor }: ServicePageProps): ReactElement {
         header: 'Bucket created',
         content: name,
       });
-      navigate(bucketPath(name));
+      void navigate(bucketPath(name));
     } catch (caught) {
       const friendly = toFriendlyS3Error(caught);
       const annotation = stepAnnotation(friendly.apiError);
@@ -102,14 +102,14 @@ export function CreatePage({ descriptor }: ServicePageProps): ReactElement {
           action: (
             <Button
               onClick={() => {
-                navigate(bucketPath(name));
+                void navigate(bucketPath(name));
               }}
             >
               View bucket
             </Button>
           ),
         });
-        navigate(bucketPath(name));
+        void navigate(bucketPath(name));
         return;
       }
       if (friendly.field === 'bucketName') {

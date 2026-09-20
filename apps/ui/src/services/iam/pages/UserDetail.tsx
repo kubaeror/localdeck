@@ -83,7 +83,7 @@ export function UserDetailPage({ descriptor }: ServicePageProps): ReactElement {
       await deleteUser(userName);
       flashbar.notify({ type: 'success', header: 'User deleted', content: userName });
       setDeleteVisible(false);
-      navigate(`${serviceConsolePath(descriptor.id)}/users`);
+      void navigate(`${serviceConsolePath(descriptor.id)}/users`);
     } catch (caught) {
       setDeleteError(toFriendlyIamError(caught).message);
     } finally {

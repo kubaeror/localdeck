@@ -101,7 +101,7 @@ export function InstanceSecurityTab({
               actions={
                 <Button
                   onClick={() => {
-                    navigate(groupPath(group.groupId));
+                    void navigate(groupPath(group.groupId));
                   }}
                 >
                   View security group
@@ -113,7 +113,7 @@ export function InstanceSecurityTab({
                 href={groupPath(group.groupId)}
                 onFollow={(event) => {
                   event.preventDefault();
-                  navigate(groupPath(group.groupId));
+                  void navigate(groupPath(group.groupId));
                 }}
               >
                 ({group.groupId})

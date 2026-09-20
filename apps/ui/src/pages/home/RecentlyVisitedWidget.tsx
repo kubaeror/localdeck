@@ -48,7 +48,7 @@ export function RecentlyVisitedWidget({ onRemove }: ConsoleWidgetProps): ReactEl
             <Button
               variant="primary"
               onClick={() => {
-                navigate(ALL_SERVICES_PATH);
+                void navigate(ALL_SERVICES_PATH);
               }}
             >
               Browse all services
@@ -73,7 +73,7 @@ export function RecentlyVisitedWidget({ onRemove }: ConsoleWidgetProps): ReactEl
                 href={serviceConsolePath(entry.service.id)}
                 onFollow={(event) => {
                   event.preventDefault();
-                  navigate(serviceConsolePath(entry.service.id));
+                  void navigate(serviceConsolePath(entry.service.id));
                 }}
               >
                 {entry.service.displayName}

@@ -1,5 +1,7 @@
 import {
   API_PATHS,
+  ApiErrorCodes,
+  type ApiErrorResponse,
   type ServiceOperationRequest,
   type ServiceOperationResponse,
 } from '@localdeck/shared';
@@ -11,6 +13,21 @@ import { dispatchServiceOperation } from '../registry/dispatcher.js';
 interface DispatcherParams {
   serviceId: string;
   operation: string;
+}
+
+export interface DispatcherRouteOptions {
+  /**
+   * Largest serialized result the route will send. A runaway list operation
+   * (an unfiltered scan) would otherwise buffer hundreds of megabytes into the
+   * tab; above the cap the route answers 502 EMULATOR_RESPONSE_TOO_LARGE.
+   */
+  maxResponseBytes?: number;
+}
+
+const DEFAULT_MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
+
+function formatMiB(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
 /**
@@ -26,7 +43,10 @@ interface DispatcherParams {
 export function registerDispatcherRoutes(
   app: FastifyInstance,
   clientOverrides: AwsClientConfigOverrides = {},
+  options: DispatcherRouteOptions = {},
 ): void {
+  const maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+
   app.post<{ Params: DispatcherParams; Body: ServiceOperationRequest }>(
     API_PATHS.serviceOperation,
     {
@@ -60,6 +80,33 @@ export function registerDispatcherRoutes(
           },
           additionalProperties: false,
         },
+      },
+      onSend: async (request, reply, payload) => {
+        if (typeof payload !== 'string') return payload;
+        const bytes = Buffer.byteLength(payload);
+        if (bytes <= maxResponseBytes) return payload;
+
+        const params = request.params as Partial<DispatcherParams>;
+        const serviceId = params.serviceId ?? 'unknown';
+        const operation = params.operation ?? 'unknown';
+        request.log.warn(
+          { serviceId, operation, bytes, limitBytes: maxResponseBytes },
+          'dispatcher response exceeds the size cap',
+        );
+        void reply.code(502);
+        reply.removeHeader('content-length');
+        return JSON.stringify({
+          error: {
+            code: ApiErrorCodes.emulatorResponseTooLarge,
+            statusCode: 502,
+            message:
+              `The ${serviceId} "${operation}" response is ${formatMiB(bytes)}, above the ` +
+              `${formatMiB(maxResponseBytes)} LocalDeck cap. Narrow the request (filters, ` +
+              'pagination) or raise DISPATCHER_MAX_RESPONSE_BYTES.',
+            service: serviceId,
+            details: { service: serviceId, operation, bytes, limitBytes: maxResponseBytes },
+          },
+        } satisfies ApiErrorResponse);
       },
     },
     async (request, reply): Promise<ServiceOperationResponse> => {

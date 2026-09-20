@@ -69,7 +69,7 @@ export function VolumeDetailPage({ descriptor }: ServicePageProps): ReactElement
       await deleteVolume(volumeId);
       flashbar.notify({ type: 'success', header: 'Volume deleted', content: volumeId });
       setDeleteVisible(false);
-      navigate(`${serviceConsolePath(descriptor.id)}/volumes`);
+      void navigate(`${serviceConsolePath(descriptor.id)}/volumes`);
     } catch (caught) {
       setDeleteError(toFriendlyEc2Error(caught).message);
     } finally {
@@ -94,7 +94,7 @@ export function VolumeDetailPage({ descriptor }: ServicePageProps): ReactElement
             href={instancePath(attachment.instanceId)}
             onFollow={(event) => {
               event.preventDefault();
-              navigate(instancePath(attachment.instanceId));
+              void navigate(instancePath(attachment.instanceId));
             }}
           >
             <Box variant="code" display="inline">

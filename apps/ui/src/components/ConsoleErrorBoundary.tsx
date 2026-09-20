@@ -31,7 +31,7 @@ export function ConsoleErrorBoundary({ children, scope }: ConsoleErrorBoundaryPr
   const recover = (): void => {
     setCaptured(null);
     setResetKey((previous) => previous + 1);
-    navigate(CONSOLE_HOME_PATH);
+    void navigate(CONSOLE_HOME_PATH);
   };
 
   return (

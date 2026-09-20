@@ -70,7 +70,7 @@ export function RoleCreatePage({ descriptor }: ServicePageProps): ReactElement {
   const normalizedTags = normalizeTags(tags);
 
   const leave = (): void => {
-    navigate(`${serviceConsolePath(descriptor.id)}/roles`);
+    void navigate(`${serviceConsolePath(descriptor.id)}/roles`);
   };
 
   const trustProblem = (): string | null => {
@@ -137,7 +137,7 @@ export function RoleCreatePage({ descriptor }: ServicePageProps): ReactElement {
     }
 
     setSubmitting(false);
-    navigate(`${serviceConsolePath(descriptor.id)}/roles/${encodeURIComponent(roleName)}`);
+    void navigate(`${serviceConsolePath(descriptor.id)}/roles/${encodeURIComponent(roleName)}`);
   };
 
   const entityStep = (

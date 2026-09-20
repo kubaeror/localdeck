@@ -57,7 +57,7 @@ export function GroupCreatePage({ descriptor }: ServicePageProps): ReactElement 
   }, []);
 
   const leave = (): void => {
-    navigate(`${serviceConsolePath(descriptor.id)}/groups`);
+    void navigate(`${serviceConsolePath(descriptor.id)}/groups`);
   };
 
   const submit = async (): Promise<void> => {
@@ -111,7 +111,7 @@ export function GroupCreatePage({ descriptor }: ServicePageProps): ReactElement 
     }
 
     setSubmitting(false);
-    navigate(`${serviceConsolePath(descriptor.id)}/groups/${encodeURIComponent(groupName)}`);
+    void navigate(`${serviceConsolePath(descriptor.id)}/groups/${encodeURIComponent(groupName)}`);
   };
 
   const detailsStep = (

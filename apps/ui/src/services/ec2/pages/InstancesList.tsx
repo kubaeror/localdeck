@@ -81,7 +81,7 @@ export function InstancesListPage({ descriptor }: ServicePageProps): ReactElemen
 
   const openInstance = useCallback(
     (instanceId: string) => {
-      navigate(instancePath(instanceId));
+      void navigate(instancePath(instanceId));
     },
     [navigate, instancePath],
   );
@@ -241,7 +241,7 @@ export function InstancesListPage({ descriptor }: ServicePageProps): ReactElemen
           <Button
             variant="primary"
             onClick={() => {
-              navigate(`${serviceConsolePath(descriptor.id)}/instances/launch`);
+              void navigate(`${serviceConsolePath(descriptor.id)}/instances/launch`);
             }}
           >
             Launch instance

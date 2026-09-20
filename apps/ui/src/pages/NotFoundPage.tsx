@@ -21,7 +21,7 @@ export function NotFoundPage(): ReactElement {
             <Button
               variant="primary"
               onClick={() => {
-                navigate(CONSOLE_HOME_PATH);
+                void navigate(CONSOLE_HOME_PATH);
               }}
             >
               Back to Console Home

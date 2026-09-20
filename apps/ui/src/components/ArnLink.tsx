@@ -46,7 +46,7 @@ export function ArnLink({ arn, label }: ArnLinkProps): ReactElement {
       ariaLabel={`Open the ${service.displayName} console for ${text}`}
       onFollow={(event) => {
         event.preventDefault();
-        navigate(serviceConsolePath(service.id));
+        void navigate(serviceConsolePath(service.id));
       }}
     >
       {text}

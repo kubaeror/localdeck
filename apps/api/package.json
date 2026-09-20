@@ -2,7 +2,7 @@
   "name": "@localdeck/api",
   "version": "0.1.0",
   "private": true,
-  "description": "LocalDeck backend \u2014 proxies the external LocalStack instance",
+  "description": "LocalDeck backend — proxies the external LocalStack instance",
   "type": "module",
   "main": "dist/index.js",
   "exports": {
@@ -54,6 +54,7 @@
     "@aws-sdk/lib-storage": "^3.1135.0",
     "@fastify/cors": "^11.3.0",
     "@fastify/multipart": "^10.1.1",
+    "@fastify/rate-limit": "^11.2.0",
     "@localdeck/shared": "workspace:*",
     "fastify": "^5.12.5"
   },

@@ -566,7 +566,7 @@ export function ObjectsTab({
           error={bucketsError}
           selectedBucket={bucket}
           onSelect={(name) => {
-            navigate(`${serviceConsolePath('s3')}/buckets/${encodeURIComponent(name)}`);
+            void navigate(`${serviceConsolePath('s3')}/buckets/${encodeURIComponent(name)}`);
           }}
           onRefresh={onRefreshBuckets}
         />

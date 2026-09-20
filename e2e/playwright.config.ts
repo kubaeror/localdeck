@@ -66,6 +66,9 @@ export default defineConfig({
         LOCALSTACK_ENDPOINT,
         LOG_LEVEL: 'warn',
         LOG_PRETTY: 'false',
+        // The suite intentionally exercises many routes in a burst; the
+        // production rate budget must not make smoke tests flaky.
+        RATE_LIMIT_MAX: '100000',
       },
     },
     {

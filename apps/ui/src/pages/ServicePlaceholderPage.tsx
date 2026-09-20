@@ -168,7 +168,7 @@ export function ServicePlaceholderPage({
             <Button
               variant="primary"
               onClick={() => {
-                navigate(CONSOLE_HOME_PATH);
+                void navigate(CONSOLE_HOME_PATH);
               }}
             >
               Back to Console Home
@@ -177,7 +177,7 @@ export function ServicePlaceholderPage({
           secondaryAction={
             <Button
               onClick={() => {
-                navigate(ALL_SERVICES_PATH);
+                void navigate(ALL_SERVICES_PATH);
               }}
             >
               All services

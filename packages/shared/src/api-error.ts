@@ -62,6 +62,10 @@ export const ApiErrorCodes = {
   clusterNotReady: 'CLUSTER_NOT_READY',
   /** A multipart upload exceeded the 5 GiB single-object limit. */
   payloadTooLarge: 'PAYLOAD_TOO_LARGE',
+  /** The caller exceeded the per-IP request budget on /api routes. */
+  rateLimited: 'RATE_LIMITED',
+  /** The dispatcher result exceeded DISPATCHER_MAX_RESPONSE_BYTES. */
+  emulatorResponseTooLarge: 'EMULATOR_RESPONSE_TOO_LARGE',
 } as const;
 
 export function isApiError(value: unknown): value is ApiError {

@@ -40,7 +40,7 @@ export function RolesListPage({ descriptor }: ServicePageProps): ReactElement {
 
   const openRole = useCallback(
     (roleName: string) => {
-      navigate(rolePath(roleName));
+      void navigate(rolePath(roleName));
     },
     [navigate, rolePath],
   );
@@ -107,7 +107,7 @@ export function RolesListPage({ descriptor }: ServicePageProps): ReactElement {
           <Button
             variant="primary"
             onClick={() => {
-              navigate(`${serviceConsolePath(descriptor.id)}/roles/create`);
+              void navigate(`${serviceConsolePath(descriptor.id)}/roles/create`);
             }}
           >
             Create role

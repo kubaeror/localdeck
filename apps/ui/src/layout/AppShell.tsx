@@ -126,7 +126,7 @@ export function AppShell(): ReactElement {
                     if (event.detail.external === true) return;
                     event.preventDefault();
                     setFilter('');
-                    navigate(event.detail.href);
+                    void navigate(event.detail.href);
                   }}
                 />
                 {navigation.isEmptyFilter ? (

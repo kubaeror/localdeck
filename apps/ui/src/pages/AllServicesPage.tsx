@@ -137,7 +137,7 @@ export function AllServicesPage(): ReactElement {
             href={serviceConsolePath(row.service.id)}
             onFollow={(event) => {
               event.preventDefault();
-              navigate(serviceConsolePath(row.service.id));
+              void navigate(serviceConsolePath(row.service.id));
             }}
           >
             {row.service.displayName}

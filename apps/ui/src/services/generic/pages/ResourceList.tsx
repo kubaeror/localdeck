@@ -80,7 +80,7 @@ export function GenericResourceList({ descriptor }: ServicePageProps): ReactElem
   );
 
   const openDetail = (row: GenericResourceRow): void => {
-    navigate(`${serviceConsolePath(descriptor.id)}/resources/${encodeURIComponent(row.id)}`);
+    void navigate(`${serviceConsolePath(descriptor.id)}/resources/${encodeURIComponent(row.id)}`);
   };
 
   const confirmDelete = async (): Promise<void> => {
@@ -161,7 +161,7 @@ export function GenericResourceList({ descriptor }: ServicePageProps): ReactElem
           <Button
             variant="primary"
             onClick={() => {
-              navigate(`${serviceConsolePath(descriptor.id)}/create`);
+              void navigate(`${serviceConsolePath(descriptor.id)}/create`);
             }}
           >
             Create resource

@@ -54,6 +54,20 @@ export interface AppConfig {
   /** How often the ui should refresh the status widget. */
   statusPollIntervalMs: number;
   /**
+   * Requests per client IP allowed per `rateLimitWindowMs` on `/api/*` routes.
+   * 0 disables the limiter entirely (the api is an unauthenticated management
+   * proxy, so the default is generous but bounded).
+   */
+  rateLimitMax: number;
+  /** Window the rate limit is measured over, in milliseconds. */
+  rateLimitWindowMs: number;
+  /**
+   * Largest serialized dispatcher response LocalDeck will send to the browser.
+   * A runaway list operation (an unfiltered scan) would otherwise buffer
+   * hundreds of megabytes into the tab; the cap turns that into a clean 502.
+   */
+  dispatcherMaxResponseBytes: number;
+  /**
    * Floci Console Contract v1 mode: unreachable emulators answer
    * `200 {status:"unavailable"}` instead of `503` on `/api/health`, which is
    * what the Floci sidecar supervisor polls before redirecting the browser.
@@ -82,6 +96,9 @@ const DEFAULTS = {
   emulatorHealthCacheMs: 2_000,
   shutdownTimeoutMs: 10_000,
   statusPollIntervalMs: 15_000,
+  rateLimitMax: 1_200,
+  rateLimitWindowMs: 60_000,
+  dispatcherMaxResponseBytes: 16 * 1024 * 1024,
 } as const;
 
 const LOG_LEVELS = new Set(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']);
@@ -295,6 +312,22 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       'UI_STATUS_POLL_INTERVAL_MS',
       DEFAULTS.statusPollIntervalMs,
       { min: 1_000, max: 600_000 },
+    ),
+    rateLimitMax: parseIntEnv(env, 'RATE_LIMIT_MAX', DEFAULTS.rateLimitMax, {
+      // 0 disables the limiter (RATE_LIMIT_MAX=0) for operators who front the
+      // api with their own gateway.
+      min: 0,
+      max: 1_000_000,
+    }),
+    rateLimitWindowMs: parseIntEnv(env, 'RATE_LIMIT_WINDOW_MS', DEFAULTS.rateLimitWindowMs, {
+      min: 1_000,
+      max: 3_600_000,
+    }),
+    dispatcherMaxResponseBytes: parseIntEnv(
+      env,
+      'DISPATCHER_MAX_RESPONSE_BYTES',
+      DEFAULTS.dispatcherMaxResponseBytes,
+      { min: 64 * 1024, max: 512 * 1024 * 1024 },
     ),
     consoleContractMode: parseBooleanEnv(env, 'LOCALDECK_CONSOLE_CONTRACT', false),
   };

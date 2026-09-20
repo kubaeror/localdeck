@@ -227,7 +227,9 @@ export function GroupMembersTab({ groupName }: GroupMembersTabProps): ReactEleme
           href={`${serviceConsolePath('iam')}/users/${encodeURIComponent(user.userName)}`}
           onFollow={(event) => {
             event.preventDefault();
-            navigate(`${serviceConsolePath('iam')}/users/${encodeURIComponent(user.userName)}`);
+            void navigate(
+              `${serviceConsolePath('iam')}/users/${encodeURIComponent(user.userName)}`,
+            );
           }}
         >
           {user.userName}

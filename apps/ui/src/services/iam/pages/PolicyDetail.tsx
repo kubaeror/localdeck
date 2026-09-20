@@ -68,7 +68,9 @@ function EntityTable({ title, items, segment, loading }: EntityTableProps): Reac
           href={`${serviceConsolePath('iam')}/${segment}/${encodeURIComponent(entity.name)}`}
           onFollow={(event) => {
             event.preventDefault();
-            navigate(`${serviceConsolePath('iam')}/${segment}/${encodeURIComponent(entity.name)}`);
+            void navigate(
+              `${serviceConsolePath('iam')}/${segment}/${encodeURIComponent(entity.name)}`,
+            );
           }}
         >
           {entity.name}
@@ -302,7 +304,7 @@ export function PolicyDetailPage({ descriptor }: ServicePageProps): ReactElement
         content: policy?.policyName ?? policyArn,
       });
       setDeleteVisible(false);
-      navigate(`${serviceConsolePath(descriptor.id)}/policies`);
+      void navigate(`${serviceConsolePath(descriptor.id)}/policies`);
     } catch (caught) {
       setDeleteError(toFriendlyIamError(caught).message);
     } finally {

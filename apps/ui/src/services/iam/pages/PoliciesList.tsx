@@ -39,7 +39,7 @@ export function PoliciesListPage({ descriptor }: ServicePageProps): ReactElement
 
   const openPolicy = useCallback(
     (policyArn: string) => {
-      navigate(policyPath(policyArn));
+      void navigate(policyPath(policyArn));
     },
     [navigate, policyPath],
   );
@@ -159,7 +159,7 @@ export function PoliciesListPage({ descriptor }: ServicePageProps): ReactElement
           <Button
             variant="primary"
             onClick={() => {
-              navigate(`${serviceConsolePath(descriptor.id)}/policies/create`);
+              void navigate(`${serviceConsolePath(descriptor.id)}/policies/create`);
             }}
           >
             Create policy

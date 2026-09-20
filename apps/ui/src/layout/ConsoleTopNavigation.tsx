@@ -200,7 +200,7 @@ export function ConsoleTopNavigation({ onOpenHelp }: ConsoleTopNavigationProps):
         title: 'LocalDeck',
         onFollow: (event) => {
           event.preventDefault();
-          navigate(CONSOLE_HOME_PATH);
+          void navigate(CONSOLE_HOME_PATH);
         },
       }}
       i18nStrings={{ overflowMenuTriggerText: 'More', overflowMenuTitleText: 'All' }}

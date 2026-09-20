@@ -248,7 +248,7 @@ export function NodegroupsTab({ cluster }: NodegroupsTabProps): ReactElement {
 
   const openInstance = useCallback(
     (instanceId: string) => {
-      navigate(`${serviceConsolePath('ec2')}/instances/${encodeURIComponent(instanceId)}`);
+      void navigate(`${serviceConsolePath('ec2')}/instances/${encodeURIComponent(instanceId)}`);
     },
     [navigate],
   );

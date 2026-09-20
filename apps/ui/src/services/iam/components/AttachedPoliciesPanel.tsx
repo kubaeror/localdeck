@@ -99,7 +99,7 @@ export function AttachedPoliciesPanel({ entity, name }: AttachedPoliciesPanelPro
           href={`${serviceConsolePath('iam')}/policies/${encodeURIComponent(policy.policyArn)}`}
           onFollow={(event) => {
             event.preventDefault();
-            navigate(
+            void navigate(
               `${serviceConsolePath('iam')}/policies/${encodeURIComponent(policy.policyArn)}`,
             );
           }}

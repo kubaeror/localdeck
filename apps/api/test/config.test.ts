@@ -178,4 +178,27 @@ describe('loadConfig', () => {
   it('exposes the ui poll interval', () => {
     expect(loadConfig({ UI_STATUS_POLL_INTERVAL_MS: '5000' }).statusPollIntervalMs).toBe(5000);
   });
+
+  it('bounds the api rate limit and the dispatcher response size', () => {
+    const config = loadConfig({});
+    expect(config.rateLimitMax).toBe(1_200);
+    expect(config.rateLimitWindowMs).toBe(60_000);
+    expect(config.dispatcherMaxResponseBytes).toBe(16 * 1024 * 1024);
+
+    const tuned = loadConfig({
+      RATE_LIMIT_MAX: '60',
+      RATE_LIMIT_WINDOW_MS: '10000',
+      DISPATCHER_MAX_RESPONSE_BYTES: '1048576',
+    });
+    expect(tuned.rateLimitMax).toBe(60);
+    expect(tuned.rateLimitWindowMs).toBe(10_000);
+    expect(tuned.dispatcherMaxResponseBytes).toBe(1_048_576);
+
+    // 0 disables the limiter; out-of-range values fail fast at startup.
+    expect(loadConfig({ RATE_LIMIT_MAX: '0' }).rateLimitMax).toBe(0);
+    expect(() => loadConfig({ RATE_LIMIT_MAX: '-1' })).toThrow(ConfigurationError);
+    expect(() => loadConfig({ DISPATCHER_MAX_RESPONSE_BYTES: '1024' })).toThrow(
+      /DISPATCHER_MAX_RESPONSE_BYTES/,
+    );
+  });
 });

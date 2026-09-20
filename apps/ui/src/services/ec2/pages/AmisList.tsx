@@ -80,7 +80,7 @@ export function AmisListPage({ descriptor }: ServicePageProps): ReactElement {
             href={imagePath(image.imageId)}
             onFollow={(event) => {
               event.preventDefault();
-              navigate(imagePath(image.imageId));
+              void navigate(imagePath(image.imageId));
             }}
           >
             {image.name ?? '—'}
@@ -96,7 +96,7 @@ export function AmisListPage({ descriptor }: ServicePageProps): ReactElement {
             href={imagePath(image.imageId)}
             onFollow={(event) => {
               event.preventDefault();
-              navigate(imagePath(image.imageId));
+              void navigate(imagePath(image.imageId));
             }}
           >
             <Box variant="code" display="inline">
@@ -206,8 +206,8 @@ export function AmisListPage({ descriptor }: ServicePageProps): ReactElement {
             { id: 'copy', text: 'Copy AMI ID' },
           ]}
           onItemClick={({ detail }) => {
-            if (detail.id === 'launch') navigate(launchPath(image.imageId));
-            if (detail.id === 'view') navigate(imagePath(image.imageId));
+            if (detail.id === 'launch') void navigate(launchPath(image.imageId));
+            if (detail.id === 'view') void navigate(imagePath(image.imageId));
             if (detail.id === 'copy') void copyImageId(image.imageId);
           }}
         />

@@ -29,8 +29,9 @@ interface StubLocalStack {
 /**
  * A minimal S3-shaped stub. Recording request lines lets the tests prove the
  * dispatcher used path-style addressing (bucket in the path, not the host).
+ * `listXml` overrides the ListBuckets document for size-cap tests.
  */
-async function startStubLocalStack(): Promise<StubLocalStack> {
+async function startStubLocalStack(listXml: string = LIST_BUCKETS_XML): Promise<StubLocalStack> {
   const requests: RecordedRequest[] = [];
 
   const server: Server = createServer((request, response) => {
@@ -38,7 +39,7 @@ async function startStubLocalStack(): Promise<StubLocalStack> {
 
     if (request.method === 'GET' && (request.url === '/' || request.url?.startsWith('/?'))) {
       response.writeHead(200, { 'content-type': 'application/xml' });
-      response.end(LIST_BUCKETS_XML);
+      response.end(listXml);
       return;
     }
 
@@ -283,5 +284,90 @@ describe('service operation dispatcher', () => {
     const body = response.json<ApiErrorResponse>();
     expect(body.error.code).toBe('VALIDATION_FAILED');
     expect(body.error.details?.['reason']).toBe('sdk-input-serialization');
+  });
+});
+
+/** A ListBuckets document big enough to cross a 64 KiB serialized cap. */
+function oversizedListBucketsXml(count: number): string {
+  const buckets = Array.from(
+    { length: count },
+    (_, index) =>
+      `<Bucket><Name>bucket-${String(index).padStart(5, '0')}</Name>` +
+      '<CreationDate>2026-01-02T03:04:05.000Z</CreationDate></Bucket>',
+  ).join('');
+  return (
+    '<?xml version="1.0" encoding="UTF-8"?>\n' +
+    '<ListAllMyBucketsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">\n' +
+    `  <Owner><ID>localdeck-test</ID><DisplayName>localdeck</DisplayName></Owner>\n` +
+    `  <Buckets>${buckets}</Buckets>\n` +
+    '</ListAllMyBucketsResult>'
+  );
+}
+
+describe('dispatcher response size cap', () => {
+  it('answers 502 EMULATOR_RESPONSE_TOO_LARGE instead of relaying an oversized result', async () => {
+    const bigStub = await startStubLocalStack(oversizedListBucketsXml(4_000));
+    const cappedApp = await buildApp({
+      config: loadConfig({
+        ...process.env,
+        NODE_ENV: 'test',
+        LOCALSTACK_ENDPOINT: bigStub.url,
+        DISPATCHER_MAX_RESPONSE_BYTES: '65536',
+      }),
+      logger: false,
+    });
+    await cappedApp.ready();
+
+    try {
+      const response = await cappedApp.inject({
+        method: 'POST',
+        url: '/api/services/s3/ListBuckets',
+        payload: { input: {} },
+      });
+
+      expect(response.statusCode).toBe(502);
+      const body = response.json<ApiErrorResponse>();
+      expect(body.error.code).toBe('EMULATOR_RESPONSE_TOO_LARGE');
+      expect(body.error.statusCode).toBe(502);
+      expect(body.error.service).toBe('s3');
+      expect(body.error.details?.['limitBytes']).toBe(65_536);
+      expect(body.error.details?.['bytes']).toBeGreaterThan(65_536);
+      // The client gets the error contract, not a truncated bucket list.
+      expect(response.body).not.toContain('bucket-00000');
+    } finally {
+      await cappedApp.close();
+      await bigStub.close();
+    }
+  });
+
+  it('relays a large-but-allowed result untouched', async () => {
+    const bigStub = await startStubLocalStack(oversizedListBucketsXml(4_000));
+    const roomyApp = await buildApp({
+      config: loadConfig({
+        ...process.env,
+        NODE_ENV: 'test',
+        LOCALSTACK_ENDPOINT: bigStub.url,
+        DISPATCHER_MAX_RESPONSE_BYTES: '1048576',
+      }),
+      logger: false,
+    });
+    await roomyApp.ready();
+
+    try {
+      const response = await roomyApp.inject({
+        method: 'POST',
+        url: '/api/services/s3/ListBuckets',
+        payload: { input: {} },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = response.json<ServiceOperationResponse>();
+      const result = body.result as { Buckets: { Name: string }[] };
+      expect(result.Buckets).toHaveLength(4_000);
+      expect(result.Buckets[0]?.Name).toBe('bucket-00000');
+    } finally {
+      await roomyApp.close();
+      await bigStub.close();
+    }
   });
 });

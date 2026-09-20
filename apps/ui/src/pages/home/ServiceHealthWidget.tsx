@@ -162,7 +162,7 @@ export function ServiceHealthWidget({ onRemove }: ConsoleWidgetProps): ReactElem
           href={SERVICE_HEALTH_PATH}
           onFollow={(event) => {
             event.preventDefault();
-            navigate(SERVICE_HEALTH_PATH);
+            void navigate(SERVICE_HEALTH_PATH);
           }}
         >
           View service health
@@ -171,7 +171,7 @@ export function ServiceHealthWidget({ onRemove }: ConsoleWidgetProps): ReactElem
           href={ALL_SERVICES_PATH}
           onFollow={(event) => {
             event.preventDefault();
-            navigate(ALL_SERVICES_PATH);
+            void navigate(ALL_SERVICES_PATH);
           }}
         >
           Compare the registry with this emulator

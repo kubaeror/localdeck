@@ -75,7 +75,7 @@ export function DashboardPage({ descriptor }: ServicePageProps): ReactElement {
   }, [load]);
 
   const open = (path: string) => {
-    navigate(`${serviceConsolePath(descriptor.id)}/${path}`);
+    void navigate(`${serviceConsolePath(descriptor.id)}/${path}`);
   };
 
   const cards: readonly { title: string; count: number; label: string; path: string }[] =

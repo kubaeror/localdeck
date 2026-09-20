@@ -81,7 +81,7 @@ export function RoleDetailPage({ descriptor }: ServicePageProps): ReactElement {
       await deleteRole(roleName);
       flashbar.notify({ type: 'success', header: 'Role deleted', content: roleName });
       setDeleteVisible(false);
-      navigate(`${serviceConsolePath(descriptor.id)}/roles`);
+      void navigate(`${serviceConsolePath(descriptor.id)}/roles`);
     } catch (caught) {
       setDeleteError(toFriendlyIamError(caught).message);
     } finally {

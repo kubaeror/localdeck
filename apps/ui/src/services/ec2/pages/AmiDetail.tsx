@@ -127,7 +127,7 @@ export function AmiDetailPage({ descriptor }: ServicePageProps): ReactElement {
         <Button
           variant="primary"
           onClick={() => {
-            navigate(launchPath);
+            void navigate(launchPath);
           }}
         >
           Launch instance from AMI

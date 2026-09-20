@@ -70,7 +70,7 @@ export function DetailPage({ descriptor }: ServicePageProps): ReactElement {
       await deleteBucket(bucketName);
       flashbar.notify({ type: 'success', header: 'Bucket deleted', content: bucketName });
       setDeleteVisible(false);
-      navigate(serviceConsolePath(descriptor.id));
+      void navigate(serviceConsolePath(descriptor.id));
     } catch (caught) {
       setDeleteError(toFriendlyS3Error(caught).message);
     } finally {

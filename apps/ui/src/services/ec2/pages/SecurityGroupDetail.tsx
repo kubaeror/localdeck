@@ -116,7 +116,7 @@ export function SecurityGroupDetailPage({ descriptor }: ServicePageProps): React
       await deleteSecurityGroup(groupId);
       flashbar.notify({ type: 'success', header: 'Security group deleted', content: groupId });
       setDeleteVisible(false);
-      navigate(`${serviceConsolePath(descriptor.id)}/security-groups`);
+      void navigate(`${serviceConsolePath(descriptor.id)}/security-groups`);
     } catch (caught) {
       setDeleteError(toFriendlyEc2Error(caught).message);
     } finally {

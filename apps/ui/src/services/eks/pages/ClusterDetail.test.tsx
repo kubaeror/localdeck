@@ -137,7 +137,7 @@ function SwitchToSecondCluster(): ReactElement {
     <button
       type="button"
       onClick={() => {
-        navigate('/console/eks/clusters/second-cluster');
+        void navigate('/console/eks/clusters/second-cluster');
       }}
     >
       Open second cluster

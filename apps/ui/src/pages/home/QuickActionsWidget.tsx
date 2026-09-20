@@ -45,7 +45,7 @@ export function QuickActionsWidget({ onRemove }: ConsoleWidgetProps): ReactEleme
         <Button
           iconName="status-info"
           onClick={() => {
-            navigate(SERVICE_HEALTH_PATH);
+            void navigate(SERVICE_HEALTH_PATH);
           }}
         >
           View service health
@@ -53,7 +53,7 @@ export function QuickActionsWidget({ onRemove }: ConsoleWidgetProps): ReactEleme
         <Button
           iconName="list-view"
           onClick={() => {
-            navigate(ALL_SERVICES_PATH);
+            void navigate(ALL_SERVICES_PATH);
           }}
         >
           Browse all services

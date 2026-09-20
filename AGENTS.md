@@ -80,6 +80,11 @@ SERVICE MODULE ARCHITECTURE:
   (endpoint, service, operation) and answered with
   `EMULATOR_OPERATION_UNSUPPORTED` (501); the ui disables the action with an
   explanation instead of repeating the call.
+- The api is an unauthenticated management proxy. Keep CORS same-origin by
+  default, keep the `/api/*` rate limiter (`RATE_LIMIT_MAX`, `0` disables) and
+  the dispatcher response cap (`DISPATCHER_MAX_RESPONSE_BYTES`, answered as
+  `EMULATOR_RESPONSE_TOO_LARGE` 502) in place, and never add an `/api` route
+  that bypasses them.
 
 ICONS & ASSETS:
 

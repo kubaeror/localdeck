@@ -57,7 +57,7 @@ export function GroupsListPage({ descriptor }: ServicePageProps): ReactElement {
 
   const openGroup = useCallback(
     (groupName: string) => {
-      navigate(groupPath(groupName));
+      void navigate(groupPath(groupName));
     },
     [navigate, groupPath],
   );
@@ -152,7 +152,7 @@ export function GroupsListPage({ descriptor }: ServicePageProps): ReactElement {
           <Button
             variant="primary"
             onClick={() => {
-              navigate(`${serviceConsolePath(descriptor.id)}/groups/create`);
+              void navigate(`${serviceConsolePath(descriptor.id)}/groups/create`);
             }}
           >
             Create group

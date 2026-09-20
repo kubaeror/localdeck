@@ -611,7 +611,7 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
   };
 
   const leave = (): void => {
-    navigate(`${serviceConsolePath(descriptor.id)}/instances`);
+    void navigate(`${serviceConsolePath(descriptor.id)}/instances`);
   };
 
   const imageColumns: readonly TableProps.ColumnDefinition<Ec2Image>[] = [
@@ -1555,7 +1555,7 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
         <Modal
           visible
           onDismiss={() => {
-            navigate(instancePath);
+            void navigate(instancePath);
           }}
           header={
             createdKeyPair === null
@@ -1579,7 +1579,7 @@ export function InstanceCreatePage({ descriptor }: ServicePageProps): ReactEleme
                 <Button
                   variant="primary"
                   onClick={() => {
-                    navigate(instancePath);
+                    void navigate(instancePath);
                   }}
                 >
                   View instance

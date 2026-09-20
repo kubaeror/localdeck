@@ -339,7 +339,9 @@ export function ClusterCreatePage({ descriptor }: ServicePageProps): ReactElemen
         content:
           'LocalStack is starting a k3d Kubernetes control plane. This usually takes a few minutes; the cluster page reports progress.',
       });
-      navigate(`${serviceConsolePath(descriptor.id)}/clusters/${encodeURIComponent(created.name)}`);
+      void navigate(
+        `${serviceConsolePath(descriptor.id)}/clusters/${encodeURIComponent(created.name)}`,
+      );
     } catch (caught) {
       const friendly = toFriendlyEksError(caught);
       setError({ ...friendly.apiError, message: friendly.message });
@@ -362,7 +364,7 @@ export function ClusterCreatePage({ descriptor }: ServicePageProps): ReactElemen
   };
 
   const leave = (): void => {
-    navigate(serviceConsolePath(descriptor.id));
+    void navigate(serviceConsolePath(descriptor.id));
   };
 
   const configurationStep = (

@@ -66,7 +66,7 @@ export function GenericResourceCreate({ descriptor }: ServicePageProps): ReactEl
           actions={
             <Button
               onClick={() => {
-                navigate(serviceConsolePath(descriptor.id));
+                void navigate(serviceConsolePath(descriptor.id));
               }}
             >
               Back to resources

@@ -376,6 +376,11 @@ curl -s -X POST http://localhost:3001/api/services/s3/ListBuckets \
   clients (endpoint, region, credentials from env, `forcePathStyle` for S3). The
   dispatcher and the static helpers all go through it, and a test fails the
   build if any other file imports a `*Client` class.
+- `/api/*` is rate-limited per client IP (`RATE_LIMIT_MAX` per
+  `RATE_LIMIT_WINDOW_MS`, `0` disables) and a dispatcher result above
+  `DISPATCHER_MAX_RESPONSE_BYTES` answers `502 EMULATOR_RESPONSE_TOO_LARGE`
+  instead of streaming hundreds of megabytes into the tab. Static/SPA paths are
+  never limited.
 
 ## Verifying the console against LocalStack
 
@@ -769,6 +774,9 @@ terminal if you are changing shared types.
 | `LOCALDECK_CONSOLE_CONTRACT`     | `0`                     | Floci Console Contract v1 mode: unreachable answers 200 `status: unavailable` on `/api/health`. The sidecar image sets it to `1`. |
 | `SHUTDOWN_TIMEOUT_MS`            | `10000`                 | Graceful-shutdown deadline before a forced exit.                                                                                  |
 | `UI_STATUS_POLL_INTERVAL_MS`     | `15000`                 | Status refresh interval reported to the ui.                                                                                       |
+| `RATE_LIMIT_MAX`                 | `1200`                  | Requests per client IP per window on `/api/*` (static/SPA paths are never limited); `0` disables the limiter.                     |
+| `RATE_LIMIT_WINDOW_MS`           | `60000`                 | Rate-limit window; 429 answers carry `retry-after` and the `x-ratelimit-*` headers.                                               |
+| `DISPATCHER_MAX_RESPONSE_BYTES`  | `16777216`              | Largest serialized dispatcher result LocalDeck relays; bigger ones answer 502 `EMULATOR_RESPONSE_TOO_LARGE`.                      |
 
 The ui has one build-time value: `VITE_API_BASE_URL` is compiled into the
 bundle by Vite (empty means same-origin `/api`). It is not read at runtime — in

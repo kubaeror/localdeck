@@ -181,7 +181,7 @@ export function VolumeCreatePage({ descriptor }: ServicePageProps): ReactElement
         header: 'Volume created',
         content: created.name ?? created.volumeId,
       });
-      navigate(
+      void navigate(
         `${serviceConsolePath(descriptor.id)}/volumes/${encodeURIComponent(created.volumeId)}`,
       );
     } catch (caught) {
@@ -446,7 +446,7 @@ export function VolumeCreatePage({ descriptor }: ServicePageProps): ReactElement
       error={error}
       onSubmit={submit}
       onCancel={() => {
-        navigate(`${serviceConsolePath(descriptor.id)}/volumes`);
+        void navigate(`${serviceConsolePath(descriptor.id)}/volumes`);
       }}
       onStepChange={setActiveStepIndex}
     />

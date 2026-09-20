@@ -75,7 +75,7 @@ export function GlobalSearchPalette({ onDismiss }: GlobalSearchPaletteProps): Re
 
   const openService = (service: ServiceDescriptor): void => {
     onDismiss();
-    navigate(serviceConsolePath(service.id));
+    void navigate(serviceConsolePath(service.id));
   };
 
   const moveActive = (offset: number): void => {

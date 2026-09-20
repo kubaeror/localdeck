@@ -208,7 +208,7 @@ export function GenericResourceDetail({ descriptor }: ServicePageProps): ReactEl
         header: `${title} deleted`,
         content: `The ${descriptor.displayName} delete operation was accepted.`,
       });
-      navigate(serviceConsolePath(descriptor.id));
+      void navigate(serviceConsolePath(descriptor.id));
     } catch (caught) {
       setDeleteError(toApiError(caught).message);
     } finally {
@@ -375,7 +375,7 @@ export function GenericResourceDetail({ descriptor }: ServicePageProps): ReactEl
           href={serviceConsolePath(descriptor.id)}
           onFollow={(event) => {
             event.preventDefault();
-            navigate(serviceConsolePath(descriptor.id));
+            void navigate(serviceConsolePath(descriptor.id));
           }}
         >
           Back to {descriptor.displayName} resources

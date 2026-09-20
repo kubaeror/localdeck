@@ -48,7 +48,7 @@ export function PolicyCreatePage({ descriptor }: ServicePageProps): ReactElement
   const [confirmFullAdmin, setConfirmFullAdmin] = useState(false);
 
   const leave = (): void => {
-    navigate(`${serviceConsolePath(descriptor.id)}/policies`);
+    void navigate(`${serviceConsolePath(descriptor.id)}/policies`);
   };
 
   const documentProblem = (): string | null => {
@@ -73,7 +73,7 @@ export function PolicyCreatePage({ descriptor }: ServicePageProps): ReactElement
       flashbar.notify({ type: 'success', header: 'Policy created', content: policyName });
       setSubmitting(false);
       setConfirmFullAdmin(false);
-      navigate(
+      void navigate(
         policy.arn === undefined
           ? `${serviceConsolePath(descriptor.id)}/policies`
           : `${serviceConsolePath(descriptor.id)}/policies/${encodeURIComponent(policy.arn)}`,

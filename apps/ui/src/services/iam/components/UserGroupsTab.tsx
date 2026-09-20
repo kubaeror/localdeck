@@ -235,7 +235,9 @@ export function UserGroupsTab({ userName }: UserGroupsTabProps): ReactElement {
           href={`${serviceConsolePath('iam')}/groups/${encodeURIComponent(group.groupName)}`}
           onFollow={(event) => {
             event.preventDefault();
-            navigate(`${serviceConsolePath('iam')}/groups/${encodeURIComponent(group.groupName)}`);
+            void navigate(
+              `${serviceConsolePath('iam')}/groups/${encodeURIComponent(group.groupName)}`,
+            );
           }}
         >
           {group.groupName}

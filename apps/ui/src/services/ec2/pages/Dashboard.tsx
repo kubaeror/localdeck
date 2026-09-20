@@ -105,7 +105,7 @@ export function DashboardPage({ descriptor }: ServicePageProps): ReactElement {
   };
 
   const open = (path: string) => {
-    navigate(`${serviceConsolePath(descriptor.id)}/${path}`);
+    void navigate(`${serviceConsolePath(descriptor.id)}/${path}`);
   };
 
   const counts = data?.counts ?? null;

@@ -40,7 +40,7 @@ export function SecurityGroupsListPage({ descriptor }: ServicePageProps): ReactE
 
   const openGroup = useCallback(
     (groupId: string) => {
-      navigate(groupPath(groupId));
+      void navigate(groupPath(groupId));
     },
     [navigate, groupPath],
   );

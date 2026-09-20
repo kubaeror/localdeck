@@ -63,7 +63,7 @@ function DetailHarness(): JSX.Element {
     <>
       <button
         onClick={() => {
-          navigate('/console/detail-test/resources/B');
+          void navigate('/console/detail-test/resources/B');
         }}
       >
         open B

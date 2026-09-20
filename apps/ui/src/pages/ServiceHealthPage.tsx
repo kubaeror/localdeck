@@ -136,7 +136,7 @@ export function ServiceHealthPage(): ReactElement {
                 actions={
                   <Button
                     onClick={() => {
-                      navigate(ALL_SERVICES_PATH);
+                      void navigate(ALL_SERVICES_PATH);
                     }}
                   >
                     All services
@@ -157,7 +157,7 @@ export function ServiceHealthPage(): ReactElement {
                     href={serviceConsolePath(service.id)}
                     onFollow={(event) => {
                       event.preventDefault();
-                      navigate(serviceConsolePath(service.id));
+                      void navigate(serviceConsolePath(service.id));
                     }}
                   >
                     {service.displayName}
@@ -179,7 +179,7 @@ export function ServiceHealthPage(): ReactElement {
                 actions={
                   <Button
                     onClick={() => {
-                      navigate(ALL_SERVICES_PATH);
+                      void navigate(ALL_SERVICES_PATH);
                     }}
                   >
                     All services
@@ -200,7 +200,7 @@ export function ServiceHealthPage(): ReactElement {
                     href={serviceConsolePath(service.id)}
                     onFollow={(event) => {
                       event.preventDefault();
-                      navigate(serviceConsolePath(service.id));
+                      void navigate(serviceConsolePath(service.id));
                     }}
                   >
                     {service.displayName}

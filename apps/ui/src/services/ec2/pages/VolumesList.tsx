@@ -77,7 +77,7 @@ export function VolumesListPage({ descriptor }: ServicePageProps): ReactElement 
 
   const openVolume = useCallback(
     (volumeId: string) => {
-      navigate(volumePath(volumeId));
+      void navigate(volumePath(volumeId));
     },
     [navigate, volumePath],
   );
@@ -154,7 +154,7 @@ export function VolumesListPage({ descriptor }: ServicePageProps): ReactElement 
               href={instancePath(attachment.instanceId)}
               onFollow={(event) => {
                 event.preventDefault();
-                navigate(instancePath(attachment.instanceId));
+                void navigate(instancePath(attachment.instanceId));
               }}
             >
               {attachment.instanceId}
@@ -250,7 +250,7 @@ export function VolumesListPage({ descriptor }: ServicePageProps): ReactElement 
           <Button
             variant="primary"
             onClick={() => {
-              navigate(`${serviceConsolePath(descriptor.id)}/volumes/create`);
+              void navigate(`${serviceConsolePath(descriptor.id)}/volumes/create`);
             }}
           >
             Create volume

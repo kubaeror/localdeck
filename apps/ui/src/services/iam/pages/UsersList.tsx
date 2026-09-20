@@ -40,7 +40,7 @@ export function UsersListPage({ descriptor }: ServicePageProps): ReactElement {
 
   const openUser = useCallback(
     (userName: string) => {
-      navigate(userPath(userName));
+      void navigate(userPath(userName));
     },
     [navigate, userPath],
   );
@@ -114,7 +114,7 @@ export function UsersListPage({ descriptor }: ServicePageProps): ReactElement {
           <Button
             variant="primary"
             onClick={() => {
-              navigate(`${serviceConsolePath(descriptor.id)}/users/create`);
+              void navigate(`${serviceConsolePath(descriptor.id)}/users/create`);
             }}
           >
             Create user

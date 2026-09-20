@@ -29,7 +29,7 @@ export function ListPage({ descriptor }: ServicePageProps): ReactElement {
 
   const openBucket = useCallback(
     (bucket: string) => {
-      navigate(`${serviceConsolePath(descriptor.id)}/buckets/${encodeURIComponent(bucket)}`);
+      void navigate(`${serviceConsolePath(descriptor.id)}/buckets/${encodeURIComponent(bucket)}`);
     },
     [descriptor.id, navigate],
   );
@@ -132,7 +132,7 @@ export function ListPage({ descriptor }: ServicePageProps): ReactElement {
           <Button
             variant="primary"
             onClick={() => {
-              navigate(`${serviceConsolePath(descriptor.id)}/create`);
+              void navigate(`${serviceConsolePath(descriptor.id)}/create`);
             }}
           >
             Create bucket

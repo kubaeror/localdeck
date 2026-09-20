@@ -1,5 +1,6 @@
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
+import rateLimit from '@fastify/rate-limit';
 import { ApiErrorCodes, getEmulatorProvider, type ApiErrorResponse } from '@localdeck/shared';
 import Fastify, {
   type FastifyInstance,
@@ -8,7 +9,7 @@ import Fastify, {
   type FastifyServerOptions,
 } from 'fastify';
 import { getConfig, type AppConfig } from './config.js';
-import { toApiError } from './lib/errors.js';
+import { ApiProblem, toApiError } from './lib/errors.js';
 import { registerConfigRoutes } from './routes/config.js';
 import { registerDispatcherRoutes } from './routes/dispatcher.js';
 import { registerEksRoutes } from './routes/eks.js';
@@ -85,6 +86,16 @@ export function errorContext(config: AppConfig): {
       };
 }
 
+/**
+ * True for the proxy surface (`/api` and `/api/...`). Everything else is a
+ * static/SPA path (the console sidecar serves the built ui), which must never
+ * be throttled: one page load fetches dozens of hashed chunks.
+ */
+function isApiPath(url: string): boolean {
+  const path = url.split('?')[0] ?? url;
+  return path === '/api' || path.startsWith('/api/');
+}
+
 export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyInstance> {
   const config = options.config ?? getConfig();
   const logger: FastifyServerOptions['logger'] = options.logger ?? createLoggerOptions(config);
@@ -122,8 +133,46 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       'x-localdeck-presigned-expires',
       'x-localdeck-kubeconfig',
       'x-localdeck-kubeconfig-endpoint',
+      'retry-after',
+      'x-ratelimit-limit',
+      'x-ratelimit-remaining',
+      'x-ratelimit-reset',
     ],
   });
+
+  // The api is an unauthenticated management proxy: a browser bug or a local
+  // script must not be able to hammer the emulator without bound. RATE_LIMIT_MAX=0
+  // disables the limiter for operators that front the api with their own gateway.
+  if (config.rateLimitMax > 0) {
+    await app.register(rateLimit, {
+      global: true,
+      max: config.rateLimitMax,
+      timeWindow: config.rateLimitWindowMs,
+      allowList: (request) => !isApiPath(request.url),
+      errorResponseBuilder: (request, context) => {
+        const retryAfterSeconds = Math.max(1, Math.ceil(context.ttl / 1000));
+        request.log.warn(
+          { rateLimitMax: context.max, retryAfterSeconds, url: request.url },
+          'rate limit exceeded',
+        );
+        // Returned to Fastify as a thrown error, so it must be an Error that
+        // the shared error handler already understands.
+        return new ApiProblem({
+          code: ApiErrorCodes.rateLimited,
+          statusCode: context.statusCode,
+          message:
+            `LocalDeck received more than ${context.max} requests in ` +
+            `${Math.round(config.rateLimitWindowMs / 1000)}s from this client. ` +
+            `Retry in ${retryAfterSeconds}s, or raise RATE_LIMIT_MAX.`,
+          details: {
+            max: context.max,
+            windowMs: config.rateLimitWindowMs,
+            retryAfterSeconds,
+          },
+        });
+      },
+    });
+  }
 
   // Object uploads arrive as multipart/form-data. Limits mirror S3's single
   // object maximum; the S3 upload route streams the part into S3 (multipart
@@ -221,7 +270,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   registerHealthRoutes(app, config);
   registerConfigRoutes(app, config);
   registerServiceRoutes(app);
-  registerDispatcherRoutes(app, clientOverrides);
+  registerDispatcherRoutes(app, clientOverrides, {
+    maxResponseBytes: config.dispatcherMaxResponseBytes,
+  });
   registerS3Routes(app, clientOverrides);
   registerEksRoutes(app, {
     ...clientOverrides,
