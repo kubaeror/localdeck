@@ -30,7 +30,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # A release tag must point at a committed tree: nothing staged, modified
       # or untracked may ride along in the release. (A fresh checkout is clean;
@@ -102,7 +102,7 @@ jobs:
             dockerfile: apps/console/Dockerfile
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
