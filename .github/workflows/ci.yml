@@ -235,7 +235,7 @@ jobs:
 
       - name: Upload the Playwright report
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-report-${{ matrix.emulator }}
           path: |
@@ -404,7 +404,7 @@ jobs:
 
       - name: Upload the generated screenshots
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: docs-screens
           path: docs/screens/
@@ -412,7 +412,7 @@ jobs:
 
       - name: Upload the container Playwright report
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: container-playwright-report
           path: |
