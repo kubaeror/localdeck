@@ -5,7 +5,7 @@
 # node:22-alpine index digest: sha256:b6f26b36c8ff49624cfdac716b8ea1138d606df02586a77d364bb5536a634f85
 
 # --- Build stage: install the workspace, compile shared + api ----------------
-FROM node:22-alpine@sha256:b6f26b36c8ff49624cfdac716b8ea1138d606df02586a77d364bb5536a634f85 AS build
+FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS build
 
 # Corepack ships with Node and activates the exact pnpm version pinned in the
 # root package.json (`packageManager`), so the build never installs pnpm from a
@@ -30,7 +30,7 @@ RUN pnpm --filter @localdeck/shared build && pnpm --filter @localdeck/api build
 
 # --- Production-dependency stage: pruned api + shared node_modules -----------
 # Kept separate so the runtime image needs neither pnpm nor the build toolchain.
-FROM node:22-alpine@sha256:b6f26b36c8ff49624cfdac716b8ea1138d606df02586a77d364bb5536a634f85 AS deps
+FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS deps
 RUN corepack enable
 WORKDIR /repo
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json .npmrc ./
@@ -40,7 +40,7 @@ RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile --prod --filter @localdeck/api...
 
 # --- Runtime stage: dist + production node_modules, no package manager -------
-FROM node:22-alpine@sha256:b6f26b36c8ff49624cfdac716b8ea1138d606df02586a77d364bb5536a634f85 AS runtime
+FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS runtime
 
 # Release builds pass the git tag; local/compose builds default to `dev`.
 ARG APP_VERSION=dev
